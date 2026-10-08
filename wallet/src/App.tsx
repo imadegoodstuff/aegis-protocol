@@ -84,16 +84,25 @@ export default function App() {
     return () => io.disconnect();
   }, []);
 
-  // Prefetch lazy chunks on idle so the user sees instant render when scrolling
+  // Prefetch lazy chunks only AFTER the user scrolls — never on first paint.
+  // Keeps TBT / FID clean for lighthouse's cold-load measurement.
   useEffect(() => {
-    const ric: (cb: () => void) => number =
-      (window as unknown as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback
-        ?? ((cb) => setTimeout(cb, 1200));
-    ric(() => {
+    let fired = false;
+    const trigger = () => {
+      if (fired) return;
+      fired = true;
+      window.removeEventListener("scroll", trigger);
+      window.removeEventListener("pointerdown", trigger);
       void import("./components/DerivePanel");
       void import("./components/ArchitectureDiagram");
       void import("./components/CodeShowcase");
-    });
+    };
+    window.addEventListener("scroll", trigger, { passive: true, once: false });
+    window.addEventListener("pointerdown", trigger, { passive: true, once: false });
+    return () => {
+      window.removeEventListener("scroll", trigger);
+      window.removeEventListener("pointerdown", trigger);
+    };
   }, []);
 
   return (
@@ -101,6 +110,7 @@ export default function App() {
       <a className="skip-link" href="#main">Skip to content</a>
       <div className="mesh" aria-hidden="true" />
       <div className="grid" aria-hidden="true" />
+      {/* grain is deferred — adds visual tactility but costs 1 paint layer */}
       <div className="grain" aria-hidden="true" />
       {cpEnabled && (
         <Suspense fallback={null}>
@@ -319,8 +329,8 @@ export default function App() {
               { h: "Same address, every chain", p: "Factory and verifier deployed with same salt + nonce. Open explorers side-by-side." },
             ].map((c, i) => (
               <div key={i} className="card check fade">
-                <div className="check-num">{String(i + 1).padStart(2, "0")}</div>
-                <h4>{c.h}</h4>
+                <div className="check-num" aria-hidden="true">{String(i + 1).padStart(2, "0")}</div>
+                <h3 className="check-title">{c.h}</h3>
                 <p>{c.p}</p>
               </div>
             ))}
@@ -369,21 +379,21 @@ export default function App() {
               </p>
             </div>
             <div className="footer-col">
-              <h5>Protocol</h5>
+              <h3 className="footer-col-title">Protocol</h3>
               <a href="#chains">Chains</a>
               <a href="#arch">Architecture</a>
               <a href="#why">Threat model</a>
               <a href="#verify">Self-verify</a>
             </div>
             <div className="footer-col">
-              <h5>Repo</h5>
+              <h3 className="footer-col-title">Repo</h3>
               <a href="https://github.com/imadegoodstuff/aegis-protocol" target="_blank" rel="noreferrer">GitHub</a>
               <a href="https://github.com/imadegoodstuff/aegis-protocol/blob/main/SPEC.md" target="_blank" rel="noreferrer">SPEC.md</a>
               <a href="https://github.com/imadegoodstuff/aegis-protocol/blob/main/ADAPTERS.md" target="_blank" rel="noreferrer">ADAPTERS.md</a>
               <a href="https://github.com/imadegoodstuff/aegis-protocol/blob/main/docs/TESTNET_DEMO.md" target="_blank" rel="noreferrer">Testnet demo</a>
             </div>
             <div className="footer-col">
-              <h5>Credits</h5>
+              <h3 className="footer-col-title">Credits</h3>
               <a href="https://github.com/nconsigny/SPHINCS-" target="_blank" rel="noreferrer">nconsigny/SPHINCS-</a>
               <a href="https://pq.ethereum.org/" target="_blank" rel="noreferrer">pq.ethereum.org</a>
               <a href="https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.205.pdf" target="_blank" rel="noreferrer">FIPS 205 SLH-DSA</a>

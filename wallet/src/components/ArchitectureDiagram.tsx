@@ -53,8 +53,8 @@ export default function ArchitectureDiagram() {
   return (
     <div className="card arch">
       <div className="arch-stage">
-        <div className="arch-col">
-          <h5>Seed</h5>
+        <div className="arch-col" role="group" aria-label="Seed and core">
+          <div className="arch-col-label">Seed</div>
           <div className="arch-seed active">
             <div className="arch-head">
               <span className="arch-title">BIP-39 mnemonic</span>
@@ -62,7 +62,7 @@ export default function ArchitectureDiagram() {
             </div>
             <div className="arch-sub">24 words · PBKDF2-HMAC-SHA512 · 2048 rounds</div>
           </div>
-          <h5 style={{ marginTop: 10 }}>Core</h5>
+          <div className="arch-col-label" style={{ marginTop: 10 }}>Core</div>
           <div className="arch-core active">
             <div className="arch-head">
               <span className="arch-title">aegis-core</span>
@@ -75,8 +75,8 @@ export default function ArchitectureDiagram() {
           </div>
         </div>
 
-        <div className="arch-col">
-          <h5>Chain adapters</h5>
+        <div className="arch-col" role="group" aria-label="Chain adapters">
+          <div className="arch-col-label">Chain adapters</div>
           {ADAPTERS.map((x) => (
             <div
               key={x.id}
@@ -95,9 +95,9 @@ export default function ArchitectureDiagram() {
           ))}
         </div>
 
-        <div className="arch-detail">
+        <div className="arch-detail" role="region" aria-live="polite">
           <div className="arch-head">
-            <h4>{a.name}</h4>
+            <div className="arch-detail-name">{a.name}</div>
             <span className={`arch-status ${a.status}`}>{a.status === "live" ? "live" : a.status === "soon" ? "roadmap" : "waiting"}</span>
           </div>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-3)" }}>{a.family}</div>

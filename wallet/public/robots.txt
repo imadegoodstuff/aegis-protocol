@@ -1,0 +1,3 @@
+User-agent: *
+Allow: /
+Sitemap: https://aegis-wallet.fly.dev/sitemap.xml
