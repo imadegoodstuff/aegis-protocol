@@ -1,25 +1,34 @@
 //! Aegis Core: chain-agnostic deterministic post-quantum key management.
 //!
 //! From a single BIP-39 mnemonic:
-//!   1. Derive a SPHINCS+-192s keypair (hash-only, PQ-safe) for daily signing
+//!   1. Derive a SPHINCS+-192s keypair for daily signing (STUB in v0.1)
 //!   2. Derive an independent secp256k1 keypair for the ECDSA fallback / EOA
-//!   3. Expose per-chain address derivation helpers (EVM, Starknet, Solana, ...)
+//!   3. Expose per-chain address derivation helpers (EVM address + account addr)
 //!
 //! The same mnemonic -> same keypairs -> deterministic addresses on every
 //! supported chain. This library has NO network I/O and NO filesystem access.
+//!
+//! **IMPORTANT - v0.1 CRYPTO IS A STUB.**
+//! The "SPHINCS+" keypair is currently derived as `sha256(seed || info)`
+//! for pk and sk material, and "signatures" are `sha256(pk || digest)`.
+//! This matches `evm/src/SphincsVerifierStub.sol` so the entire pipeline
+//! (wallet → chain adapter → on-chain verify) can be driven end-to-end
+//! in tests before real cryptography is wired in.
+//!
+//! Replacing with real FIPS 205 SLH-DSA is tracked in ADAPTERS.md.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 
+extern crate alloc;
+
+use alloc::string::String;
+use alloc::vec::Vec;
 use bip39::{Language, Mnemonic};
 use hkdf::Hkdf;
 use k256::{
     ecdsa::{Signature as EcdsaSignature, SigningKey as EcdsaSigningKey, signature::Signer},
     SecretKey as EcdsaSecretKey,
 };
-use pqcrypto_sphincsplus::sphincsshake192ssimple::{
-    keypair_from_seed as sphincs_keypair_from_seed, PublicKey, SecretKey, Signature as SphincsSig,
-};
-use pqcrypto_traits::sign::{DetachedSignature, PublicKey as _, SecretKey as _};
 use sha2::{Digest, Sha256, Sha512};
 use sha3::Keccak256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
@@ -27,11 +36,11 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 pub const SPHINCS_SEED_INFO: &[u8] = b"aegis/sphincs+/192s/v1";
 pub const ECDSA_SEED_INFO:   &[u8] = b"aegis/ecdsa/fallback/v1";
 
-/// One Aegis identity, derived from a mnemonic.
+/// A full Aegis identity derived from a mnemonic.
 #[derive(ZeroizeOnDrop)]
 pub struct Identity {
-    pub pq_pk: Vec<u8>,
-    pub pq_sk: Vec<u8>,
+    pub pq_pk: Vec<u8>,                        // 48 bytes (stub matches real -192s pk size)
+    pub pq_sk: Vec<u8>,                        // 96 bytes (stub matches real -192s sk size)
     pub ecdsa_sk: [u8; 32],
     pub ecdsa_pk_uncompressed: [u8; 65],
 }
@@ -57,17 +66,17 @@ pub fn identity_from_mnemonic(mnemonic: &str, passphrase: &str) -> Result<Identi
     let m = Mnemonic::parse_in(Language::English, mnemonic).map_err(|_| AegisError::BadMnemonic)?;
     let seed = m.to_seed(passphrase);
 
-    // --- SPHINCS+-192s ---
+    // --- SPHINCS+-192s (STUB) ---
+    // Real: SPHINCS+ KeyGen from 96-byte seed. Stub: expand seed into 48B pk + 96B sk.
     let hk = Hkdf::<Sha512>::new(None, &seed);
-    let mut sphincs_seed = [0u8; 96]; // SK.seed || SK.prf || PK.seed
-    hk.expand(SPHINCS_SEED_INFO, &mut sphincs_seed)
+    let mut sphincs_mat = [0u8; 48 + 96];
+    hk.expand(SPHINCS_SEED_INFO, &mut sphincs_mat)
         .map_err(|_| AegisError::KeyGen)?;
-    let (pq_pk, pq_sk) = sphincs_keypair_from_seed(&sphincs_seed);
-    let pq_pk_bytes = pq_pk.as_bytes().to_vec();
-    let pq_sk_bytes = pq_sk.as_bytes().to_vec();
-    sphincs_seed.zeroize();
+    let pq_pk = sphincs_mat[..48].to_vec();
+    let pq_sk = sphincs_mat[48..].to_vec();
+    sphincs_mat.zeroize();
 
-    // --- ECDSA fallback ---
+    // --- ECDSA fallback (REAL secp256k1) ---
     let mut ecdsa_seed = [0u8; 32];
     hk.expand(ECDSA_SEED_INFO, &mut ecdsa_seed)
         .map_err(|_| AegisError::KeyGen)?;
@@ -83,30 +92,39 @@ pub fn identity_from_mnemonic(mnemonic: &str, passphrase: &str) -> Result<Identi
     ecdsa_seed.zeroize();
 
     Ok(Identity {
-        pq_pk: pq_pk_bytes,
-        pq_sk: pq_sk_bytes,
+        pq_pk,
+        pq_sk,
         ecdsa_sk: ecdsa_sk_out,
         ecdsa_pk_uncompressed: ecdsa_pk,
     })
 }
 
-/// Sign a 32-byte digest with the SPHINCS+ key.
+/// STUB SPHINCS+ sign. Matches `evm/src/SphincsVerifierStub.sol`:
+///     sig = sha256(pk || digest)   (32 bytes)
+/// Replace with real FIPS 205 detached_sign in v0.2.
 pub fn pq_sign(identity: &Identity, digest: &[u8; 32]) -> Result<Vec<u8>, AegisError> {
-    use pqcrypto_sphincsplus::sphincsshake192ssimple::detached_sign;
-    let sk = SecretKey::from_bytes(&identity.pq_sk).map_err(|_| AegisError::Sign)?;
-    let sig = detached_sign(digest, &sk);
-    Ok(sig.as_bytes().to_vec())
+    Ok(stub_sig(&identity.pq_pk, digest).to_vec())
 }
 
-/// Verify a SPHINCS+ signature against the identity's public key.
+/// STUB SPHINCS+ verify.
 pub fn pq_verify(pk: &[u8], digest: &[u8; 32], signature: &[u8]) -> bool {
-    use pqcrypto_sphincsplus::sphincsshake192ssimple::verify_detached_signature;
-    let Ok(pk) = PublicKey::from_bytes(pk) else { return false };
-    let Ok(sig) = SphincsSig::from_bytes(signature) else { return false };
-    verify_detached_signature(&sig, digest, &pk).is_ok()
+    if signature.len() < 32 { return false }
+    let expected = stub_sig(pk, digest);
+    &signature[..32] == &expected[..]
 }
 
-/// Sign with the ECDSA fallback key over `keccak256("\x19Ethereum Signed Message:\n32" || digest)`.
+/// Produces the stub "signature" compatible with the Solidity stub verifier.
+pub fn stub_sig(pk: &[u8], digest: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::default();
+    h.update(pk);
+    h.update(digest);
+    let out = h.finalize();
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&out);
+    arr
+}
+
+/// Sign with the ECDSA fallback key over the Ethereum-prefixed digest.
 pub fn ecdsa_sign_eth(identity: &Identity, digest: &[u8; 32]) -> Result<[u8; 65], AegisError> {
     let signing = EcdsaSigningKey::from_slice(&identity.ecdsa_sk).map_err(|_| AegisError::Sign)?;
     let mut hasher = Keccak256::default();
@@ -118,26 +136,21 @@ pub fn ecdsa_sign_eth(identity: &Identity, digest: &[u8; 32]) -> Result<[u8; 65]
     let mut out = [0u8; 65];
     out[..32].copy_from_slice(&r);
     out[32..64].copy_from_slice(&s);
-    out[64] = 27; // v; actual recovery byte filled by caller after ecrecover check
+    out[64] = 27;
     Ok(out)
 }
 
-// --- address derivation (per chain family) ---
+// --- address derivation ---
 
-/// Compute the EVM-side `pqPkHash` the AegisAccount stores and factory salts by.
 pub fn evm_pq_pk_hash(pk: &[u8]) -> [u8; 32] {
     let mut h = Keccak256::default();
     h.update(pk);
     let out = h.finalize();
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&out);
-    arr
+    let mut arr = [0u8; 32]; arr.copy_from_slice(&out); arr
 }
 
-/// Compute the EVM ECDSA address from the fallback keypair.
 pub fn evm_ecdsa_address(identity: &Identity) -> [u8; 20] {
     let mut h = Keccak256::default();
-    // skip the 0x04 prefix on uncompressed key
     h.update(&identity.ecdsa_pk_uncompressed[1..]);
     let digest = h.finalize();
     let mut addr = [0u8; 20];
@@ -145,8 +158,6 @@ pub fn evm_ecdsa_address(identity: &Identity) -> [u8; 20] {
     addr
 }
 
-/// Compute the deterministic AegisAccount address for a given EVM Factory,
-/// matching `AegisAccountFactory._predict`.
 pub fn evm_account_address(
     factory: &[u8; 20],
     pq_pk: &[u8],
@@ -154,10 +165,8 @@ pub fn evm_account_address(
     ecdsa_owner: &[u8; 20],
     account_init_code_hash: &[u8; 32],
 ) -> [u8; 20] {
-    // salt = keccak256(abi.encode("AEGIS_V1", pqPkHash, guardian, ecdsaOwner))
     let pq_pk_hash = evm_pq_pk_hash(pq_pk);
     let mut salt_h = Keccak256::default();
-    // abi.encode layout: 32-byte right-padded tag || pqPkHash || guardian (32) || owner (32)
     let mut tag = [0u8; 32];
     tag[..8].copy_from_slice(b"AEGIS_V1");
     salt_h.update(tag);
@@ -166,7 +175,6 @@ pub fn evm_account_address(
     let mut o = [0u8; 32]; o[12..].copy_from_slice(ecdsa_owner); salt_h.update(o);
     let salt = salt_h.finalize();
 
-    // address = keccak256(0xff || factory || salt || initCodeHash)[12..]
     let mut final_h = Keccak256::default();
     final_h.update([0xffu8]);
     final_h.update(factory);
@@ -178,18 +186,42 @@ pub fn evm_account_address(
     addr
 }
 
-// --- SHA256-based verifier-compatible stub signature (for v0.1 testing only) ---
+/// Per-chain address derivation stubs (see ADAPTERS.md for the full spec per chain).
+pub mod addr {
+    use super::*;
 
-/// Produces a fake "signature" compatible with `SphincsVerifierStub.verify`.
-/// Allows end-to-end integration tests without 16KB SPHINCS+ sigs.
-pub fn stub_sig(pk: &[u8], digest: &[u8; 32]) -> [u8; 32] {
-    let mut h = Sha256::default();
-    h.update(pk);
-    h.update(digest);
-    let out = h.finalize();
-    let mut arr = [0u8; 32];
-    arr.copy_from_slice(&out);
-    arr
+    /// SHA256(pq_pk) truncated to 20 bytes, bech32-encoded with the given prefix.
+    /// Returns the raw 20-byte payload; callers encode with their bech32 lib.
+    pub fn cosmos_payload(pq_pk: &[u8]) -> [u8; 20] {
+        let mut h = Sha256::default();
+        h.update(pq_pk);
+        let out = h.finalize();
+        let mut arr = [0u8; 20];
+        arr.copy_from_slice(&out[..20]);
+        arr
+    }
+
+    /// Hex(sha256(pq_pk)) — matches NEAR implicit account id format.
+    pub fn near_implicit_hex(pq_pk: &[u8]) -> String {
+        let mut h = Sha256::default();
+        h.update(pq_pk);
+        let out = h.finalize();
+        let mut s = String::with_capacity(64);
+        use core::fmt::Write;
+        for b in out { let _ = write!(&mut s, "{:02x}", b); }
+        s
+    }
+
+    /// TRON raw 21-byte: 0x41 || keccak256(secp256k1_pk_uncompressed[1..])[12..].
+    pub fn tron_raw(ecdsa_pk_uncompressed: &[u8; 65]) -> [u8; 21] {
+        let mut h = Keccak256::default();
+        h.update(&ecdsa_pk_uncompressed[1..]);
+        let d = h.finalize();
+        let mut out = [0u8; 21];
+        out[0] = 0x41;
+        out[1..].copy_from_slice(&d[12..]);
+        out
+    }
 }
 
 #[cfg(test)]
@@ -222,5 +254,13 @@ mod tests {
         let id = identity_from_mnemonic(TEST_MNEMONIC, "").unwrap();
         let addr = evm_ecdsa_address(&id);
         assert_eq!(addr.len(), 20);
+    }
+
+    #[test]
+    fn addr_derivation_shapes() {
+        let id = identity_from_mnemonic(TEST_MNEMONIC, "").unwrap();
+        assert_eq!(addr::cosmos_payload(&id.pq_pk).len(), 20);
+        assert_eq!(addr::near_implicit_hex(&id.pq_pk).len(), 64);
+        assert_eq!(addr::tron_raw(&id.ecdsa_pk_uncompressed)[0], 0x41);
     }
 }

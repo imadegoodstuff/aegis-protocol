@@ -14,25 +14,20 @@ std = []
 wasm = ["wasm-bindgen", "getrandom/js"]
 
 [dependencies]
-# Real SPHINCS+ (SLH-DSA) impl. Use pqcrypto's SLH-DSA wrapper when available,
-# or Rust-native sphincsplus crate. v0.1 pins to pqcrypto-sphincsplus.
-pqcrypto-sphincsplus = { version = "0.7", default-features = false }
-pqcrypto-traits      = "0.3"
+# v0.1 uses a stub for SPHINCS+ matching evm/src/SphincsVerifierStub.sol so the
+# whole pipeline can be driven in tests. v0.2 will depend on a real FIPS 205
+# SLH-DSA crate (candidate: `fips205`, or custom native via ethrex/leanSig).
 
 # Deterministic derivation
-bip39   = "2"
-hkdf    = "0.12"
-sha2    = "0.10"
-sha3    = "0.10"
-zeroize = { version = "1", features = ["derive"] }
-rand_core = "0.6"
-getrandom = "0.2"
+bip39     = { version = "2", default-features = false, features = ["english"] }
+hkdf      = { version = "0.12", default-features = false }
+sha2      = { version = "0.10", default-features = false }
+sha3      = { version = "0.10", default-features = false }
+zeroize   = { version = "1", features = ["derive"] }
+getrandom = { version = "0.2", default-features = false }
 
-# ECDSA fallback (secp256k1), only for the fallback path
-k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+# ECDSA fallback (secp256k1)
+k256 = { version = "0.13", default-features = false, features = ["ecdsa", "sha256"] }
 
 # Optional WASM bindings
 wasm-bindgen = { version = "0.2", optional = true }
-
-[dev-dependencies]
-hex = "0.4"

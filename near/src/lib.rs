@@ -5,6 +5,7 @@
 //! State machine mirrors `evm/src/AegisAccount.sol`.
 
 use near_sdk::{env, log, near, store::LookupMap, AccountId, Promise, NearToken};
+use near_sdk::base64::Engine as _;
 
 const TIMELOCK_NS: u64 = 7u64 * 24 * 60 * 60 * 1_000_000_000;
 pub const PROTOCOL_FEE_BPS: u16 = 1000;
