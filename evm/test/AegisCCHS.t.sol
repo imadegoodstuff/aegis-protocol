@@ -80,10 +80,10 @@ contract AegisCCHSTest is Test {
 
     function test_cachedPath() public {
         _exec(0);
-        (, bool hasL1, ) = _op(1);
+        (AegisCCHS.LayerSig memory l0, bool hasL1, AegisCCHS.LayerSig memory l1) = _op(1);
         assertFalse(hasL1);
         uint256 g = gasleft();
-        _exec(1);
+        a.execute(target, value, "", l0, hasL1, l1);
         emit log_named_uint("cached-path execution gas", g - gasleft());
         _exec(2);
         assertEq(target.balance, 3 * value);
@@ -91,8 +91,9 @@ contract AegisCCHSTest is Test {
     }
 
     function test_firstSigGas() public {
+        (AegisCCHS.LayerSig memory l0, bool hasL1, AegisCCHS.LayerSig memory l1) = _op(0);
         uint256 g = gasleft();
-        _exec(0);
+        a.execute(target, value, "", l0, hasL1, l1);
         emit log_named_uint("first-in-subtree execution gas", g - gasleft());
     }
 
