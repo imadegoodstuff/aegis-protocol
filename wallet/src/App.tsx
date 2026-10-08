@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useState } from "react";
 import ChainDashboard from "./components/ChainDashboard";
 import ChainMarquee   from "./components/ChainMarquee";
+import ShieldMark     from "./components/ShieldMark";
 import Terminal       from "./components/Terminal";
 import ThemeToggle    from "./components/ThemeToggle";
 import { useParallax } from "./hooks/useParallax";
@@ -83,6 +84,18 @@ export default function App() {
     return () => io.disconnect();
   }, []);
 
+  // Prefetch lazy chunks on idle so the user sees instant render when scrolling
+  useEffect(() => {
+    const ric: (cb: () => void) => number =
+      (window as unknown as { requestIdleCallback?: (cb: () => void) => number }).requestIdleCallback
+        ?? ((cb) => setTimeout(cb, 1200));
+    ric(() => {
+      void import("./components/DerivePanel");
+      void import("./components/ArchitectureDiagram");
+      void import("./components/CodeShowcase");
+    });
+  }, []);
+
   return (
     <div>
       <div className="mesh" />
@@ -98,14 +111,14 @@ export default function App() {
       <nav className="nav">
         <div className="container nav-inner">
           <div className="brand">
-            <span className="brand-mark" />
-            <span>aegis</span>
-            <span className="chip" style={{ marginLeft: 4 }}>v0.1 preview</span>
+            <span className="brand-mark"><ShieldMark size={22} /></span>
+            <span>AEGIS</span>
+            <span className="chip" style={{ marginLeft: 4 }}>v0.1 · pre-audit</span>
           </div>
           <LiveTicker />
           <div className="nav-cluster">
             <a className="nav-link" href="#chains">Chains</a>
-            <a className="nav-link" href="#arch">Arch</a>
+            <a className="nav-link" href="#arch">Architecture</a>
             <a className="nav-link" href="#why">Threat</a>
             <a className="nav-link" href="#verify">Verify</a>
             <a className="nav-link" href="#code">Code</a>
@@ -116,7 +129,7 @@ export default function App() {
               href="https://github.com/imadegoodstuff/aegis-protocol"
               target="_blank" rel="noreferrer"
             >
-              <span>★</span> GitHub
+              GitHub ↗
             </a>
           </div>
         </div>
@@ -125,47 +138,53 @@ export default function App() {
       {/* HERO */}
       <header className="hero">
         <div className="container">
-          <div className="hero-pill fade">
-            <span className="pulse" />
-            <span>Post-AI-math readiness · hash-only signatures · zero custody</span>
+          <div className="hero-eyebrow fade">
+            <span className="bar" />
+            <span className="dot" />
+            <span>Post-quantum signature infrastructure · FIPS 205 SLH-DSA</span>
           </div>
           <h1 className="hero-title fade d1 parallax-med">
-            One seed.<br />
-            <span className="grad">Every chain.</span><br />
-            Quantum-safe signatures today.
+            Signatures that <span className="accent">outlive</span><br />
+            elliptic curves.
           </h1>
           <p className="hero-sub fade d2">
-            Aegis is a per-user, immutable smart account with SPHINCS+ hash-based
-            signatures. One BIP-39 mnemonic deploys the same address on 30+ EVM chains
-            and derives independent accounts on Starknet, Solana, Cosmos, Move chains,
-            and more. No bridge. No pool. No admin. No token.
+            Aegis is a per-user, immutable smart account signed with
+            SPHINCS+-192s. One BIP-39 mnemonic maps to the same CREATE address on
+            every EVM chain plus independent accounts on Starknet, Solana, Cosmos
+            and Move. No bridge, no pool, no admin, no token.
           </p>
           <div className="hero-ctas fade d3">
-            <a className="btn btn-primary" href="#chains">Try live derivation →</a>
-            <a className="btn" href="#verify">10-second self-verify</a>
+            <a className="btn btn-primary" href="#chains">Derive my addresses →</a>
+            <a className="btn" href="#verify">Self-verify in 10 s</a>
             <a className="btn btn-ghost" href="#arch">Architecture</a>
+          </div>
+          <div className="hero-meta fade d3">
+            <span><b>SIG</b> SPHINCS+-192s · 3,688 B</span>
+            <span><b>HASH</b> keccak256</span>
+            <span><b>LATTICE</b> none</span>
+            <span><b>PAIRING</b> none</span>
           </div>
 
           <div className="stats fade d3 parallax-slow">
             <div className="stat">
-              <div className="stat-k">chains · launch day</div>
+              <div className="stat-k">chains · live</div>
               <div className="stat-v">13</div>
               <div className="stat-s">12 EVM + Starknet · same identity</div>
             </div>
             <div className="stat">
-              <div className="stat-k">roadmap · 2027</div>
+              <div className="stat-k">roadmap</div>
               <div className="stat-v">23</div>
-              <div className="stat-s">+ Solana, Cosmos, Move, TRON, TON, NEAR</div>
+              <div className="stat-s">+ SVM, Cosmos, Move, TRON, TON, NEAR</div>
             </div>
             <div className="stat">
-              <div className="stat-k">timelock · emergency exit</div>
+              <div className="stat-k">timelock</div>
               <div className="stat-v">7d</div>
-              <div className="stat-s">PQ key can veto a stolen ECDSA</div>
+              <div className="stat-s">PQ key can veto a stolen-ECDSA exit</div>
             </div>
             <div className="stat">
-              <div className="stat-k">fee ceiling · hardcoded</div>
+              <div className="stat-k">fee ceiling</div>
               <div className="stat-v">20%</div>
-              <div className="stat-s">of gas · constant · ungovernable</div>
+              <div className="stat-s">of gas · <code>constant</code> · ungovernable</div>
             </div>
           </div>
 
@@ -202,7 +221,7 @@ export default function App() {
       </section>
 
       {/* 02 ARCH */}
-      <section id="arch" className="section">
+      <section id="arch" className="section cv">
         <div className="container">
           <div className="section-head fade">
             <div className="section-num">02</div>
@@ -225,7 +244,7 @@ export default function App() {
       </section>
 
       {/* 03 THREAT MODEL */}
-      <section id="why" className="section">
+      <section id="why" className="section cv">
         <div className="container">
           <div className="section-head fade">
             <div className="section-num">03</div>
@@ -270,7 +289,7 @@ export default function App() {
       </section>
 
       {/* 04 VERIFY */}
-      <section id="verify" className="section">
+      <section id="verify" className="section cv">
         <div className="container">
           <div className="section-head fade">
             <div className="section-num">04</div>
@@ -306,7 +325,7 @@ export default function App() {
       </section>
 
       {/* 05 CODE */}
-      <section id="code" className="section">
+      <section id="code" className="section cv">
         <div className="container">
           <div className="section-head fade">
             <div className="section-num">05</div>

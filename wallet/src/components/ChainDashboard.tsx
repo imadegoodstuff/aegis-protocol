@@ -2,16 +2,16 @@ import { CHAINS } from "../data/chains";
 
 export default function ChainDashboard() {
   return (
-    <div className="glass chain-dash">
+    <div className="card chain-dash">
       <div className="chain-dash-head">
         <div>
-          <div className="section-eyebrow" style={{ marginBottom: 6 }}>Live preview</div>
-          <div style={{ fontSize: 18, fontWeight: 600 }}>Your Aegis account, every chain</div>
+          <div className="chain-dash-title">Deployment matrix</div>
+          <div className="chain-dash-sub">one BIP-39 seed · 13 live surfaces</div>
         </div>
         <div className="chain-dash-addr">
-          <span className="label">EVM addr</span>
-          <span className="val mono">0xAEG5…b2E1</span>
-          <span className="chip">same on all EVM chains</span>
+          <span className="k">EVM</span>
+          <span className="v">0xAEG5…b2E1</span>
+          <span className="chip chip-accent">same addr · all EVM</span>
         </div>
       </div>
 
@@ -28,12 +28,8 @@ export default function ChainDashboard() {
               }`}
             >
               {c.status === "live"
-                ? c.sameAddr
-                  ? "deployed · same addr"
-                  : "deployed"
-                : c.status === "soon"
-                ? "roadmap"
-                : "research"}
+                ? c.sameAddr ? "LIVE · SAME ADDR" : "LIVE"
+                : c.status === "soon" ? "ROADMAP" : "RESEARCH"}
             </span>
           </div>
         ))}

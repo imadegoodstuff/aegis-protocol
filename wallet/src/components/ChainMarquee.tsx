@@ -16,6 +16,7 @@ export default function ChainMarquee() {
             <span>{c}</span>
           </span>
         ))}
+        {/* second strip for seamless wrap handled by CSS keyframes */}
       </div>
     </div>
   );
