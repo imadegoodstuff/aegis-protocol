@@ -21,7 +21,7 @@ import {
 } from "../aegis/wallet";
 import { isValidMnemonic } from "../aegis/derive";
 import { CchsPool } from "../aegis/cchsPool";
-import { deriveCchsIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, type CchsIdentity } from "../aegis/cchsAccount";
+import { deriveCchsIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, type CchsIdentity } from "../aegis/cchsAccount";
 import { cchsK, H, toAbiLayerSig, EMPTY_LAYER_SIG, signatureBytes } from "../aegis/cchs";
 import CopyBtn from "./CopyBtn";
 
@@ -29,6 +29,7 @@ type TokenState = { symbol: string; decimals: number; eoa: bigint; account: bigi
 
 type ChainState = {
   factory: "unknown" | "absent" | "present";
+  proxy: "unknown" | "absent" | "present";
   account: "unknown" | "absent" | "deployed";
   balance: bigint | null;
   tokens: Record<Address, TokenState>;
@@ -112,8 +113,9 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       (async () => {
         const pub = makePublicClient(chain);
         try {
-          const [fc, ac, bal] = await Promise.all([
+          const [fc, px, ac, bal] = await Promise.all([
             pub.getCode({ address: FACTORY_ADDRESS }),
+            pub.getCode({ address: DETERMINISTIC_PROXY }),
             pub.getCode({ address: addr }),
             pub.getBalance({ address: addr }),
           ]);
@@ -133,6 +135,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
           if (cancelled) return;
           setStates((s) => ({ ...s, [chain.id]: {
             factory: fc && fc !== "0x" ? "present" : "absent",
+            proxy: px && px !== "0x" ? "present" : "absent",
             account: ac && ac !== "0x" ? "deployed" : "absent",
             balance: bal,
             tokens: toks,
@@ -140,7 +143,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         } catch (e) {
           if (cancelled) return;
           const err = e as { shortMessage?: string; message: string };
-          setStates((s) => ({ ...s, [chain.id]: { factory: "unknown", account: "unknown", balance: null, tokens: {}, error: err.shortMessage ?? err.message } }));
+          setStates((s) => ({ ...s, [chain.id]: { factory: "unknown", proxy: "unknown", account: "unknown", balance: null, tokens: {}, error: err.shortMessage ?? err.message } }));
         }
       })();
     }
@@ -192,6 +195,18 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         } else set({ phase: "done" });
         setRefresh((n) => n + 1);
         return;
+      }
+
+      // Factory missing on this chain: publish it through the deterministic proxy first.
+      // Anyone may do this; the address is fixed by (salt, init code), not by the sender.
+      if (st?.factory === "absent") {
+        if (st.proxy !== "present") throw new Error("deterministic-deployment proxy is absent on this chain");
+        set({ phase: "confirm", step: "publish the CCHS factory on this chain (one-time, ~2.9 M gas)" });
+        const h = await wc.sendTransaction({ to: DETERMINISTIC_PROXY, data: FACTORY_PUBLISH_DATA, chain, account: w.account });
+        set({ phase: "pending", tx: h, step: "publishing factory" });
+        await pub.waitForTransactionReceipt({ hash: h });
+        const code = await pub.getCode({ address: FACTORY_ADDRESS });
+        if (!code || code === "0x") throw new Error("factory did not appear at the expected address");
       }
 
       // New account: approvals first, then one deployAndMove (or deploy).
@@ -361,13 +376,13 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
               if (!st) status = "reading…";
               else if (st.error) status = `rpc: ${st.error}`;
               else if (st.account === "deployed") status = `protected · ${formatEther(st.balance ?? 0n)} ${sym}${held.length ? " · " + held.join(" · ") : ""}`;
-              else if (st.factory === "absent") status = "factory not yet published on this chain";
+              else if (st.factory === "absent") status = st.proxy === "present" ? "factory not published here yet · your first Protect publishes it (one extra transaction)" : "no deterministic-deployment proxy on this chain";
               else status = st.balance && st.balance > 0n ? `address holds ${formatEther(st.balance)} ${sym}, account not deployed` : "ready";
               if (movable.length && st && !st.error) status += ` · wallet has ${movable.join(", ")}`;
               const busy = act.phase === "pending" || act.phase === "switching" || act.phase === "confirm";
-              const canProtect = walletPresent && st && st.factory === "present" && !busy;
+              const canProtect = walletPresent && st && !st.error && (st.factory === "present" || st.proxy === "present") && !busy;
               const label = act.phase === "switching" ? "switching…" : act.phase === "confirm" ? "confirm in wallet…" : act.phase === "pending" ? "pending…"
-                : st?.account === "deployed" ? ((amount && Number(amount) > 0) || movable.length ? "Move in" : "Protected") : "Protect";
+                : st?.account === "deployed" ? ((amount && Number(amount) > 0) || movable.length ? "Move in" : "Protected") : st?.factory === "absent" ? "Publish + Protect" : "Protect";
               return (
                 <div className="protect-row" key={chain.id}>
                   <div className="protect-chain">
@@ -381,7 +396,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                     className={`btn ${st?.account === "deployed" ? "" : "btn-primary"} btn-sm`}
                     disabled={!canProtect || label === "Protected"}
                     onClick={() => protect(chain)}
-                    title={!walletPresent ? "Install an injected wallet" : st?.factory !== "present" ? "The factory has not been deployed on this chain yet" : ""}
+                    title={!walletPresent ? "Install an injected wallet" : st?.factory === "absent" ? "Publishes the factory through the deterministic proxy, then creates your account" : ""}
                   >
                     {label}
                   </button>

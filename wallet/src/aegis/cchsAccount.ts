@@ -27,6 +27,13 @@ export const FACTORY_ADDRESS = artifacts.factory.address as Address;
 export const FACTORY_ABI = artifacts.factory.abi;
 export const ACCOUNT_ABI = artifacts.accountAbi;
 
+/** Deterministic-deployment proxy (same address on every EVM chain) and the factory's salt + init code. */
+export const DETERMINISTIC_PROXY = artifacts.proxy as Address;
+export const FACTORY_SALT = artifacts.salt as Hex;
+export const FACTORY_INIT_CODE = artifacts.factory.initCode as Hex;
+/** Calldata that publishes the factory through the proxy. Anyone may send it; the result is the same address. */
+export const FACTORY_PUBLISH_DATA: Hex = concatHex([FACTORY_SALT, FACTORY_INIT_CODE]);
+
 /** Mirrors AegisCCHSFactory.predict; no RPC needed. */
 export function predictAccount(root: Hex, recRoot: Hex, variant: Variant): Address {
   const creation = (variant === 'S' ? artifacts.account.S.creationCode : artifacts.account.K.creationCode) as Hex;

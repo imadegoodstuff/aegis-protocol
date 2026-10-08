@@ -326,7 +326,7 @@ export default function App() {
             <div className="card promise-card bad">
               <h3><span className="ic">!</span> Not yet, or not ours to promise</h3>
               <ul className="promise-list">
-                <li><span className="mark">▶</span> The factory is not published on any chain yet; the Protect panel shows this live and will not pretend otherwise</li>
+                <li><span className="mark">▶</span> The factory is not published on any chain yet. There is no deployer: the first Protect on a chain publishes it through the deterministic proxy as one extra transaction paid by that user, and the panel shows the live state</li>
                 <li><span className="mark">▶</span> No external audit and no machine-checked proof of the reductions in §6 of the spec</li>
                 <li><span className="mark">▶</span> Non-EVM verifiers (Solana, CosmWasm, NEAR, Move, Cairo, TON) are source against test vectors, not deployments</li>
                 <li><span className="mark">▶</span> Bitcoin needs OP_CAT or OP_CHECKSIGFROMSTACK to bind a hash signature to a transaction; neither is active</li>

@@ -96,7 +96,7 @@ node deploy-cchs.mjs --status
 AEGIS_DEPLOYER_KEY=0x… node deploy-cchs.mjs sepolia base arbitrum
 ```
 
-The factory is published through the deterministic-deployment proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so it has the address `0x52aC1CdF75D5f11BCabE8dD0d8429Cd152Ec0091` on every chain where it has been published. Any funded key can publish it; the result does not depend on who sends the transaction. `--status` reports where it is live. The wallet's **Protect** panel predicts the user's account address offline from `wallet/src/aegis/cchsArtifacts.json`, shows live per-chain state, and creates + funds the account in one transaction where the factory exists.
+The factory is published through the deterministic-deployment proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so it has the address `0x52aC1CdF75D5f11BCabE8dD0d8429Cd152Ec0091` on every chain where it has been published. Anyone can publish it; the result does not depend on who sends the transaction, and there is no project deployer key. `--status` reports where it is live. The wallet's **Protect** panel predicts the user's account address offline from `wallet/src/aegis/cchsArtifacts.json`, shows live per-chain state, publishes the factory itself as one extra transaction on a chain where it is still missing (the user pays about 2.9 M gas once per chain), and creates + funds the account in one transaction.
 
 ## Honest limits
 
