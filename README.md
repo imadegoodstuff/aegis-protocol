@@ -58,7 +58,7 @@ The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storag
 | NEAR | `env::sha256` | adapter scaffold |
 | TON | `HASHEXT_SHA256` | adapter scaffold |
 | Starknet | `core::sha256` | adapter scaffold |
-| Bitcoin | `OP_SHA256` in Tapscript (BIP-341) | design in `CCHS.spec.md` §7.1 |
+| Bitcoin | `OP_SHA256` + `OP_CAT` (BIP-347, not active) | tree/leaf-script builder in `wallet/src/aegis/btcTapscript.ts`; sighash binding needs OP_CAT, see `CCHS.spec.md` §7.1 |
 
 Standard mainnet address derivation for 23 chains (importable into Phantom, Keplr, Petra, etc.) is implemented in `wallet/src/aegis/derive.ts`. See [`ADAPTERS.md`](ADAPTERS.md).
 
