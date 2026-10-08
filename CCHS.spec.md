@@ -2,7 +2,6 @@
 
 **Version**: 1.0.0-draft
 **Date**: 2026-10-08
-**Supersedes**: `HORIZON.spec.md`
 
 ---
 

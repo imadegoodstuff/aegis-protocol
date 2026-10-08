@@ -7,7 +7,7 @@ optimizer = true
 optimizer_runs = 1_000_000
 via_ir = true
 evm_version = "cancun"
-bytecode_hash = "none"      # 关键: 相同源码在所有链产生相同 bytecode -> CREATE2 同地址
+bytecode_hash = "none"      # identical source -> identical bytecode on every chain -> same CREATE2 address
 cbor_metadata = false
 remappings = [
     "@openzeppelin/=lib/openzeppelin-contracts/",
@@ -35,4 +35,4 @@ mode      = "${RPC_MODE}"
 sepolia   = "${RPC_SEPOLIA}"
 
 [etherscan]
-# verify.sh 读取
+# read by verify.sh

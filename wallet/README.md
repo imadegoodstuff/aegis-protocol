@@ -1,27 +1,32 @@
-# Aegis Wallet (Tauri + React)
+# Aegis Wallet
 
-统一钱包 UI。一屏显示用户在所有支持链的 PQ 账户和余额。
+Browser client for Aegis accounts. Vite + React 19 + TypeScript. All cryptography runs in the browser; nothing leaves the device.
 
-## 功能
+## What it does
 
-- 导入 / 生成 24 词 BIP-39 助记词
-- 通过 `aegis-core` (WASM) 派生 SPHINCS+ keypair + ECDSA fallback
-- 显示每条链上该种子对应的 AegisAccount 地址和余额
-- 发起 PQ-签名的转账（任意 token，任意地址）
-- 发起紧急退出 ECDSA → 7 天 timelock → guardian
-- 任何时候用 PQ 签名 cancel 待定的紧急退出
-- 一键打开任意链 explorer 查看自己的 account
+- Generates or imports a 24-word BIP-39 mnemonic.
+- Derives, in a Web Worker: the CCHS master and tree roots, an SLH-DSA-SHAKE-192s (FIPS 205) key pair, secp256k1 and ed25519 keys.
+- Shows standard, wallet-importable addresses for 23 chains (`src/aegis/derive.ts`).
+- CCHS client (`src/aegis/cchs.ts`): keygen, sign, local verify, digest construction, ABI encoding — byte-exact with `evm/src/AegisCCHS.sol`.
+- Live FIPS 205 sign + verify demo.
+- One-click hybrid account deployment via `viem` and the injected EVM provider (`src/components/SwapPanel.tsx`).
 
-## 技术栈
+## Stack
 
-- Tauri 2.x (桌面壳)
-- React 19 + Vite + TypeScript
-- `aegis-core` 的 WASM 构建 (`wasm-pack build core --target web`)
-- viem / wagmi (EVM)
-- starknet.js (Starknet)
-- @solana/web3.js (Solana, phase 2)
-- @cosmjs (CosmWasm, phase 2)
+- React 19, Vite 6, TypeScript 5
+- `viem` (EVM), `@noble/hashes`, `@noble/curves`, `@noble/post-quantum`, `@scure/bip39`, `@scure/base`
+- Self-hosted WOFF2 fonts (Inter, Inter Tight, JetBrains Mono), Latin subsets
+- Served by `serve` with immutable cache headers for `/assets` and `/fonts` (`serve.json`)
 
-## 状态
+## Commands
 
-Skeleton — 待实施。先确保 EVM 合约和核心库跑通后再做 UI。
+```bash
+npm i
+npm run dev        # http://localhost:5173
+npm run build      # type-check + production build to dist/
+npm run preview
+```
+
+## Deployment
+
+`Dockerfile` builds a static bundle and serves it on port 8080. `fly.toml` targets a `performance-1x` machine with `auto_stop = off` in `iad` and `sin`.
