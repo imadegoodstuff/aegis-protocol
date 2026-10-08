@@ -240,12 +240,13 @@ export default function App() {
           <div className="section-head fade">
             <div className="section-num">02</div>
             <div>
-              <div className="section-eyebrow">Architecture · interactive</div>
-              <h2 className="section-title">One core · ten adapters.</h2>
+              <div className="section-eyebrow">Architecture · interactive · two layers</div>
+              <h2 className="section-title">One core · ten adapters · two independent layers.</h2>
               <p className="section-sub">
-                One Rust/WASM core derives keys. Each chain adapter is a dedicated contract /
-                program with the same state machine. Hover any adapter below to inspect its
-                address derivation, verifier path, and status.
+                <b>addr</b> = standard mainnet address derived in the browser, importable to the
+                chain's native wallet TODAY. <b>pq</b> = the on-chain smart-account contract that
+                adds hash-only post-quantum recovery. These layers deploy independently per chain —
+                most addresses are mainnet-live now; most PQ contracts are still roadmap.
               </p>
             </div>
           </div>

@@ -3,11 +3,16 @@ import { useState } from "react";
 type AdapterId =
   | "evm" | "cairo" | "svm" | "cosmos" | "tron" | "aptos" | "sui" | "near" | "ton" | "bitcoin";
 
+type Status = "live" | "roadmap" | "wait";
+
 type Adapter = {
   id: AdapterId;
   name: string;
   family: string;
-  status: "live" | "soon" | "wait";
+  /** Address derivation: is a usable mainnet address derived + importable to native wallet? */
+  addrStatus: "mainnet" | "preview";
+  /** PQ smart-account on-chain layer: is the contract/program deployed? */
+  pqStatus: Status;
   address: string;
   verify: string;
   effort: string;
@@ -15,36 +20,76 @@ type Adapter = {
 };
 
 const ADAPTERS: Adapter[] = [
-  { id: "evm",     name: "EVM × 30+",   family: "Solidity",         status: "live",
-    address: "CREATE address (deployer + nonce)", verify: "SPHINCS+ C13 · ~190K gas",
-    effort: "shipped", blurb: "Same immutable bytecode deployed from the same deployer EOA at nonce 0 (verifier) and 1 (factory) yields identical addresses on every EVM chain." },
-  { id: "cairo",   name: "Starknet",    family: "Cairo 1",          status: "live",
-    address: "pedersen(class_hash, pk_hash, guardian)", verify: "Poseidon stub · real SPHINCS+ in v0.2",
-    effort: "state machine shipped", blurb: "Native Starknet smart account with the same execute / initiate / cancel / finalize state machine, dispatching user calls through call_contract_syscall." },
-  { id: "svm",     name: "Solana",      family: "Anchor / Rust",    status: "soon",
-    address: "PDA(seed = [\"aegis-v1\", pk_hash, guardian])", verify: "SPHINCS+ via SIMD-0152 syscall or SHRINCS",
-    effort: "~4 weeks", blurb: "Anchor program with full state machine. BPF's 200K compute-unit budget means verify needs either a precompile syscall or the SHRINCS variant (~324B sigs)." },
-  { id: "cosmos",  name: "Cosmos",      family: "CosmWasm 2.1",     status: "soon",
-    address: "bech32(prefix, sha256(pq_pk)[:20])", verify: "In-contract SHRINCS or host_sphincs_verify",
-    effort: "~3 weeks", blurb: "Rust CosmWasm contract targeting Osmosis / Neutron / Injective / Archway. wasm32 build passes CI today." },
-  { id: "tron",    name: "TRON",        family: "TVM (Solidity)",   status: "soon",
-    address: "base58check(0x41 ‖ keccak256(ecdsa_pk)[12:])", verify: "Shares EVM artifact",
-    effort: "~1 week", blurb: "TRON's TVM is EVM-compatible — same AegisAccount bytecode, only the base58check address encoding is new." },
-  { id: "aptos",   name: "Aptos",       family: "Move",             status: "soon",
-    address: "sha3_256(pq_pk ‖ 0x02)", verify: "aptos_std::sphincs (future) or SHRINCS",
-    effort: "~6 weeks", blurb: "Move module with Resource layout. Finalize requires SignerCapability (resource account pattern)." },
-  { id: "sui",     name: "Sui",         family: "Move 2024",        status: "soon",
-    address: "blake2b_256(0xFE ‖ pq_pk)[:32]", verify: "Native SPHINCS+ (future) or SHRINCS",
-    effort: "~6 weeks", blurb: "Shared-object account. 0xFE is a provisional multisig flag byte for SPHINCS+ pending Sui governance." },
-  { id: "near",    name: "NEAR",        family: "near-sdk 5.5",     status: "soon",
-    address: "hex(sha256(pq_pk)) implicit account", verify: "Fits in one receipt (300 TGas)",
-    effort: "~4 weeks", blurb: "NEAR implicit accounts map 1-to-1 to hex(sha256(pk)). Full state machine + Promise dispatch." },
-  { id: "ton",     name: "TON",         family: "FunC",             status: "soon",
-    address: "hash(StateInit)", verify: "SHRINCS variant · TVM op split",
-    effort: "~6 weeks", blurb: "TVM has a ~1M gas tx cap; plain SPHINCS+ exceeds it. We ship SHRINCS or split the hyper-tree across messages." },
-  { id: "bitcoin", name: "Bitcoin",     family: "Taproot / BIP-360", status: "wait",
-    address: "P2MR (post BIP-360 activation)", verify: "OP_SPHINCSVERIFY (companion BIP)",
-    effort: "blocked", blurb: "Shipping on Bitcoin without BIP-360 would either expose a secp256k1 key path or force always-script-path spends. We wait." },
+  { id: "evm",     name: "EVM × 30+",   family: "Solidity",
+    addrStatus: "mainnet", pqStatus: "roadmap",
+    address: "CREATE address (deployer + nonce)",
+    verify: "SPHINCS+ C13 vendored · ~190K gas verify",
+    effort: "contract ready · pending Sepolia deploy (0.01 ETH to deployer)",
+    blurb: "AegisAccountV2.sol + UpgradeHelper + Factory are production-ready. Address derivation is MAINNET today (standard ECDSA → importable to MetaMask). Deploy to Sepolia + any EVM mainnet is one env-var away."
+  },
+  { id: "cairo",   name: "Starknet",    family: "Cairo 1",
+    addrStatus: "preview", pqStatus: "roadmap",
+    address: "requires Argent/Braavos factory formula (preview)",
+    verify: "Poseidon stub · real Cairo SPHINCS+ ~4 w",
+    effort: "state machine shipped",
+    blurb: "Native Starknet smart account with execute / exit state machine in Cairo. Address requires Argent-style account factory computation (adds starknet.js dep). PQ verifier in Cairo is a 4-week implementation."
+  },
+  { id: "svm",     name: "Solana",      family: "Anchor / Rust",
+    addrStatus: "mainnet", pqStatus: "roadmap",
+    address: "base58(ed25519_pk) — real Solana account",
+    verify: "SPHINCS+ via SIMD-0152 syscall or SHRINCS",
+    effort: "~4 weeks",
+    blurb: "Address derivation uses standard ed25519 — importable to Phantom today. PQ account program needs either the SIMD-0152 user-precompile syscall or the SHRINCS variant to fit BPF compute budget."
+  },
+  { id: "cosmos",  name: "Cosmos",      family: "CosmWasm 2.1",
+    addrStatus: "mainnet", pqStatus: "roadmap",
+    address: "bech32(prefix, ripemd160(sha256(secp256k1_pk))) — standard",
+    verify: "In-contract SHRINCS or host_sphincs_verify",
+    effort: "~3 weeks",
+    blurb: "Addresses are standard secp256k1 Cosmos — importable to Keplr today on Osmosis / Neutron / Juno / Stargaze. Injective uses the Ethermint variant. PQ contract is a Rust CosmWasm module."
+  },
+  { id: "tron",    name: "TRON",        family: "TVM (Solidity)",
+    addrStatus: "mainnet", pqStatus: "roadmap",
+    address: "base58check(0x41 ‖ keccak256(ecdsa_pk)[12:])",
+    verify: "Shares EVM artifact",
+    effort: "~1 week",
+    blurb: "TVM is EVM-compatible — the AegisAccount Solidity bytecode works unmodified. Only the base58check address encoding differs. Address importable to TronLink today."
+  },
+  { id: "aptos",   name: "Aptos",       family: "Move",
+    addrStatus: "mainnet", pqStatus: "roadmap",
+    address: "sha3_256(ed25519_pk ‖ 0x00) — standard single-key scheme",
+    verify: "aptos_std::sphincs (future) or SHRINCS",
+    effort: "~6 weeks",
+    blurb: "Standard ed25519 scheme byte 0x00. Importable to Petra / Pontem / Martian today. PQ Move module needs resource-account SignerCapability pattern."
+  },
+  { id: "sui",     name: "Sui",         family: "Move 2024",
+    addrStatus: "mainnet", pqStatus: "roadmap",
+    address: "blake2b_256(0x00 ‖ ed25519_pk) — standard flag",
+    verify: "Native SPHINCS+ (future) or SHRINCS",
+    effort: "~6 weeks",
+    blurb: "Standard ed25519 flag byte 0x00. Importable to Sui Wallet / Suiet / Nightly. PQ account is a shared-object Move 2024 module."
+  },
+  { id: "near",    name: "NEAR",        family: "near-sdk 5.5",
+    addrStatus: "mainnet", pqStatus: "roadmap",
+    address: "hex(ed25519_pk) implicit account",
+    verify: "Fits in one receipt (300 TGas)",
+    effort: "~4 weeks",
+    blurb: "NEAR implicit accounts ARE hex(ed25519_pk) — our derivation gives you one real mainnet account directly. Importable via near-cli. PQ contract is near-sdk Rust."
+  },
+  { id: "ton",     name: "TON",         family: "FunC",
+    addrStatus: "preview", pqStatus: "roadmap",
+    address: "needs StateInit cell hash (preview = ed25519 pubkey)",
+    verify: "SHRINCS variant · TVM op split",
+    effort: "~6 weeks",
+    blurb: "Real TON wallet addresses require computing hash(StateInit) for Wallet v4R2 code+data cells — needs @ton/core (+50 KB). Users can import the ed25519 secret key to Tonkeeper directly."
+  },
+  { id: "bitcoin", name: "Bitcoin",     family: "Taproot / BIP-360",
+    addrStatus: "mainnet", pqStatus: "wait",
+    address: "bc1q + hash160(secp256k1_pk) — BIP-84 P2WPKH",
+    verify: "OP_SPHINCSVERIFY (companion BIP, pending)",
+    effort: "blocked on BIP-360 activation",
+    blurb: "Address is a real BIP-84 SegWit v0 mainnet address — import to Sparrow / Electrum via WIF today. PQ layer blocked: without BIP-360 P2MR, hash-only authority on Bitcoin needs either key-path spend (secp256k1) or always-script-path (bad UX)."
+  },
 ];
 
 export default function ArchitectureDiagram() {
@@ -88,7 +133,14 @@ export default function ArchitectureDiagram() {
             >
               <div className="arch-head">
                 <span className="arch-title">{x.name}</span>
-                <span className={`arch-status ${x.status}`}>{x.status === "live" ? "live" : x.status === "soon" ? "soon" : "waiting"}</span>
+                <div className="arch-stack">
+                  <span className={`arch-status ${x.addrStatus === "mainnet" ? "live" : "soon"}`}>
+                    addr: {x.addrStatus === "mainnet" ? "MAINNET" : "PREVIEW"}
+                  </span>
+                  <span className={`arch-status ${x.pqStatus === "live" ? "live" : x.pqStatus === "roadmap" ? "soon" : "wait"}`}>
+                    pq: {x.pqStatus === "live" ? "LIVE" : x.pqStatus === "roadmap" ? "ROADMAP" : "WAITING"}
+                  </span>
+                </div>
               </div>
               <div className="arch-sub">{x.family}</div>
             </div>
@@ -98,14 +150,21 @@ export default function ArchitectureDiagram() {
         <div className="arch-detail" role="region" aria-live="polite">
           <div className="arch-head">
             <div className="arch-detail-name">{a.name}</div>
-            <span className={`arch-status ${a.status}`}>{a.status === "live" ? "live" : a.status === "soon" ? "roadmap" : "waiting"}</span>
+            <div className="arch-stack">
+              <span className={`arch-status ${a.addrStatus === "mainnet" ? "live" : "soon"}`}>
+                addr: {a.addrStatus === "mainnet" ? "MAINNET" : "PREVIEW"}
+              </span>
+              <span className={`arch-status ${a.pqStatus === "live" ? "live" : a.pqStatus === "roadmap" ? "soon" : "wait"}`}>
+                pq: {a.pqStatus === "live" ? "LIVE" : a.pqStatus === "roadmap" ? "ROADMAP" : "WAITING"}
+              </span>
+            </div>
           </div>
           <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-3)" }}>{a.family}</div>
           <p>{a.blurb}</p>
           <div className="meta">
             <div><div className="k">Address derivation</div><div className="v">{a.address}</div></div>
             <div><div className="k">Verify path</div><div className="v">{a.verify}</div></div>
-            <div><div className="k">Status</div><div className="v">{a.status === "live" ? "shipped" : "roadmap"}</div></div>
+            <div><div className="k">Status</div><div className="v">{a.pqStatus === "live" ? "shipped" : a.pqStatus === "roadmap" ? "roadmap" : "waiting"}</div></div>
             <div><div className="k">Effort</div><div className="v">{a.effort}</div></div>
           </div>
           <div style={{ marginTop: "auto", fontSize: 11.5, color: "var(--text-4)", fontFamily: "var(--font-mono)" }}>
