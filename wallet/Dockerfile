@@ -8,6 +8,8 @@ RUN --mount=type=cache,target=/root/.npm \
 # build
 COPY tsconfig.json vite.config.ts index.html ./
 COPY src ./src
+ARG VITE_BUILD_SHA=dev
+ENV VITE_BUILD_SHA=$VITE_BUILD_SHA
 RUN npx vite build
 
 ### Runtime: tiny static server on port 8080

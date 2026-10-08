@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import { derive, isValidMnemonic, type Derived } from "../aegis/derive";
+import CopyBtn from "./CopyBtn";
 
 const SAMPLE = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -7,8 +8,6 @@ const EVM_CHAINS = [
   "Ethereum", "BSC", "Polygon", "Arbitrum", "Optimism",
   "Base", "Avalanche", "Linea", "Scroll", "Mantle", "Blast", "Mode",
 ] as const;
-
-function copy(s: string) { void navigator.clipboard?.writeText(s); }
 
 export default function DerivePanel() {
   const [mnemonic, setMnemonic]   = useState(SAMPLE);
@@ -21,18 +20,14 @@ export default function DerivePanel() {
   }, [mnemonic, passphrase]);
 
   return (
-    <div className="glass derive">
+    <div className="card derive">
       <div className="derive-head">
-        <div>
-          <div className="section-eyebrow" style={{ marginBottom: 6 }}>Live derivation · in your browser</div>
-          <div style={{ fontSize: 18, fontWeight: 600 }}>
-            Type a BIP-39 phrase · see your Aegis addresses on every chain
-          </div>
-          <div style={{ fontSize: 13, color: "var(--fg-2)", marginTop: 6 }}>
-            Nothing leaves your browser. No network call. Open DevTools and verify.
-            The sample phrase is the well-known Hardhat/Foundry test vector; it's safe to use.
-          </div>
-        </div>
+        <div className="section-eyebrow">Live derivation · in your browser</div>
+        <h3>Type a BIP-39 phrase · see your Aegis addresses on every chain</h3>
+        <p>
+          Nothing leaves your browser. No network call. Open DevTools and verify.
+          The sample phrase is the well-known Hardhat / Foundry test vector; safe to use.
+        </p>
       </div>
 
       <div className="derive-input">
@@ -47,21 +42,21 @@ export default function DerivePanel() {
             onChange={(e) => setMnemonic(e.target.value)}
             rows={2}
           />
-          <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "var(--fg-3)" }}>
+          <div className="derive-sub-bar">
             <span>
               {isValidMnemonic(mnemonic)
-                ? <span style={{ color: "var(--accent-lime)" }}>✓ valid BIP-39</span>
-                : <span style={{ color: "var(--accent-rose)" }}>✗ invalid phrase</span>}
+                ? <span style={{ color: "var(--lime)" }}>✓ valid BIP-39</span>
+                : <span style={{ color: "var(--rose)" }}>✗ invalid phrase</span>}
             </span>
-            <button className="link-btn" onClick={() => setMnemonic(SAMPLE)}>load sample</button>
+            <button className="link-btn" onClick={() => setMnemonic(SAMPLE)}>load sample →</button>
           </div>
         </label>
 
         <label className="derive-label">
           <span>passphrase (optional, BIP-39)</span>
-          <div style={{ display: "flex", gap: 8 }}>
+          <div style={{ display: "flex", gap: 10 }}>
             <input
-              className="derive-input-s mono"
+              className="derive-input-s"
               type={showPp ? "text" : "password"}
               value={passphrase}
               onChange={(e) => setPassphrase(e.target.value)}
@@ -76,7 +71,7 @@ export default function DerivePanel() {
         <div className="derive-out">
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--accent-cyan)" }}>Identity</span>
+              <span className="section-eyebrow" style={{ color: "var(--cyan)" }}>Identity</span>
               <span className="chip">deterministic from mnemonic</span>
             </div>
             <div className="kv">
@@ -87,12 +82,12 @@ export default function DerivePanel() {
 
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--accent-lime)" }}>EVM — same address on 30+ chains</span>
-              <span className="chip">ECDSA fallback owner address</span>
+              <span className="section-eyebrow" style={{ color: "var(--lime)" }}>EVM — same address on 30+ chains</span>
+              <span className="chip chip-grad">ECDSA fallback owner address</span>
             </div>
             <div className="addr-strip">
               <span className="addr-value">{result.evmAddress}</span>
-              <button className="btn" onClick={() => copy(result.evmAddress)}>copy</button>
+              <CopyBtn value={result.evmAddress} />
             </div>
             <div className="chain-grid chain-grid-tight">
               {EVM_CHAINS.map((c) => (
@@ -108,16 +103,16 @@ export default function DerivePanel() {
 
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--accent-violet)" }}>Non-EVM — independent per family</span>
-              <span className="chip">same seed, different derivation</span>
+              <span className="section-eyebrow" style={{ color: "var(--iris)" }}>Non-EVM — independent per family</span>
+              <span className="chip">same seed · different derivation</span>
             </div>
             <div className="kv">
-              <KV label="Osmosis (bech32 osmo1…)"   val={result.cosmosOsmo} />
-              <KV label="Injective (bech32 inj1…)"  val={result.cosmosInj} />
-              <KV label="Neutron (bech32 neutron1…)"val={result.cosmosNeutron} />
-              <KV label="NEAR implicit account"     val={result.nearImplicit} />
-              <KV label="TRON (base58check T…)"     val={result.tronBase58} />
-              <KV label="TRON raw 21B (hex)"        val={result.tronRawHex} />
+              <KV label="Osmosis (bech32 osmo1…)"    val={result.cosmosOsmo} />
+              <KV label="Injective (bech32 inj1…)"   val={result.cosmosInj} />
+              <KV label="Neutron (bech32 neutron1…)" val={result.cosmosNeutron} />
+              <KV label="NEAR implicit account"      val={result.nearImplicit} />
+              <KV label="TRON (base58check T…)"      val={result.tronBase58} />
+              <KV label="TRON raw 21B (hex)"         val={result.tronRawHex} />
             </div>
           </div>
         </div>
@@ -134,9 +129,9 @@ function KV({ label, val }: { label: string; val: string }) {
   return (
     <div className="kv-row">
       <div className="kv-label">{label}</div>
-      <div className="kv-val mono">
+      <div className="kv-val">
         <span>{val}</span>
-        <button className="btn" onClick={() => copy(val)}>copy</button>
+        <CopyBtn value={val} />
       </div>
     </div>
   );
