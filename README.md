@@ -8,6 +8,21 @@
 
 ---
 
+## CCHS — 协议核心（新）
+
+**Chain-Cached Hypertree Signatures**：hash-only 的 PQ 账户授权。WOTS+ 两层超树（2^20 签名容量），上层证明每个子树只验一次、缓存到链上，之后的 1023 次签名只带底层。
+
+| | Keygen | 签名（摊销） | 客户端状态 | 假设 |
+|---|---|---|---|---|
+| 平铺 XMSS | ~10^9 hash | 2.8 KB | 有 | SHA-256 |
+| XMSS^MT | ~10^6 hash | 4.9 KB | 有 | SHA-256 |
+| SPHINCS+ | ~10^6 hash | 7.8 KB | 无 | SHA-256 |
+| **CCHS** | **~10^6 hash** | **2.5 KB** | **无（链持有）** | SHA-256 |
+
+单 tx、无 commit-reveal。实测（EVM，SHA-256 预编译）：缓存路径 ~275K gas 全包、子树首签 ~580K，合约 4 750 B，无外部验证器。已在 EVM 中完成 TS 客户端 ↔ 合约互操作验证。规范 [`CCHS.spec.md`](CCHS.spec.md)，合约 `evm/src/AegisCCHS.sol`，客户端 `wallet/src/aegis/cchs.ts`，测试 `evm/test/AegisCCHS.t.sol`。
+
+---
+
 ## 为什么存在
 
 2026/10/7，Vitalik Buterin 和 Justin Drake 公开警告：AI 加速的数学进展可能在 2 年内严重削弱 lattice 密码学，并让 ECDSA 比预期更早被破解。Ethereum Lean Roadmap 的 PQ 基础设施目标是 2029。
