@@ -1,5 +1,6 @@
-import { useMemo, useState } from "react";
-import { derive, isValidMnemonic, type Derived } from "../aegis/derive";
+import { useState } from "react";
+import { isValidMnemonic } from "../aegis/derive";
+import { useDerived } from "../aegis/useAegisWorker";
 import CopyBtn from "./CopyBtn";
 import PqSignDemo from "./PqSignDemo";
 import SwapPanel  from "./SwapPanel";
@@ -16,10 +17,8 @@ export default function DerivePanel() {
   const [passphrase, setPassphrase] = useState("");
   const [showPp, setShowPp] = useState(false);
 
-  const result = useMemo<Derived | null>(() => {
-    if (!isValidMnemonic(mnemonic)) return null;
-    try { return derive(mnemonic, passphrase); } catch { return null; }
-  }, [mnemonic, passphrase]);
+  const valid = isValidMnemonic(mnemonic);
+  const { addresses: result, loading, error } = useDerived(valid ? mnemonic : "", passphrase);
 
   return (
     <div className="card derive">
@@ -27,9 +26,9 @@ export default function DerivePanel() {
         <div className="section-eyebrow">Live derivation · in your browser · real FIPS 205</div>
         <h3>Type a BIP-39 phrase · derive a real SLH-DSA public key + per-chain addresses</h3>
         <p>
-          Nothing leaves your browser. No network call. SPHINCS+ keygen runs via{" "}
-          <code>@noble/post-quantum</code> — audited FIPS 205 SLH-DSA-SHAKE-192s.
-          The sample phrase is the well-known Hardhat / Foundry test vector; safe to use.
+          Nothing leaves your browser. SPHINCS+ keygen runs in a Web Worker via{" "}
+          <code>@noble/post-quantum</code> — the UI never freezes. The sample phrase is the
+          well-known Hardhat / Foundry test vector; safe to use.
         </p>
       </div>
 
@@ -47,9 +46,9 @@ export default function DerivePanel() {
           />
           <div className="derive-sub-bar">
             <span>
-              {isValidMnemonic(mnemonic)
-                ? <span style={{ color: "var(--lime)" }}>✓ valid BIP-39</span>
-                : <span style={{ color: "var(--rose)" }}>✗ invalid phrase</span>}
+              {valid
+                ? <span style={{ color: "var(--accent)" }}>✓ valid BIP-39{loading && " · deriving SPHINCS+ keypair…"}</span>
+                : <span style={{ color: "var(--warn)" }}>✗ invalid phrase</span>}
             </span>
             <button className="link-btn" onClick={() => setMnemonic(SAMPLE)}>load sample →</button>
           </div>
@@ -70,6 +69,12 @@ export default function DerivePanel() {
         </label>
       </div>
 
+      {error && (
+        <div className="swap-note err" style={{ marginTop: 16 }}>
+          Derivation error: {error}
+        </div>
+      )}
+
       {result && <SwapPanel  mnemonic={mnemonic} />}
       {result && <PqSignDemo mnemonic={mnemonic} />}
 
@@ -77,19 +82,19 @@ export default function DerivePanel() {
         <div className="derive-out">
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--cyan)" }}>Identity</span>
-              <span className="chip">deterministic from mnemonic</span>
+              <span className="section-eyebrow" style={{ color: "var(--accent)" }}>Identity</span>
+              <span className="chip">real FIPS 205 keypair · deterministic from mnemonic</span>
             </div>
             <div className="kv">
-              <KV label="pq_pk (SPHINCS+ public key, 48B)" val={result.pqPkHex} />
-              <KV label="pq_pk_hash (keccak256 commitment)" val={"0x" + result.pqPkHashHex} />
+              <KV label="pq_pk (SPHINCS+ public key, 48 B)"      val={result.pqPkHex} />
+              <KV label="pq_pk_hash (keccak256 commitment)"      val={"0x" + result.pqPkHashHex} />
             </div>
           </div>
 
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--lime)" }}>EVM — same address on 30+ chains</span>
-              <span className="chip chip-grad">ECDSA fallback owner address</span>
+              <span className="section-eyebrow" style={{ color: "var(--accent)" }}>EVM — same address on 30+ chains</span>
+              <span className="chip chip-accent">ECDSA fallback owner address</span>
             </div>
             <div className="addr-strip">
               <span className="addr-value">{result.evmAddress}</span>
@@ -127,6 +132,17 @@ export default function DerivePanel() {
               <KV label="Bitcoin · BIP-84 P2WPKH (bc1q…)"         val={result.btcSegwit} />
             </div>
           </div>
+        </div>
+      )}
+
+      {!result && valid && loading && (
+        <div style={{
+          marginTop: 20, padding: "24px 20px", background: "var(--ink-0)",
+          border: "1px solid var(--line)", borderRadius: 8,
+          color: "var(--text-3)", fontFamily: "var(--font-mono)", fontSize: 13,
+          textAlign: "center"
+        }}>
+          generating real SLH-DSA-SHAKE-192s keypair in web-worker · ~2-3 s on first run
         </div>
       )}
     </div>
