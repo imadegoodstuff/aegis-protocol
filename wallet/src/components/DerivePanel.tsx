@@ -24,12 +24,12 @@ export default function DerivePanel() {
   return (
     <div className="card derive">
       <div className="derive-head">
-        <div className="section-eyebrow">Live derivation · in your browser · real FIPS 205</div>
-        <h3>Type a BIP-39 phrase · derive a real SLH-DSA public key + per-chain addresses</h3>
+        <div className="section-eyebrow">Step 1 · identity · computed in your browser</div>
+        <h3>Enter a BIP-39 phrase.</h3>
         <p>
-          Nothing leaves your browser. SPHINCS+ keygen runs in a Web Worker via{" "}
-          <code>@noble/post-quantum</code> — the UI never freezes. The sample phrase is the
-          well-known Hardhat / Foundry test vector; safe to use.
+          It derives the CCHS master (hash-only account), an SLH-DSA-SHAKE-192s key (FIPS 205, for the
+          hybrid account) and standard addresses for 25 chains. Everything runs in Web Workers; nothing
+          leaves the page. The sample phrase is the public Hardhat / Foundry test vector.
         </p>
       </div>
 
@@ -48,7 +48,7 @@ export default function DerivePanel() {
           <div className="derive-sub-bar">
             <span>
               {valid
-                ? <span style={{ color: "var(--accent)" }}>✓ valid BIP-39{loading && " · deriving SPHINCS+ keypair…"}</span>
+                ? <span style={{ color: "var(--accent)" }}>✓ valid BIP-39{loading && " · deriving…"}</span>
                 : <span style={{ color: "var(--warn)" }}>✗ invalid phrase</span>}
             </span>
             <button className="link-btn" onClick={() => setMnemonic(SAMPLE)}>load sample →</button>

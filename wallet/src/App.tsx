@@ -2,26 +2,37 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import ChainDashboard from "./components/ChainDashboard";
 import ChainMarquee   from "./components/ChainMarquee";
 import ShieldMark     from "./components/ShieldMark";
-import Terminal       from "./components/Terminal";
 import ThemeToggle    from "./components/ThemeToggle";
+import HypertreeFigure from "./components/HypertreeFigure";
+import ParamsTable    from "./components/ParamsTable";
 import { useParallax } from "./hooks/useParallax";
 import { applyTheme, getInitialTheme } from "./theme";
 
 // Lazy chunks: defer heavy crypto + rarely-used UI until after first paint.
 const DerivePanel    = lazy(() => import("./components/DerivePanel"));
+const LabBench       = lazy(() => import("./components/LabBench"));
 const ArchitectureDiagram = lazy(() => import("./components/ArchitectureDiagram"));
 const CodeShowcase   = lazy(() => import("./components/CodeShowcase"));
 const CommandPalette = lazy(() => import("./components/CommandPalette"));
 
-// Apply theme ASAP (before React hydrates visible content).
 applyTheme(getInitialTheme());
 
-const BUILD = (((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BUILD_SHA) || "fadba15").slice(0, 7);
+const BUILD = (((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BUILD_SHA) || "dev").slice(0, 7);
+const REPO = "https://github.com/imadegoodstuff/aegis-protocol";
+
+const NAV = [
+  { href: "#protect", label: "Protect" },
+  { href: "#bench",   label: "Bench" },
+  { href: "#arch",    label: "Architecture" },
+  { href: "#why",     label: "Threat model" },
+  { href: "#verify",  label: "Verify" },
+  { href: "#code",    label: "Code" },
+];
 
 function LiveTicker() {
   const [clock, setClock] = useState("--:--:--");
   useEffect(() => {
-    const t = () => setClock(new Date().toISOString().slice(11, 19) + " UTC");
+    const t = () => setClock(new Date().toISOString().slice(11, 19) + "Z");
     t();
     const i = setInterval(t, 1000);
     return () => clearInterval(i);
@@ -29,22 +40,22 @@ function LiveTicker() {
   return (
     <div className="nav-ticker" title="Protocol status">
       <span className="dot" />
-      <span className="k">CHAINS</span><span className="v">13 live</span>
+      <span className="k">set</span><span className="v">CCHS-K-20</span>
       <span className="sep">·</span>
-      <span className="k">BUILD</span><span className="v mono">{BUILD}</span>
+      <span className="k">gas</span><span className="v num">118 K</span>
       <span className="sep">·</span>
-      <span className="k">SIG</span><span className="v">SPHINCS+-192s</span>
+      <span className="k">build</span><span className="v num">{BUILD}</span>
       <span className="sep">·</span>
-      <span className="v mono">{clock}</span>
+      <span className="v num">{clock}</span>
     </div>
   );
 }
 
 function useMouseGlow() {
   useEffect(() => {
+    if (window.matchMedia("(hover: none)").matches) return;
     const h = (e: PointerEvent) => {
-      const t = e.target as HTMLElement;
-      const card = t.closest?.(".card") as HTMLElement | null;
+      const card = (e.target as HTMLElement).closest?.(".card") as HTMLElement | null;
       if (!card) return;
       const r = card.getBoundingClientRect();
       card.style.setProperty("--mx", `${e.clientX - r.left}px`);
@@ -55,37 +66,57 @@ function useMouseGlow() {
   }, []);
 }
 
-/** Mount CommandPalette only after the first ⌘K / Ctrl+K press (saves initial JS). */
 function useLazyCommandPalette() {
   const [enabled, setEnabled] = useState(false);
   useEffect(() => {
-    const h = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") setEnabled(true);
-    };
+    const h = (e: KeyboardEvent) => { if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") setEnabled(true); };
     window.addEventListener("keydown", h, { once: true });
     return () => window.removeEventListener("keydown", h);
   }, []);
   return enabled;
 }
 
+function MobileMenu({ open, onClose }: { open: boolean; onClose: () => void }) {
+  useEffect(() => {
+    document.documentElement.style.overflow = open ? "hidden" : "";
+    return () => { document.documentElement.style.overflow = ""; };
+  }, [open]);
+  if (!open) return null;
+  return (
+    <div className="mnav" role="dialog" aria-label="Menu">
+      <div className="mnav-head">
+        <div className="brand"><span className="brand-mark"><ShieldMark size={22} /></span><span>AEGIS</span></div>
+        <button className="btn btn-sm" onClick={onClose} aria-label="Close menu">close</button>
+      </div>
+      <nav className="mnav-links">
+        {NAV.map((n, i) => (
+          <a key={n.href} href={n.href} onClick={onClose}>
+            <span className="num mono">{String(i + 1).padStart(2, "0")}</span>{n.label}
+          </a>
+        ))}
+        <a href={REPO} target="_blank" rel="noreferrer"><span className="num mono">↗</span>GitHub</a>
+      </nav>
+      <div className="mnav-foot">
+        <ThemeToggle />
+        <span className="mono">build {BUILD}</span>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   useMouseGlow();
   useParallax();
   const cpEnabled = useLazyCommandPalette();
+  const [menu, setMenu] = useState(false);
 
-  // IntersectionObserver reveal
   useEffect(() => {
     const els = document.querySelectorAll<HTMLElement>(".fade");
-    const io = new IntersectionObserver(
-      (entries) => entries.forEach((e) => e.isIntersecting && e.target.classList.add("in")),
-      { threshold: 0.08 }
-    );
+    const io = new IntersectionObserver((entries) => entries.forEach((e) => e.isIntersecting && e.target.classList.add("in")), { threshold: 0.08 });
     els.forEach((el) => io.observe(el));
     return () => io.disconnect();
   }, []);
 
-  // Prefetch lazy chunks only AFTER the user scrolls — never on first paint.
-  // Keeps TBT / FID clean for lighthouse's cold-load measurement.
   useEffect(() => {
     let fired = false;
     const trigger = () => {
@@ -94,15 +125,13 @@ export default function App() {
       window.removeEventListener("scroll", trigger);
       window.removeEventListener("pointerdown", trigger);
       void import("./components/DerivePanel");
+      void import("./components/LabBench");
       void import("./components/ArchitectureDiagram");
       void import("./components/CodeShowcase");
     };
-    window.addEventListener("scroll", trigger, { passive: true, once: false });
-    window.addEventListener("pointerdown", trigger, { passive: true, once: false });
-    return () => {
-      window.removeEventListener("scroll", trigger);
-      window.removeEventListener("pointerdown", trigger);
-    };
+    window.addEventListener("scroll", trigger, { passive: true });
+    window.addEventListener("pointerdown", trigger, { passive: true });
+    return () => { window.removeEventListener("scroll", trigger); window.removeEventListener("pointerdown", trigger); };
   }, []);
 
   return (
@@ -110,95 +139,85 @@ export default function App() {
       <a className="skip-link" href="#main">Skip to content</a>
       <div className="mesh" aria-hidden="true" />
       <div className="grid" aria-hidden="true" />
-      {/* grain is deferred — adds visual tactility but costs 1 paint layer */}
       <div className="grain" aria-hidden="true" />
-      {cpEnabled && (
-        <Suspense fallback={null}>
-          <CommandPalette />
-        </Suspense>
-      )}
+      {cpEnabled && <Suspense fallback={null}><CommandPalette /></Suspense>}
+      <MobileMenu open={menu} onClose={() => setMenu(false)} />
 
-      {/* NAV */}
       <nav className="nav">
         <div className="container nav-inner">
-          <div className="brand">
+          <a className="brand" href="#top" aria-label="Aegis home">
             <span className="brand-mark"><ShieldMark size={22} /></span>
             <span>AEGIS</span>
-            <span className="chip" style={{ marginLeft: 4 }}>v0.1 · pre-audit</span>
-          </div>
+            <span className="chip nav-chip">CCHS v1 · pre-audit</span>
+          </a>
           <LiveTicker />
           <div className="nav-cluster">
-            <a className="nav-link" href="#chains">Chains</a>
-            <a className="nav-link" href="#arch">Architecture</a>
-            <a className="nav-link" href="#why">Threat</a>
-            <a className="nav-link" href="#verify">Verify</a>
-            <a className="nav-link" href="#code">Code</a>
+            {NAV.map((n) => <a key={n.href} className="nav-link" href={n.href}>{n.label}</a>)}
             <span className="nav-kbd"><kbd>⌘</kbd><kbd>K</kbd></span>
             <ThemeToggle />
-            <a
-              className="btn btn-sm"
-              href="https://github.com/imadegoodstuff/aegis-protocol"
-              target="_blank" rel="noreferrer"
-            >
-              GitHub ↗
-            </a>
+            <a className="btn btn-sm" href={REPO} target="_blank" rel="noreferrer">GitHub ↗</a>
           </div>
+          <button className="btn btn-sm nav-burger" onClick={() => setMenu(true)} aria-label="Open menu">menu</button>
         </div>
       </nav>
 
-      {/* MAIN */}
       <main id="main">
 
       {/* HERO */}
-      <header className="hero">
+      <header className="hero" id="top">
         <div className="container">
-          <div className="hero-eyebrow fade">
-            <span className="bar" />
-            <span className="dot" />
-            <span>Post-quantum signature infrastructure · FIPS 205 SLH-DSA</span>
-          </div>
-          <h1 className="hero-title fade d1 parallax-med">
-            Signatures that <span className="accent">outlive</span><br />
-            elliptic curves.
-          </h1>
-          <p className="hero-sub fade d2">
-            One BIP-39 mnemonic → real mainnet-usable addresses on 23 chains
-            today (importable to MetaMask, Phantom, Keplr, Petra, Sui, Sparrow,
-            TronLink, near-cli) plus a real FIPS 205 SLH-DSA-SHAKE-192s key for
-            the post-quantum insurance layer. No bridge, no pool, no admin, no token.
-          </p>
-          <div className="hero-ctas fade d3">
-            <a className="btn btn-primary" href="#chains">Derive my addresses →</a>
-            <a className="btn" href="#verify">Self-verify in 10 s</a>
-            <a className="btn btn-ghost" href="#arch">Architecture</a>
-          </div>
-          <div className="hero-meta fade d3">
-            <span><b>SIG</b> SLH-DSA-SHAKE-192s · live in wallet</span>
-            <span><b>HASH</b> SHAKE-256 / keccak256</span>
-            <span><b>LATTICE</b> none</span>
-            <span><b>PAIRING</b> none</span>
+          <div className="hero-grid">
+            <div className="hero-copy">
+              <div className="hero-eyebrow fade">
+                <span className="bar" />
+                <span>Chain-Cached Hypertree Signatures · hash-only accounts</span>
+              </div>
+              <h1 className="hero-title fade d1">
+                A signature scheme whose only assumption is <span className="accent">a hash function.</span>
+              </h1>
+              <p className="hero-sub fade d2">
+                CCHS turns a smart contract's memory into part of the signature. The verifier checks
+                the upper tree layer once per subtree, caches the result on chain, and the next 1 023
+                signatures carry only the bottom layer: 2.5 KB, ~118 K gas, no elliptic curves, no lattices,
+                no trusted setup. One master key, the same account address on every EVM chain.
+              </p>
+              <div className="hero-ctas fade d3">
+                <a className="btn btn-primary" href="#protect">Protect an account →</a>
+                <a className="btn" href="#bench">Run the bench</a>
+                <a className="btn btn-ghost" href={`${REPO}/blob/main/CCHS.spec.md`} target="_blank" rel="noreferrer">Read the spec ↗</a>
+              </div>
+              <div className="hero-meta fade d3">
+                <span><b>assumption</b> keccak256 / SHA-256 preimage</span>
+                <span><b>curves</b> none</span>
+                <span><b>lattices</b> none</span>
+                <span><b>admin keys</b> none</span>
+              </div>
+            </div>
+            <div className="hero-fig fade d2">
+              <HypertreeFigure />
+            </div>
           </div>
 
           <div className="stats fade d3 parallax-slow">
             <div className="stat">
-              <div className="stat-k">mainnet addresses</div>
-              <div className="stat-v">23</div>
-              <div className="stat-s">12 EVM + Solana + TRON + 5 Cosmos + NEAR + Aptos + Sui + Bitcoin</div>
+              <div className="stat-k">execution gas · cached</div>
+              <div className="stat-v num">118<span className="stat-unit">K</span></div>
+              <div className="stat-s">CCHS-K-20 · measured · SPHINCS+ C13 ≈ 190 K</div>
             </div>
             <div className="stat">
-              <div className="stat-k">preview / roadmap</div>
-              <div className="stat-v">2</div>
-              <div className="stat-s">TON (StateInit SDK) · Starknet (account factory)</div>
+              <div className="stat-k">signature</div>
+              <div className="stat-v num">2 464<span className="stat-unit">B</span></div>
+              <div className="stat-s">amortized · 4 928 B first in subtree</div>
             </div>
             <div className="stat">
-              <div className="stat-k">timelock</div>
-              <div className="stat-v">7d</div>
-              <div className="stat-s">PQ key can veto a stolen-ECDSA exit</div>
+              <div className="stat-k">signatures per key</div>
+              <div className="stat-v num">2<sup>20</sup></div>
+              <div className="stat-s">+ 256 recoveries · no client state</div>
             </div>
             <div className="stat">
-              <div className="stat-k">fee ceiling</div>
-              <div className="stat-v">20%</div>
-              <div className="stat-s">of gas · <code>constant</code> · ungovernable</div>
+              <div className="stat-k">keygen · browser</div>
+              <div className="stat-v num">≈1<span className="stat-unit">s</span></div>
+              <div className="stat-s">both sets · worker pool · WASM hash cores</div>
             </div>
           </div>
 
@@ -206,47 +225,67 @@ export default function App() {
         </div>
       </header>
 
-      {/* 01 CHAINS */}
-      <section id="chains" className="section">
+      {/* 01 PROTECT */}
+      <section id="protect" className="section">
         <div className="container">
           <div className="section-head fade">
             <div className="section-num">01</div>
             <div>
-              <div className="section-eyebrow">Multi-chain · one identity</div>
-              <h2 className="section-title">Your assets, every chain, one signature.</h2>
+              <div className="section-eyebrow">Protect · one identity · every chain</div>
+              <h2 className="section-title">Derive. Predict. Protect.</h2>
               <p className="section-sub">
-                One seed derives a SPHINCS+ keypair. The same immutable factory address
-                on every EVM chain (CREATE2) gives you a predictable account at the same
-                address. Non-EVM chains derive independent accounts from the same seed.
+                A BIP-39 phrase derives the CCHS master. The keccak set fixes one account address on every
+                EVM chain through a factory that lives at the same address everywhere; the SHA-256 set serves
+                every other chain. The address exists before any transaction. Protecting a chain is one click
+                and one transaction: create the account and move ETH in.
               </p>
             </div>
           </div>
-
-          <div className="fade"><ChainDashboard /></div>
-
           <div className="fade">
-            <Suspense fallback={<DerivePanelSkeleton />}>
+            <Suspense fallback={<CardSkeleton height={720} />}>
               <DerivePanel />
             </Suspense>
           </div>
-
-          <div className="fade"><Terminal /></div>
+          <div className="fade"><ChainDashboard /></div>
         </div>
       </section>
 
-      {/* 02 ARCH */}
-      <section id="arch" className="section cv">
+      {/* 02 BENCH */}
+      <section id="bench" className="section cv">
         <div className="container">
           <div className="section-head fade">
             <div className="section-num">02</div>
             <div>
-              <div className="section-eyebrow">Architecture · interactive · two layers</div>
-              <h2 className="section-title">One core · ten adapters · two independent layers.</h2>
+              <div className="section-eyebrow">Measurements</div>
+              <h2 className="section-title">Numbers you can reproduce.</h2>
               <p className="section-sub">
-                <b>addr</b> = standard mainnet address derived in the browser, importable to the
-                chain's native wallet TODAY. <b>pq</b> = the on-chain smart-account contract that
-                adds hash-only post-quantum recovery. These layers deploy independently per chain —
-                most addresses are mainnet-live now; most PQ contracts are still roadmap.
+                The bench runs the real protocol on your device: key generation in a worker pool, two
+                signatures (first-in-subtree and cached), local verification, and two attacks that must fail.
+                Table 1 lists the on-chain costs measured in an EVM with these same signatures.
+              </p>
+            </div>
+          </div>
+          <div className="bench-grid fade">
+            <Suspense fallback={<CardSkeleton height={420} />}>
+              <LabBench />
+            </Suspense>
+            <ParamsTable />
+          </div>
+        </div>
+      </section>
+
+      {/* 03 ARCH */}
+      <section id="arch" className="section cv">
+        <div className="container">
+          <div className="section-head fade">
+            <div className="section-num">03</div>
+            <div>
+              <div className="section-eyebrow">Architecture · two layers · ten adapters</div>
+              <h2 className="section-title">One master key, one verifier, many chains.</h2>
+              <p className="section-sub">
+                <b>addr</b> is the chain's standard address derived in the browser, importable to native wallets
+                today. <b>pq</b> is the CCHS account contract for that chain. The EVM contract is complete and
+                tested; the other verifiers exist as source against shared test vectors and are not deployed.
               </p>
             </div>
           </div>
@@ -258,81 +297,78 @@ export default function App() {
         </div>
       </section>
 
-      {/* 03 THREAT MODEL */}
+      {/* 04 THREAT MODEL */}
       <section id="why" className="section cv">
         <div className="container">
           <div className="section-head fade">
-            <div className="section-num">03</div>
+            <div className="section-num">04</div>
             <div>
-              <div className="section-eyebrow">Threat model · honest version</div>
-              <h2 className="section-title">What Aegis protects — and what it can't.</h2>
+              <div className="section-eyebrow">Threat model · stated plainly</div>
+              <h2 className="section-title">What holds, and what does not.</h2>
               <p className="section-sub">
-                Aegis strengthens the signature layer only. No marketing: here is
-                exactly what you get and what still depends on the underlying chain,
-                your device, and the broader cryptographic community.
+                CCHS strengthens the signature layer only. Everything else, the chain's consensus, your device,
+                your seed handling, is outside it.
               </p>
             </div>
           </div>
 
           <div className="promise fade">
             <div className="card promise-card good">
-              <h3><span className="ic">✓</span> Protected by Aegis</h3>
+              <h3><span className="ic">✓</span> Holds under the stated assumption</h3>
               <ul className="promise-list">
-                <li><span className="mark">▶</span> Wallet produces real FIPS 205 SLH-DSA-SHAKE-192s signatures in-browser today (via <code>@noble/post-quantum</code>)</li>
-                <li><span className="mark">▶</span> Non-custodial: funds in your per-user immutable contract</li>
-                <li><span className="mark">▶</span> No admin, no upgrade, no selfdestruct, no pause</li>
-                <li><span className="mark">▶</span> ECDSA fallback: 7-day timelock to your pre-committed guardian</li>
-                <li><span className="mark">▶</span> PQ key can veto a stolen-ECDSA exit attempt</li>
-                <li><span className="mark">▶</span> Protocol fee hard-capped at 20% in a <code>constant</code></li>
-                <li><span className="mark">▶</span> Account survives on any fork that preserves state root</li>
+                <li><span className="mark">▶</span> Unforgeability reduces to WOTS+ (Hülsing 2013) and Merkle tree security; the only assumption is preimage / second-preimage resistance of the hash</li>
+                <li><span className="mark">▶</span> A signature seen in the mempool cannot be redirected: the Winternitz checksum makes any digest change require a chain pre-image</li>
+                <li><span className="mark">▶</span> Cache entries can only be written through a valid top-layer signature; recovery rotates the epoch and empties the cache</li>
+                <li><span className="mark">▶</span> Replay is impossible: chain ID, account, nonce and index are inside every digest</li>
+                <li><span className="mark">▶</span> No admin, proxy, upgrade, pause, fee, or treasury in the account contract</li>
+                <li><span className="mark">▶</span> The client keeps no state; the next index is read from the chain</li>
+                <li><span className="mark">▶</span> Interop verified: client signatures executed against the compiled contracts for both sets</li>
               </ul>
             </div>
             <div className="card promise-card bad">
-              <h3><span className="ic">!</span> Honestly out of scope · work-in-progress</h3>
+              <h3><span className="ic">!</span> Not yet, or not ours to promise</h3>
               <ul className="promise-list">
-                <li><span className="mark">▶</span> On-chain Solidity verifier for SLH-DSA-SHAKE-192s not yet deployed; vendored C13 variant (keccak-tweakable-hash, 3,688 B sigs) is in <code>evm/src/vendor/</code> but needs matching signer</li>
-                <li><span className="mark">▶</span> No AegisAccount deployed to any mainnet yet · Sepolia end-to-end integration pending audit</li>
-                <li><span className="mark">▶</span> We cannot save you if the underlying chain's consensus is broken</li>
-                <li><span className="mark">▶</span> We cannot recover a lost mnemonic or a compromised device</li>
-                <li><span className="mark">▶</span> We cannot undo a wrong guardian address committed at deploy time</li>
-                <li><span className="mark">▶</span> If SPHINCS+ itself falls (i.e. hash functions fall) all systems fall</li>
-                <li><span className="mark">▶</span> v0.1 does not include on-chain privacy. Note relay is on the roadmap</li>
-                <li><span className="mark">▶</span> SPHINCS+ verify is ~290K gas; expensive on L1 Ethereum, cheap on L2</li>
-                <li><span className="mark">▶</span> zkSync Era's CREATE2 differs; its address is independent</li>
+                <li><span className="mark">▶</span> The factory is not published on any chain yet; the Protect panel shows this live and will not pretend otherwise</li>
+                <li><span className="mark">▶</span> No external audit and no machine-checked proof of the reductions in §6 of the spec</li>
+                <li><span className="mark">▶</span> Non-EVM verifiers (Solana, CosmWasm, NEAR, Move, Cairo, TON) are source against test vectors, not deployments</li>
+                <li><span className="mark">▶</span> Bitcoin needs OP_CAT or OP_CHECKSIGFROMSTACK to bind a hash signature to a transaction; neither is active</li>
+                <li><span className="mark">▶</span> Keygen is ~1 s, not ~100 ms; that needs the chain loop inside WASM</li>
+                <li><span className="mark">▶</span> A lost mnemonic or a compromised device cannot be recovered by anyone</li>
+                <li><span className="mark">▶</span> If the hash function falls, everything built on it falls, including every other post-quantum scheme</li>
               </ul>
             </div>
           </div>
         </div>
       </section>
 
-      {/* 04 VERIFY */}
+      {/* 05 VERIFY */}
       <section id="verify" className="section cv">
         <div className="container">
           <div className="section-head fade">
-            <div className="section-num">04</div>
+            <div className="section-num">05</div>
             <div>
-              <div className="section-eyebrow">10-second self-verification</div>
-              <h2 className="section-title">Trust the code. Not us.</h2>
+              <div className="section-eyebrow">Self-verification</div>
+              <h2 className="section-title">Check it yourself.</h2>
               <p className="section-sub">
-                Open your Aegis address on any block explorer. Verify each of the
-                following yourself. If any single check fails, stop and withdraw.
+                Each item below is a fact about code in the public repository or about an address on a block
+                explorer. If any one fails, do not use the account.
               </p>
             </div>
           </div>
 
           <div className="checks">
             {[
-              { h: "Non-custodial",             p: "No transfer / withdraw / mint on the account. Your balance is yours on-chain." },
-              { h: "Not upgradeable",           p: "No proxy, no upgradeTo, no delegatecall storage escape, no selfdestruct." },
-              { h: "Fee cap hardcoded",         p: "MAX_FEE_BPS = 2000 is a constant. Governance cannot raise it. Current fee is 10% of gas." },
-              { h: "Guardian is immutable",     p: "GUARDIAN is set at deploy. No setter exists. Verify it on-chain yourself." },
-              { h: "Exit path is free",         p: "finalizeEmergencyExit does not touch FEE_COLLECTOR. Code is law." },
-              { h: "Deployer EOA is burned",    p: "After multi-chain deploy, the deployer private key is destroyed on a public livestream." },
-              { h: "Front-end on IPFS",         p: "ENS contenthash points to IPFS CID. You can self-host the UI from source." },
-              { h: "Same address, every chain", p: "Factory and verifier deployed with same salt + nonce. Open explorers side-by-side." },
+              { h: "No owner, no upgrade",            p: "AegisCCHSBase has no setters, no proxy, no delegatecall, no selfdestruct. Storage is roots, counters and the cache." },
+              { h: "Same bytecode on every chain",    p: "The factory is built with fixed compiler settings and published through the deterministic-deployment proxy. Compare runtime hashes across explorers." },
+              { h: "Address is a pure function",      p: "account = CREATE2(factory, keccak(root ‖ recRoot ‖ set), keccak(initCode ‖ roots)). The wallet computes it offline; the factory's predict() must agree." },
+              { h: "Signatures are hash chains",      p: "execute() calls only keccak256 or the SHA-256 precompile. There is no ecrecover and no pairing anywhere in the account." },
+              { h: "Test vectors are shared",         p: "evm/test/fixtures/cchs-*.json drive the Solidity tests and every other port. Regenerate them from the TypeScript client and diff." },
+              { h: "Attacks are tests",               p: "Front-run, replay, tampered chain value, tampered path, cache poisoning, old key after recovery: each is a Foundry test that must revert." },
+              { h: "Front-end is static",             p: "Build from source, serve the dist folder. No API, no telemetry; RPC calls go to public endpoints you can change." },
+              { h: "Spec states its limits",          p: "CCHS.spec.md §1 lists prior art and what the contribution is; §11 lists open problems. Read those before the claims." },
             ].map((c, i) => (
               <div key={i} className="card check fade">
-                <div className="check-num" aria-hidden="true">{String(i + 1).padStart(2, "0")}</div>
+                <div className="check-num mono" aria-hidden="true">{String(i + 1).padStart(2, "0")}</div>
                 <h3 className="check-title">{c.h}</h3>
                 <p>{c.p}</p>
               </div>
@@ -341,18 +377,16 @@ export default function App() {
         </div>
       </section>
 
-      {/* 05 CODE */}
+      {/* 06 CODE */}
       <section id="code" className="section cv">
         <div className="container">
           <div className="section-head fade">
-            <div className="section-num">05</div>
+            <div className="section-num">06</div>
             <div>
-              <div className="section-eyebrow">The actual code</div>
-              <h2 className="section-title">Four surfaces · one state machine.</h2>
+              <div className="section-eyebrow">Source</div>
+              <h2 className="section-title">Several surfaces, one state machine.</h2>
               <p className="section-sub">
-                The same account semantics across Solidity, Rust (core),
-                Cairo (Starknet), and TypeScript (wallet). Pulled directly from the
-                open-source repo.
+                Solidity, Rust, Cairo and TypeScript implement the same verifier against the same vectors.
               </p>
             </div>
           </div>
@@ -366,45 +400,43 @@ export default function App() {
 
       </main>
 
-      {/* FOOTER */}
       <footer className="footer">
         <div className="container">
           <div className="footer-top">
             <div className="footer-col footer-brand">
               <div className="brand" style={{ fontSize: 18, marginBottom: 8 }}>
-                <span className="brand-mark" />
+                <span className="brand-mark"><ShieldMark size={22} /></span>
                 <span>aegis</span>
               </div>
               <p>
-                A protocol built in response to the 2026-10-07 warnings from
-                Vitalik Buterin and Justin Drake. Hash-only, chain-agnostic,
-                rug-proof by construction.
+                Chain-Cached Hypertree Signatures. Built from WOTS+ (2013), Merkle trees (1979) and hypertrees
+                (XMSS^MT, 2013); the contribution is the verifier-side cache and the trade-off it reaches.
               </p>
             </div>
             <div className="footer-col">
               <h3 className="footer-col-title">Protocol</h3>
-              <a href="#chains">Chains</a>
+              <a href="#protect">Protect</a>
+              <a href="#bench">Bench</a>
               <a href="#arch">Architecture</a>
               <a href="#why">Threat model</a>
-              <a href="#verify">Self-verify</a>
             </div>
             <div className="footer-col">
-              <h3 className="footer-col-title">Repo</h3>
-              <a href="https://github.com/imadegoodstuff/aegis-protocol" target="_blank" rel="noreferrer">GitHub</a>
-              <a href="https://github.com/imadegoodstuff/aegis-protocol/blob/main/SPEC.md" target="_blank" rel="noreferrer">SPEC.md</a>
-              <a href="https://github.com/imadegoodstuff/aegis-protocol/blob/main/ADAPTERS.md" target="_blank" rel="noreferrer">ADAPTERS.md</a>
-              <a href="https://github.com/imadegoodstuff/aegis-protocol/blob/main/docs/TESTNET_DEMO.md" target="_blank" rel="noreferrer">Testnet demo</a>
+              <h3 className="footer-col-title">Repository</h3>
+              <a href={REPO} target="_blank" rel="noreferrer">GitHub</a>
+              <a href={`${REPO}/blob/main/CCHS.spec.md`} target="_blank" rel="noreferrer">CCHS.spec.md</a>
+              <a href={`${REPO}/blob/main/SPEC.md`} target="_blank" rel="noreferrer">SPEC.md</a>
+              <a href={`${REPO}/blob/main/ADAPTERS.md`} target="_blank" rel="noreferrer">ADAPTERS.md</a>
             </div>
             <div className="footer-col">
-              <h3 className="footer-col-title">Credits</h3>
-              <a href="https://github.com/nconsigny/SPHINCS-" target="_blank" rel="noreferrer">nconsigny/SPHINCS-</a>
-              <a href="https://pq.ethereum.org/" target="_blank" rel="noreferrer">pq.ethereum.org</a>
+              <h3 className="footer-col-title">References</h3>
+              <a href="https://eprint.iacr.org/2017/965" target="_blank" rel="noreferrer">WOTS+ / XMSS (RFC 8391)</a>
               <a href="https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.205.pdf" target="_blank" rel="noreferrer">FIPS 205 SLH-DSA</a>
+              <a href="https://github.com/bitcoin/bips/blob/master/bip-0347.mediawiki" target="_blank" rel="noreferrer">BIP-347 OP_CAT</a>
             </div>
           </div>
           <div className="footer-bottom">
-            <span>v0.1 · pre-audit · not for mainnet use · MIT (contracts) + GPL-3.0 (wallet UI)</span>
-            <span>build {BUILD} · press ⌘K anywhere</span>
+            <span>CCHS v1 · pre-audit · MIT (protocol, contracts) · GPL-3.0 (wallet UI)</span>
+            <span>build {BUILD} · ⌘K</span>
           </div>
         </div>
       </footer>
@@ -414,19 +446,8 @@ export default function App() {
 
 function CardSkeleton({ height }: { height: number }) {
   return (
-    <div
-      className="card"
-      style={{
-        height,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        color: "var(--text-4)", fontFamily: "var(--font-mono)", fontSize: 12,
-      }}
-    >
+    <div className="card" style={{ height, display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-4)", fontFamily: "var(--font-mono)", fontSize: 12 }}>
       loading…
     </div>
   );
-}
-
-function DerivePanelSkeleton() {
-  return <CardSkeleton height={720} />;
 }

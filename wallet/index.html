@@ -3,26 +3,24 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#000000" />
-    <meta name="description" content="Aegis — post-quantum signature infrastructure for every chain. One BIP-39 seed, SPHINCS+ hash-only signatures, identical address across 30+ EVM chains. Immutable contracts, no admin, no pool, no bridge, no token." />
-    <meta property="og:title" content="Aegis — Post-Quantum Signature Infrastructure" />
-    <meta property="og:description" content="Signatures that outlive elliptic curves. One seed. SPHINCS+-192s. 30+ chains. Immutable, rug-proof by construction." />
+    <meta name="theme-color" content="#06080c" />
+    <meta name="description" content="Aegis — hash-only accounts built on Chain-Cached Hypertree Signatures (CCHS). The verifier caches subtree roots on chain; signatures are 2.5 KB and about 118 K gas. One master key, the same account address on every EVM chain. No elliptic curves, no lattices, no admin." />
+    <meta property="og:title" content="Aegis — Chain-Cached Hypertree Signatures" />
+    <meta property="og:description" content="A signature scheme whose only assumption is a hash function. 2.5 KB, ~118 K gas, one address on every EVM chain." />
     <meta property="og:type" content="website" />
     <meta property="og:url" content="https://aegis-wallet.fly.dev/" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta name="twitter:title" content="Aegis — Post-Quantum Signature Infrastructure" />
-    <meta name="twitter:description" content="Signatures that outlive elliptic curves. One seed. SPHINCS+-192s. 30+ chains." />
+    <meta name="twitter:title" content="Aegis — Chain-Cached Hypertree Signatures" />
+    <meta name="twitter:description" content="Hash-only accounts. 2.5 KB signatures, ~118 K gas, same address on every EVM chain." />
     <link rel="canonical" href="https://aegis-wallet.fly.dev/" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <!-- Self-hosted fonts: no external round-trip. Preload the 2 critical weights. -->
     <link rel="preload" href="/fonts/inter-latin-400-normal.woff2"       as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/inter-tight-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin />
     <link rel="preload" href="/fonts/jetbrains-mono-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
     <script>
-      // No-flash theme boot: apply saved theme before React mounts.
       (function(){try{var t=localStorage.getItem('aegis.theme');if(t==='light'||t==='dark'){document.documentElement.setAttribute('data-theme',t);document.documentElement.style.colorScheme=t;}}catch(e){}})();
     </script>
-    <title>Aegis · Post-Quantum Smart Account for Every Chain</title>
+    <title>Aegis · Chain-Cached Hypertree Signatures</title>
   </head>
   <body>
     <div id="root"></div>

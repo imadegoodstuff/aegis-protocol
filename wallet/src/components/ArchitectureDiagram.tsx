@@ -1,100 +1,80 @@
 import { useState } from "react";
 
-type AdapterId =
-  | "evm" | "cairo" | "svm" | "cosmos" | "tron" | "aptos" | "sui" | "near" | "ton" | "bitcoin";
+type AdapterId = "evm" | "tron" | "svm" | "cosmos" | "near" | "aptos" | "sui" | "cairo" | "ton" | "bitcoin";
 
-type Status = "live" | "roadmap" | "wait";
+/** pq = CCHS verifier state. "contract" = complete + tested, factory not published; "source" = code against vectors; "blocked" = external dependency. */
+type Pq = "contract" | "source" | "blocked";
 
 type Adapter = {
-  id: AdapterId;
-  name: string;
-  family: string;
-  /** Address derivation: is a usable mainnet address derived + importable to native wallet? */
+  id: AdapterId; name: string; family: string; set: string;
   addrStatus: "mainnet" | "preview";
-  /** PQ smart-account on-chain layer: is the contract/program deployed? */
-  pqStatus: Status;
-  address: string;
-  verify: string;
-  effort: string;
-  blurb: string;
+  pq: Pq;
+  address: string; hash: string; storage: string; path: string; blurb: string;
 };
 
 const ADAPTERS: Adapter[] = [
-  { id: "evm",     name: "EVM × 30+",   family: "Solidity",
-    addrStatus: "mainnet", pqStatus: "roadmap",
-    address: "CREATE address (deployer + nonce)",
-    verify: "SPHINCS+ C13 vendored · ~190K gas verify",
-    effort: "contract ready · pending Sepolia deploy (0.01 ETH to deployer)",
-    blurb: "AegisAccountV2.sol + UpgradeHelper + Factory are production-ready. Address derivation is MAINNET today (standard ECDSA → importable to MetaMask). Deploy to Sepolia + any EVM mainnet is one env-var away."
-  },
-  { id: "cairo",   name: "Starknet",    family: "Cairo 1",
-    addrStatus: "preview", pqStatus: "roadmap",
-    address: "requires Argent/Braavos factory formula (preview)",
-    verify: "Poseidon stub · real Cairo SPHINCS+ ~4 w",
-    effort: "state machine shipped",
-    blurb: "Native Starknet smart account with execute / exit state machine in Cairo. Address requires Argent-style account factory computation (adds starknet.js dep). PQ verifier in Cairo is a 4-week implementation."
-  },
-  { id: "svm",     name: "Solana",      family: "Anchor / Rust",
-    addrStatus: "mainnet", pqStatus: "roadmap",
-    address: "base58(ed25519_pk) — real Solana account",
-    verify: "SPHINCS+ via SIMD-0152 syscall or SHRINCS",
-    effort: "~4 weeks",
-    blurb: "Address derivation uses standard ed25519 — importable to Phantom today. PQ account program needs either the SIMD-0152 user-precompile syscall or the SHRINCS variant to fit BPF compute budget."
-  },
-  { id: "cosmos",  name: "Cosmos",      family: "CosmWasm 2.1",
-    addrStatus: "mainnet", pqStatus: "roadmap",
-    address: "bech32(prefix, ripemd160(sha256(secp256k1_pk))) — standard",
-    verify: "In-contract SHRINCS or host_sphincs_verify",
-    effort: "~3 weeks",
-    blurb: "Addresses are standard secp256k1 Cosmos — importable to Keplr today on Osmosis / Neutron / Juno / Stargaze. Injective uses the Ethermint variant. PQ contract is a Rust CosmWasm module."
-  },
-  { id: "tron",    name: "TRON",        family: "TVM (Solidity)",
-    addrStatus: "mainnet", pqStatus: "roadmap",
-    address: "base58check(0x41 ‖ keccak256(ecdsa_pk)[12:])",
-    verify: "Shares EVM artifact",
-    effort: "~1 week",
-    blurb: "TVM is EVM-compatible — the AegisAccount Solidity bytecode works unmodified. Only the base58check address encoding differs. Address importable to TronLink today."
-  },
-  { id: "aptos",   name: "Aptos",       family: "Move",
-    addrStatus: "mainnet", pqStatus: "roadmap",
-    address: "sha3_256(ed25519_pk ‖ 0x00) — standard single-key scheme",
-    verify: "aptos_std::sphincs (future) or SHRINCS",
-    effort: "~6 weeks",
-    blurb: "Standard ed25519 scheme byte 0x00. Importable to Petra / Pontem / Martian today. PQ Move module needs resource-account SignerCapability pattern."
-  },
-  { id: "sui",     name: "Sui",         family: "Move 2024",
-    addrStatus: "mainnet", pqStatus: "roadmap",
-    address: "blake2b_256(0x00 ‖ ed25519_pk) — standard flag",
-    verify: "Native SPHINCS+ (future) or SHRINCS",
-    effort: "~6 weeks",
-    blurb: "Standard ed25519 flag byte 0x00. Importable to Sui Wallet / Suiet / Nightly. PQ account is a shared-object Move 2024 module."
-  },
-  { id: "near",    name: "NEAR",        family: "near-sdk 5.5",
-    addrStatus: "mainnet", pqStatus: "roadmap",
+  { id: "evm", name: "EVM × 12", family: "Solidity 0.8.37", set: "CCHS-K-20",
+    addrStatus: "mainnet", pq: "contract",
+    address: "CREATE2(factory, keccak(root ‖ recRoot ‖ set), initCode)",
+    hash: "keccak256 opcode (S-20: precompile 0x02)", storage: "mapping((epoch<<64)|treeIdx → bytes32)", path: "evm/src/AegisCCHSBase.sol",
+    blurb: "AegisCCHSBase holds all logic; AegisCCHS and AegisCCHSK bind the hash. 15 Foundry tests per set plus factory tests driven by client-generated vectors, interop verified in an EVM. The factory lives at 0x7E49…0efc on every chain once published; it is published nowhere yet." },
+  { id: "tron", name: "TRON", family: "TVM (Solidity)", set: "CCHS-K-20",
+    addrStatus: "mainnet", pq: "contract",
+    address: "base58check(0x41 ‖ keccak256(pk)[12:])",
+    hash: "keccak256 opcode", storage: "same artifact", path: "evm/ (shared)",
+    blurb: "TVM executes the EVM artifact unmodified. Only the address encoding differs. TRON's CREATE2 and the deterministic proxy need checking before the same-address claim extends here." },
+  { id: "svm", name: "Solana", family: "Rust / Anchor", set: "CCHS-S-20",
+    addrStatus: "mainnet", pq: "source",
+    address: "base58(ed25519_pk)",
+    hash: "sha256 syscall", storage: "PDA per (epoch, treeIdx)", path: "solana/, cchs-core/",
+    blurb: "cchs-core is a no_std Rust crate implementing the verifier over an injected hash; it replays the shared vectors in CI. The Solana program wraps it with the chain digest and PDA storage. Compute-unit budget for 1 005 hashes per signature is the open question." },
+  { id: "cosmos", name: "Cosmos", family: "CosmWasm", set: "CCHS-S-20",
+    addrStatus: "mainnet", pq: "source",
+    address: "bech32(prefix, ripemd160(sha256(pk)))",
+    hash: "sha2_256 (Rust)", storage: "Map<(u64,u64), [u8;32]>", path: "cosmwasm/, cchs-core/",
+    blurb: "Same cchs-core crate; the contract adds a chain-id-bound digest and a storage map. Not deployed on any zone." },
+  { id: "near", name: "NEAR", family: "near-sdk", set: "CCHS-S-20",
+    addrStatus: "mainnet", pq: "source",
     address: "hex(ed25519_pk) implicit account",
-    verify: "Fits in one receipt (300 TGas)",
-    effort: "~4 weeks",
-    blurb: "NEAR implicit accounts ARE hex(ed25519_pk) — our derivation gives you one real mainnet account directly. Importable via near-cli. PQ contract is near-sdk Rust."
-  },
-  { id: "ton",     name: "TON",         family: "FunC",
-    addrStatus: "preview", pqStatus: "roadmap",
-    address: "needs StateInit cell hash (preview = ed25519 pubkey)",
-    verify: "SHRINCS variant · TVM op split",
-    effort: "~6 weeks",
-    blurb: "Real TON wallet addresses require computing hash(StateInit) for Wallet v4R2 code+data cells — needs @ton/core (+50 KB). Users can import the ed25519 secret key to Tonkeeper directly."
-  },
-  { id: "bitcoin", name: "Bitcoin",     family: "Taproot / BIP-360",
-    addrStatus: "mainnet", pqStatus: "wait",
-    address: "bc1q + hash160(secp256k1_pk) — BIP-84 P2WPKH",
-    verify: "OP_SPHINCSVERIFY (companion BIP, pending)",
-    effort: "blocked on BIP-360 activation",
-    blurb: "Address is a real BIP-84 SegWit v0 mainnet address — import to Sparrow / Electrum via WIF today. PQ layer blocked: without BIP-360 P2MR, hash-only authority on Bitcoin needs either key-path spend (secp256k1) or always-script-path (bad UX)."
-  },
+    hash: "env::sha256", storage: "LookupMap", path: "near/, cchs-core/",
+    blurb: "Implicit accounts are the raw key, so the derived address is a real account. The contract source uses cchs-core; one receipt (300 TGas) fits a signature comfortably on paper, not yet measured." },
+  { id: "aptos", name: "Aptos", family: "Move", set: "CCHS-S-20",
+    addrStatus: "mainnet", pq: "source",
+    address: "sha3_256(pk ‖ 0x00)",
+    hash: "aptos_std::hash::sha2_256", storage: "Table<u128, vector<u8>>", path: "aptos/sources/",
+    blurb: "Move module with the same ADRS layout and digest construction, checked against the S-20 vectors by unit tests. Not published." },
+  { id: "sui", name: "Sui", family: "Move 2024", set: "CCHS-S-20",
+    addrStatus: "mainnet", pq: "source",
+    address: "blake2b_256(0x00 ‖ pk)",
+    hash: "std::hash::sha2_256", storage: "dynamic fields on a shared object", path: "sui/sources/",
+    blurb: "Shared-object account; cache entries are dynamic fields keyed by (epoch, treeIdx). Vectors replayed in Move tests. Not published." },
+  { id: "cairo", name: "Starknet", family: "Cairo 1", set: "CCHS-S-20",
+    addrStatus: "preview", pq: "source",
+    address: "account factory formula (preview)",
+    hash: "core::sha256 (expensive in Cairo)", storage: "LegacyMap", path: "cairo/src/",
+    blurb: "SHA-256 is costly in Cairo; a keccak or Poseidon-based set would be the natural fit here and is listed as an open problem in the spec. Source and test vectors exist." },
+  { id: "ton", name: "TON", family: "FunC", set: "CCHS-S-20",
+    addrStatus: "preview", pq: "source",
+    address: "hash(StateInit) — preview shows the key",
+    hash: "HASHEXT_SHA256", storage: "dict", path: "ton/contracts/",
+    blurb: "FunC contract with the verifier in cell-based form. Real addresses need the StateInit computation. Not deployed." },
+  { id: "bitcoin", name: "Bitcoin", family: "Tapscript", set: "WOTS+ tapleaf",
+    addrStatus: "mainnet", pq: "blocked",
+    address: "bc1q… (BIP-84) today; P2TR tree address from the builder",
+    hash: "OP_SHA256", storage: "none (UTXO lineage)", path: "wallet/src/aegis/btcTapscript.ts",
+    blurb: "The builder emits a Taproot tree of 2^h WOTS+ leaves and valid spend witnesses, checked against BIP-341 vectors. Without OP_CAT or OP_CHECKSIGFROMSTACK a script cannot bind the signed digits to the transaction, so there is no hash-only Bitcoin spend today." },
 ];
+
+const PQ_TEXT: Record<Pq, { label: string; cls: string }> = {
+  contract: { label: "pq: contract", cls: "live" },
+  source:   { label: "pq: source",   cls: "soon" },
+  blocked:  { label: "pq: blocked",  cls: "wait" },
+};
 
 export default function ArchitectureDiagram() {
   const [sel, setSel] = useState<AdapterId>("evm");
   const a = ADAPTERS.find((x) => x.id === sel)!;
+  const pq = PQ_TEXT[a.pq];
   return (
     <div className="card arch">
       <div className="arch-stage">
@@ -105,17 +85,28 @@ export default function ArchitectureDiagram() {
               <span className="arch-title">BIP-39 mnemonic</span>
               <span className="arch-status live">input</span>
             </div>
-            <div className="arch-sub">24 words · PBKDF2-HMAC-SHA512 · 2048 rounds</div>
+            <div className="arch-sub">PBKDF2-HMAC-SHA512 · 2048 rounds · 64 B seed</div>
           </div>
           <div className="arch-col-label" style={{ marginTop: 10 }}>Core</div>
           <div className="arch-core active">
             <div className="arch-head">
-              <span className="arch-title">aegis-core</span>
-              <span className="arch-status live">rust · wasm</span>
+              <span className="arch-title">CCHS master</span>
+              <span className="arch-status live">32 B</span>
             </div>
             <div className="arch-sub">
-              HKDF-SHA512 → SPHINCS+ pk (48B) + sk (96B)<br />
-              HKDF-SHA512 → secp256k1 fallback (32B)
+              HKDF-SHA256("aegis/cchs/master/v1")<br />
+              → K-20 roots (EVM) · S-20 roots (others)<br />
+              → every WOTS+ chain, derived on demand
+            </div>
+          </div>
+          <div className="arch-core">
+            <div className="arch-head">
+              <span className="arch-title">Verifier</span>
+              <span className="arch-status live">cache</span>
+            </div>
+            <div className="arch-sub">
+              root, recRoot, epoch, nextIdx<br />
+              cachedRoot[(epoch, treeIdx)]
             </div>
           </div>
         </div>
@@ -123,26 +114,16 @@ export default function ArchitectureDiagram() {
         <div className="arch-col" role="group" aria-label="Chain adapters">
           <div className="arch-col-label">Chain adapters</div>
           {ADAPTERS.map((x) => (
-            <div
-              key={x.id}
-              className={"arch-adapter" + (sel === x.id ? " active" : "")}
-              onMouseEnter={() => setSel(x.id)}
-              onFocus={() => setSel(x.id)}
-              onClick={() => setSel(x.id)}
-              tabIndex={0}
-            >
+            <div key={x.id} className={"arch-adapter" + (sel === x.id ? " active" : "")}
+              onMouseEnter={() => setSel(x.id)} onFocus={() => setSel(x.id)} onClick={() => setSel(x.id)} tabIndex={0}>
               <div className="arch-head">
                 <span className="arch-title">{x.name}</span>
                 <div className="arch-stack">
-                  <span className={`arch-status ${x.addrStatus === "mainnet" ? "live" : "soon"}`}>
-                    addr: {x.addrStatus === "mainnet" ? "MAINNET" : "PREVIEW"}
-                  </span>
-                  <span className={`arch-status ${x.pqStatus === "live" ? "live" : x.pqStatus === "roadmap" ? "soon" : "wait"}`}>
-                    pq: {x.pqStatus === "live" ? "LIVE" : x.pqStatus === "roadmap" ? "ROADMAP" : "WAITING"}
-                  </span>
+                  <span className={`arch-status ${x.addrStatus === "mainnet" ? "live" : "soon"}`}>addr: {x.addrStatus}</span>
+                  <span className={`arch-status ${PQ_TEXT[x.pq].cls}`}>{PQ_TEXT[x.pq].label}</span>
                 </div>
               </div>
-              <div className="arch-sub">{x.family}</div>
+              <div className="arch-sub">{x.family} · {x.set}</div>
             </div>
           ))}
         </div>
@@ -151,24 +132,20 @@ export default function ArchitectureDiagram() {
           <div className="arch-head">
             <div className="arch-detail-name">{a.name}</div>
             <div className="arch-stack">
-              <span className={`arch-status ${a.addrStatus === "mainnet" ? "live" : "soon"}`}>
-                addr: {a.addrStatus === "mainnet" ? "MAINNET" : "PREVIEW"}
-              </span>
-              <span className={`arch-status ${a.pqStatus === "live" ? "live" : a.pqStatus === "roadmap" ? "soon" : "wait"}`}>
-                pq: {a.pqStatus === "live" ? "LIVE" : a.pqStatus === "roadmap" ? "ROADMAP" : "WAITING"}
-              </span>
+              <span className={`arch-status ${a.addrStatus === "mainnet" ? "live" : "soon"}`}>addr: {a.addrStatus}</span>
+              <span className={`arch-status ${pq.cls}`}>{pq.label}</span>
             </div>
           </div>
-          <div style={{ fontFamily: "var(--font-mono)", fontSize: 12, color: "var(--text-3)" }}>{a.family}</div>
+          <div className="mono" style={{ fontSize: 12, color: "var(--text-3)" }}>{a.family} · {a.set}</div>
           <p>{a.blurb}</p>
           <div className="meta">
-            <div><div className="k">Address derivation</div><div className="v">{a.address}</div></div>
-            <div><div className="k">Verify path</div><div className="v">{a.verify}</div></div>
-            <div><div className="k">Status</div><div className="v">{a.pqStatus === "live" ? "shipped" : a.pqStatus === "roadmap" ? "roadmap" : "waiting"}</div></div>
-            <div><div className="k">Effort</div><div className="v">{a.effort}</div></div>
+            <div><div className="k">Address</div><div className="v">{a.address}</div></div>
+            <div><div className="k">Hash primitive</div><div className="v">{a.hash}</div></div>
+            <div><div className="k">Cache storage</div><div className="v">{a.storage}</div></div>
+            <div><div className="k">Path</div><div className="v">{a.path}</div></div>
           </div>
-          <div style={{ marginTop: "auto", fontSize: 11.5, color: "var(--text-4)", fontFamily: "var(--font-mono)" }}>
-            hover any adapter · tap on mobile
+          <div className="mono" style={{ marginTop: "auto", fontSize: 11.5, color: "var(--text-4)" }}>
+            hover or tap an adapter
           </div>
         </div>
       </div>

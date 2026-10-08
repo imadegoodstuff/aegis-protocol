@@ -1,49 +1,41 @@
 export type ChainStatus = "mainnet" | "preview" | "research";
 
+/** State of the CCHS verifier for that chain. Keep this truthful. */
+export type PqStatus =
+  | "contract"   // verifier complete and tested; factory not yet published on this chain
+  | "source"     // verifier source exists against shared test vectors; not deployed
+  | "blocked"    // blocked on an external dependency (opcode, protocol feature)
+  | "none";
+
 export type Chain = {
   name: string;
   family: "EVM" | "Starknet" | "SVM" | "Cosmos" | "Move" | "Other" | "Bitcoin";
-  status: ChainStatus;
-  sameAddr?: boolean;    // true for EVM chains that share one CREATE2 address
-  wallet?: string;       // native wallet to import this derived address into
+  status: ChainStatus;   // standard address derivation
+  pq: PqStatus;          // CCHS verifier
+  set: "K-20" | "S-20" | "—";
+  sameAddr?: boolean;    // EVM chains share one CREATE2 address
+  wallet?: string;       // native wallet that can import the derived address
 };
 
-/** Status legend:
- *  mainnet  = address derivation uses the chain's STANDARD scheme; importable to
- *             the native wallet listed in `wallet`; usable on mainnet TODAY.
- *             The PQ smart-account layer is a separate roadmap item per chain.
- *  preview  = address shown but non-standard (needs chain-specific SDK for proper
- *             derivation — e.g. TON StateInit, Starknet account factory).
- *  research = blocked on external dependency (BIP-360 for Bitcoin).
- */
+const EVM = (name: string, wallet = "MetaMask / Rabby"): Chain =>
+  ({ name, family: "EVM", status: "mainnet", pq: "contract", set: "K-20", sameAddr: true, wallet });
+
 export const CHAINS: Chain[] = [
-  { name: "Ethereum",    family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
-  { name: "BSC",         family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
-  { name: "Polygon",     family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
-  { name: "Arbitrum",    family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
-  { name: "Optimism",    family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
-  { name: "Base",        family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Coinbase" },
-  { name: "Avalanche",   family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Core" },
-  { name: "Linea",       family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask" },
-  { name: "Scroll",      family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
-  { name: "Mantle",      family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask" },
-  { name: "Blast",       family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
-  { name: "Mode",        family: "EVM",      status: "mainnet", sameAddr: true, wallet: "MetaMask / Rabby" },
+  EVM("Ethereum"), EVM("Base", "MetaMask / Coinbase"), EVM("Arbitrum"), EVM("Optimism"), EVM("Polygon"),
+  EVM("BSC"), EVM("Avalanche", "MetaMask / Core"), EVM("Linea", "MetaMask"), EVM("Scroll"),
+  EVM("Mantle", "MetaMask"), EVM("Blast"), EVM("Mode"),
 
-  { name: "Solana",      family: "SVM",      status: "mainnet", wallet: "Phantom / Backpack / Solflare" },
-  { name: "TRON",        family: "EVM",      status: "mainnet", wallet: "TronLink / Trust" },
-
-  { name: "Osmosis",     family: "Cosmos",   status: "mainnet", wallet: "Keplr / Leap" },
-  { name: "Injective",   family: "Cosmos",   status: "mainnet", wallet: "Keplr (Ethermint path)" },
-  { name: "Neutron",     family: "Cosmos",   status: "mainnet", wallet: "Keplr / Leap" },
-  { name: "Juno",        family: "Cosmos",   status: "mainnet", wallet: "Keplr / Leap" },
-  { name: "Stargaze",    family: "Cosmos",   status: "mainnet", wallet: "Keplr / Leap" },
-
-  { name: "NEAR",        family: "Other",    status: "mainnet", wallet: "near-cli / NEAR Wallet (implicit)" },
-  { name: "Aptos",       family: "Move",     status: "mainnet", wallet: "Petra / Pontem / Martian" },
-  { name: "Sui",         family: "Move",     status: "mainnet", wallet: "Sui Wallet / Suiet / Nightly" },
-  { name: "Bitcoin",     family: "Bitcoin",  status: "mainnet", wallet: "Sparrow / Electrum (BIP-84 WIF)" },
-
-  { name: "TON",         family: "Other",    status: "preview", wallet: "Tonkeeper (import via ed25519 secret)" },
-  { name: "Starknet",    family: "Starknet", status: "preview", wallet: "Argent X / Braavos (needs factory)" },
+  { name: "TRON",      family: "EVM",      status: "mainnet", pq: "contract", set: "K-20", wallet: "TronLink / Trust" },
+  { name: "Solana",    family: "SVM",      status: "mainnet", pq: "source",   set: "S-20", wallet: "Phantom / Backpack / Solflare" },
+  { name: "Osmosis",   family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr / Leap" },
+  { name: "Injective", family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr" },
+  { name: "Neutron",   family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr / Leap" },
+  { name: "Juno",      family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr / Leap" },
+  { name: "Stargaze",  family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr / Leap" },
+  { name: "NEAR",      family: "Other",    status: "mainnet", pq: "source",   set: "S-20", wallet: "near-cli / NEAR Wallet" },
+  { name: "Aptos",     family: "Move",     status: "mainnet", pq: "source",   set: "S-20", wallet: "Petra / Pontem" },
+  { name: "Sui",       family: "Move",     status: "mainnet", pq: "source",   set: "S-20", wallet: "Sui Wallet / Suiet" },
+  { name: "Starknet",  family: "Starknet", status: "preview", pq: "source",   set: "S-20", wallet: "Argent X / Braavos" },
+  { name: "TON",       family: "Other",    status: "preview", pq: "source",   set: "S-20", wallet: "Tonkeeper" },
+  { name: "Bitcoin",   family: "Bitcoin",  status: "mainnet", pq: "blocked",  set: "—",    wallet: "Sparrow / Electrum" },
 ];
