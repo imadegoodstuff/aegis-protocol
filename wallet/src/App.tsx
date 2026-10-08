@@ -1,19 +1,26 @@
-import { useEffect, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useState } from "react";
 import ChainDashboard from "./components/ChainDashboard";
 import ChainMarquee   from "./components/ChainMarquee";
-import CodeShowcase   from "./components/CodeShowcase";
-import CommandPalette from "./components/CommandPalette";
-import DerivePanel    from "./components/DerivePanel";
 import Terminal       from "./components/Terminal";
+import ThemeToggle    from "./components/ThemeToggle";
+import { useParallax } from "./hooks/useParallax";
+import { applyTheme, getInitialTheme } from "./theme";
 
-// Vite replaces this at build time via `vite build --define`-style; we access it loosely to avoid typing env.
-const BUILD = (((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BUILD_SHA) || "6b91b49").slice(0, 7);
+// Lazy chunks: defer heavy crypto + rarely-used UI until after first paint.
+const DerivePanel    = lazy(() => import("./components/DerivePanel"));
+const ArchitectureDiagram = lazy(() => import("./components/ArchitectureDiagram"));
+const CodeShowcase   = lazy(() => import("./components/CodeShowcase"));
+const CommandPalette = lazy(() => import("./components/CommandPalette"));
+
+// Apply theme ASAP (before React hydrates visible content).
+applyTheme(getInitialTheme());
+
+const BUILD = (((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BUILD_SHA) || "fadba15").slice(0, 7);
 
 function LiveTicker() {
   const [clock, setClock] = useState("--:--:--");
   useEffect(() => {
-    const t = () =>
-      setClock(new Date().toISOString().slice(11, 19) + " UTC");
+    const t = () => setClock(new Date().toISOString().slice(11, 19) + " UTC");
     t();
     const i = setInterval(t, 1000);
     return () => clearInterval(i);
@@ -32,7 +39,6 @@ function LiveTicker() {
   );
 }
 
-/** cursor-tracking light on cards */
 function useMouseGlow() {
   useEffect(() => {
     const h = (e: PointerEvent) => {
@@ -48,13 +54,27 @@ function useMouseGlow() {
   }, []);
 }
 
+/** Mount CommandPalette only after the first ⌘K / Ctrl+K press (saves initial JS). */
+function useLazyCommandPalette() {
+  const [enabled, setEnabled] = useState(false);
+  useEffect(() => {
+    const h = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") setEnabled(true);
+    };
+    window.addEventListener("keydown", h, { once: true });
+    return () => window.removeEventListener("keydown", h);
+  }, []);
+  return enabled;
+}
+
 export default function App() {
   useMouseGlow();
-  const rootRef = useRef<HTMLDivElement>(null);
+  useParallax();
+  const cpEnabled = useLazyCommandPalette();
 
+  // IntersectionObserver reveal
   useEffect(() => {
-    const els = rootRef.current?.querySelectorAll<HTMLElement>(".fade");
-    if (!els) return;
+    const els = document.querySelectorAll<HTMLElement>(".fade");
     const io = new IntersectionObserver(
       (entries) => entries.forEach((e) => e.isIntersecting && e.target.classList.add("in")),
       { threshold: 0.08 }
@@ -64,11 +84,15 @@ export default function App() {
   }, []);
 
   return (
-    <div ref={rootRef}>
+    <div>
       <div className="mesh" />
       <div className="grid" />
       <div className="grain" />
-      <CommandPalette />
+      {cpEnabled && (
+        <Suspense fallback={null}>
+          <CommandPalette />
+        </Suspense>
+      )}
 
       {/* NAV */}
       <nav className="nav">
@@ -81,11 +105,12 @@ export default function App() {
           <LiveTicker />
           <div className="nav-cluster">
             <a className="nav-link" href="#chains">Chains</a>
+            <a className="nav-link" href="#arch">Arch</a>
             <a className="nav-link" href="#why">Threat</a>
             <a className="nav-link" href="#verify">Verify</a>
             <a className="nav-link" href="#code">Code</a>
-            <a className="nav-link" href="#spec">Spec</a>
             <span className="nav-kbd"><kbd>⌘</kbd><kbd>K</kbd></span>
+            <ThemeToggle />
             <a
               className="btn btn-sm"
               href="https://github.com/imadegoodstuff/aegis-protocol"
@@ -104,7 +129,7 @@ export default function App() {
             <span className="pulse" />
             <span>Post-AI-math readiness · hash-only signatures · zero custody</span>
           </div>
-          <h1 className="hero-title fade d1">
+          <h1 className="hero-title fade d1 parallax-med">
             One seed.<br />
             <span className="grad">Every chain.</span><br />
             Quantum-safe signatures today.
@@ -118,10 +143,10 @@ export default function App() {
           <div className="hero-ctas fade d3">
             <a className="btn btn-primary" href="#chains">Try live derivation →</a>
             <a className="btn" href="#verify">10-second self-verify</a>
-            <a className="btn btn-ghost" href="#spec">Read the spec</a>
+            <a className="btn btn-ghost" href="#arch">Architecture</a>
           </div>
 
-          <div className="stats fade d3">
+          <div className="stats fade d3 parallax-slow">
             <div className="stat">
               <div className="stat-k">chains · launch day</div>
               <div className="stat-v">13</div>
@@ -165,16 +190,45 @@ export default function App() {
           </div>
 
           <div className="fade"><ChainDashboard /></div>
-          <div className="fade"><DerivePanel /></div>
+
+          <div className="fade">
+            <Suspense fallback={<DerivePanelSkeleton />}>
+              <DerivePanel />
+            </Suspense>
+          </div>
+
           <div className="fade"><Terminal /></div>
         </div>
       </section>
 
-      {/* 02 THREAT MODEL */}
-      <section id="why" className="section">
+      {/* 02 ARCH */}
+      <section id="arch" className="section">
         <div className="container">
           <div className="section-head fade">
             <div className="section-num">02</div>
+            <div>
+              <div className="section-eyebrow">Architecture · interactive</div>
+              <h2 className="section-title">One core · ten adapters.</h2>
+              <p className="section-sub">
+                One Rust/WASM core derives keys. Each chain adapter is a dedicated contract /
+                program with the same state machine. Hover any adapter below to inspect its
+                address derivation, verifier path, and status.
+              </p>
+            </div>
+          </div>
+          <div className="fade">
+            <Suspense fallback={<CardSkeleton height={420} />}>
+              <ArchitectureDiagram />
+            </Suspense>
+          </div>
+        </div>
+      </section>
+
+      {/* 03 THREAT MODEL */}
+      <section id="why" className="section">
+        <div className="container">
+          <div className="section-head fade">
+            <div className="section-num">03</div>
             <div>
               <div className="section-eyebrow">Threat model · honest version</div>
               <h2 className="section-title">What Aegis protects — and what it can't.</h2>
@@ -215,11 +269,11 @@ export default function App() {
         </div>
       </section>
 
-      {/* 03 VERIFY */}
+      {/* 04 VERIFY */}
       <section id="verify" className="section">
         <div className="container">
           <div className="section-head fade">
-            <div className="section-num">03</div>
+            <div className="section-num">04</div>
             <div>
               <div className="section-eyebrow">10-second self-verification</div>
               <h2 className="section-title">Trust the code. Not us.</h2>
@@ -251,11 +305,11 @@ export default function App() {
         </div>
       </section>
 
-      {/* 04 CODE */}
+      {/* 05 CODE */}
       <section id="code" className="section">
         <div className="container">
           <div className="section-head fade">
-            <div className="section-num">04</div>
+            <div className="section-num">05</div>
             <div>
               <div className="section-eyebrow">The actual code</div>
               <h2 className="section-title">Four surfaces · one state machine.</h2>
@@ -266,45 +320,10 @@ export default function App() {
               </p>
             </div>
           </div>
-          <div className="fade"><CodeShowcase /></div>
-        </div>
-      </section>
-
-      {/* 05 SPEC */}
-      <section id="spec" className="section">
-        <div className="container">
-          <div className="section-head fade">
-            <div className="section-num">05</div>
-            <div>
-              <div className="section-eyebrow">Technical foundation</div>
-              <h2 className="section-title">Standing on hash-only cryptography.</h2>
-              <p className="section-sub">
-                Aegis composes already-published, publicly-audited primitives.
-                Nothing novel in the cryptography — the novelty is the packaging,
-                the chain coverage, and the rug-proof architecture.
-              </p>
-            </div>
-          </div>
-
-          <div className="card" style={{ padding: 36 }}>
-            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 28 }}>
-              {[
-                ["Signature",        "SPHINCS+-192s (FIPS 205 SLH-DSA)",       "48 years hash-based lineage"],
-                ["Verifier",         "nconsigny / SPHINCs- C13 (vendored)",     "FIPS 205 §4.2 · ~190K gas"],
-                ["ZK (future)",      "STARK / FRI · hash-only",                 "no KZG · no pairing"],
-                ["KEM (v0.2 note)",  "Classic McEliece 348864",                 "code-based · non-lattice · non-EC"],
-                ["Account model",    "ERC-7579 modular validator",              "composable · portable"],
-                ["Multi-chain",      "CREATE same deployer + nonce + bytecode", "deterministic address"],
-                ["Fallback",         "secp256k1 ECDSA → 7d timelock → guardian","defense in depth"],
-                ["Rotation (v0.2)",  "per-op PQ key rotation",                  "shrinks exposure window to 1"],
-              ].map(([k, v, s]) => (
-                <div key={k}>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 10.5, color: "var(--text-4)", letterSpacing: "0.08em", textTransform: "uppercase", marginBottom: 8 }}>{k}</div>
-                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 14, color: "var(--text)", marginBottom: 4 }}>{v}</div>
-                  <div style={{ fontSize: 12.5, color: "var(--text-3)" }}>{s}</div>
-                </div>
-              ))}
-            </div>
+          <div className="fade">
+            <Suspense fallback={<CardSkeleton height={520} />}>
+              <CodeShowcase />
+            </Suspense>
           </div>
         </div>
       </section>
@@ -327,9 +346,9 @@ export default function App() {
             <div className="footer-col">
               <h5>Protocol</h5>
               <a href="#chains">Chains</a>
+              <a href="#arch">Architecture</a>
               <a href="#why">Threat model</a>
               <a href="#verify">Self-verify</a>
-              <a href="#spec">Spec</a>
             </div>
             <div className="footer-col">
               <h5>Repo</h5>
@@ -353,4 +372,23 @@ export default function App() {
       </footer>
     </div>
   );
+}
+
+function CardSkeleton({ height }: { height: number }) {
+  return (
+    <div
+      className="card"
+      style={{
+        height,
+        display: "flex", alignItems: "center", justifyContent: "center",
+        color: "var(--text-4)", fontFamily: "var(--font-mono)", fontSize: 12,
+      }}
+    >
+      loading…
+    </div>
+  );
+}
+
+function DerivePanelSkeleton() {
+  return <CardSkeleton height={720} />;
 }
