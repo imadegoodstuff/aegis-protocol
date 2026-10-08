@@ -2,7 +2,10 @@
 pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
+import {AegisCCHSBase} from "../src/AegisCCHSBase.sol";
 import {AegisCCHS} from "../src/AegisCCHS.sol";
+import {AegisCCHSK} from "../src/AegisCCHSK.sol";
+import {AegisCCHSFactory} from "../src/AegisCCHSFactory.sol";
 
 /// @dev Verifies the contract against test vectors produced by the TypeScript
 ///      client (wallet/src/aegis/cchs.ts). The vectors bind chainId = 1 and a
@@ -10,10 +13,10 @@ import {AegisCCHS} from "../src/AegisCCHS.sol";
 ///      its storage initialised directly.
 ///
 ///      Fixture: test/fixtures/cchs-s-20.json
-contract AegisCCHSTest is Test {
+abstract contract CCHSVectorTest is Test {
     string json;
     address acct;
-    AegisCCHS a;
+    AegisCCHSBase a;
     address target;
     uint256 value;
 
@@ -21,17 +24,20 @@ contract AegisCCHSTest is Test {
     uint256 constant SLOT_ROOT    = 0;
     uint256 constant SLOT_RECROOT = 1;
 
+    function _fixture() internal pure virtual returns (string memory);
+    function _runtime() internal pure virtual returns (bytes memory);
+
     function setUp() public {
-        json = vm.readFile(string.concat(vm.projectRoot(), "/test/fixtures/cchs-s-20.json"));
+        json = vm.readFile(string.concat(vm.projectRoot(), _fixture()));
         vm.chainId(vm.parseJsonUint(json, ".chainId"));
         acct   = vm.parseJsonAddress(json, ".account");
         target = vm.parseJsonAddress(json, ".ops[0].target");
         value  = vm.parseJsonUint(json, ".ops[0].value");
 
-        vm.etch(acct, type(AegisCCHS).runtimeCode);
+        vm.etch(acct, _runtime());
         vm.store(acct, bytes32(SLOT_ROOT),    vm.parseJsonBytes32(json, ".root"));
         vm.store(acct, bytes32(SLOT_RECROOT), vm.parseJsonBytes32(json, ".recRoot"));
-        a = AegisCCHS(payable(acct));
+        a = AegisCCHSBase(payable(acct));
         vm.deal(acct, 100 ether);
 
         assertEq(a.root(),    vm.parseJsonBytes32(json, ".root"));
@@ -41,14 +47,14 @@ contract AegisCCHSTest is Test {
 
     // ------------------------------------------------------------ helpers
 
-    function _layer(string memory path) internal view returns (AegisCCHS.LayerSig memory l) {
+    function _layer(string memory path) internal view returns (AegisCCHSBase.LayerSig memory l) {
         bytes32[] memory w = vm.parseJsonBytes32Array(json, string.concat(path, ".wots"));
         bytes32[] memory p = vm.parseJsonBytes32Array(json, string.concat(path, ".auth"));
         for (uint256 i; i < 67; ++i) l.wots[i] = w[i];
         for (uint256 i; i < 10; ++i) l.auth[i] = p[i];
     }
 
-    function _op(uint256 i) internal view returns (AegisCCHS.LayerSig memory l0, bool hasL1, AegisCCHS.LayerSig memory l1) {
+    function _op(uint256 i) internal view returns (AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) {
         string memory p = string.concat(".ops[", vm.toString(i), "]");
         l0 = _layer(string.concat(p, ".l0"));
         hasL1 = vm.keyExistsJson(json, string.concat(p, ".l1.wots"));
@@ -56,7 +62,7 @@ contract AegisCCHSTest is Test {
     }
 
     function _exec(uint256 i) internal {
-        (AegisCCHS.LayerSig memory l0, bool hasL1, AegisCCHS.LayerSig memory l1) = _op(i);
+        (AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) = _op(i);
         a.execute(target, value, "", l0, hasL1, l1);
     }
 
@@ -80,7 +86,7 @@ contract AegisCCHSTest is Test {
 
     function test_cachedPath() public {
         _exec(0);
-        (AegisCCHS.LayerSig memory l0, bool hasL1, AegisCCHS.LayerSig memory l1) = _op(1);
+        (AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) = _op(1);
         assertFalse(hasL1);
         uint256 g = gasleft();
         a.execute(target, value, "", l0, hasL1, l1);
@@ -91,7 +97,7 @@ contract AegisCCHSTest is Test {
     }
 
     function test_firstSigGas() public {
-        (AegisCCHS.LayerSig memory l0, bool hasL1, AegisCCHS.LayerSig memory l1) = _op(0);
+        (AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) = _op(0);
         uint256 g = gasleft();
         a.execute(target, value, "", l0, hasL1, l1);
         emit log_named_uint("first-in-subtree execution gas", g - gasleft());
@@ -100,56 +106,56 @@ contract AegisCCHSTest is Test {
     // ---------------------------------------------------------- attacks
 
     function test_revert_missingTopLayerOnFreshSubtree() public {
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory empty) = _op(1);
-        vm.expectRevert(AegisCCHS.MissingTopLayer.selector);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
+        vm.expectRevert(AegisCCHSBase.MissingTopLayer.selector);
         a.execute(target, value, "", l0, false, empty);
     }
 
     /// Mempool front-run: a valid signature replayed with a different target.
     function test_revert_frontRunDifferentTarget() public {
         _exec(0);
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory empty) = _op(1);
-        vm.expectRevert(AegisCCHS.BadSubtreeRoot.selector);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
+        vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
         a.execute(address(0xDEAD), value, "", l0, false, empty);
     }
 
     function test_revert_frontRunDifferentValue() public {
         _exec(0);
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory empty) = _op(1);
-        vm.expectRevert(AegisCCHS.BadSubtreeRoot.selector);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
+        vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
         a.execute(target, value + 1, "", l0, false, empty);
     }
 
     function test_revert_replay() public {
         _exec(0);
         _exec(1);
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory empty) = _op(1);
-        vm.expectRevert(AegisCCHS.BadSubtreeRoot.selector);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
+        vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
         a.execute(target, value, "", l0, false, empty);
     }
 
     /// Cache poisoning: genuine top-layer signature paired with a tampered
     /// bottom layer. r0' != r0, so the top chains do not close to `root`.
     function test_revert_cachePoisonWithTamperedBottom() public {
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory l1) = _op(0);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
         l0.auth[0] = bytes32(uint256(l0.auth[0]) ^ 1);
-        vm.expectRevert(AegisCCHS.BadTopRoot.selector);
+        vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
         a.execute(target, value, "", l0, true, l1);
         assertEq(a.cachedRoot(0), bytes32(0));
     }
 
     function test_revert_tamperedWotsChain() public {
         _exec(0);
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory empty) = _op(1);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
         l0.wots[7] = bytes32(uint256(l0.wots[7]) ^ 1);
-        vm.expectRevert(AegisCCHS.BadSubtreeRoot.selector);
+        vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
         a.execute(target, value, "", l0, false, empty);
     }
 
     function test_revert_wrongTopLayerSig() public {
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory l1) = _op(0);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
         l1.wots[0] = bytes32(uint256(l1.wots[0]) ^ 1);
-        vm.expectRevert(AegisCCHS.BadTopRoot.selector);
+        vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
         a.execute(target, value, "", l0, true, l1);
     }
 
@@ -179,21 +185,83 @@ contract AegisCCHSTest is Test {
     function test_revert_oldKeyAfterRecovery() public {
         (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
         a.recover(newRoot, newRec, w, p);
-        (AegisCCHS.LayerSig memory l0, , AegisCCHS.LayerSig memory l1) = _op(0);
-        vm.expectRevert(AegisCCHS.BadTopRoot.selector);
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
+        vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
         a.execute(target, value, "", l0, true, l1);
     }
 
     function test_revert_recoverWrongRoots() public {
         (, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
-        vm.expectRevert(AegisCCHS.BadRecovery.selector);
+        vm.expectRevert(AegisCCHSBase.BadRecovery.selector);
         a.recover(keccak256("other"), newRec, w, p);
     }
 
     function test_revert_recoverReplay() public {
         (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
         a.recover(newRoot, newRec, w, p);
-        vm.expectRevert(AegisCCHS.BadRecovery.selector);
+        vm.expectRevert(AegisCCHSBase.BadRecovery.selector);
         a.recover(newRoot, newRec, w, p);
+    }
+}
+
+
+// ================================================================ suites
+
+contract AegisCCHS_S20_Test is CCHSVectorTest {
+    function _fixture() internal pure override returns (string memory) { return "/test/fixtures/cchs-s-20.json"; }
+    function _runtime() internal pure override returns (bytes memory) { return type(AegisCCHS).runtimeCode; }
+}
+
+contract AegisCCHS_K20_Test is CCHSVectorTest {
+    function _fixture() internal pure override returns (string memory) { return "/test/fixtures/cchs-k-20.json"; }
+    function _runtime() internal pure override returns (bytes memory) { return type(AegisCCHSK).runtimeCode; }
+}
+
+// =============================================================== factory
+
+contract AegisCCHSFactoryTest is Test {
+    AegisCCHSFactory f;
+    bytes32 constant ROOT = keccak256("root");
+    bytes32 constant REC  = keccak256("rec");
+
+    function setUp() public { f = new AegisCCHSFactory(); }
+
+    function test_predictMatchesDeploy_S() public {
+        address p = f.predict(ROOT, REC, true);
+        address d = f.deploy(ROOT, REC, true);
+        assertEq(d, p);
+        assertEq(AegisCCHS(payable(d)).root(), ROOT);
+        assertEq(AegisCCHS(payable(d)).recRoot(), REC);
+        assertEq(keccak256(bytes(AegisCCHS(payable(d)).VERSION())), keccak256("cchs-s-20/1.0.0"));
+    }
+
+    function test_predictMatchesDeploy_K() public {
+        address p = f.predict(ROOT, REC, false);
+        address d = f.deploy(ROOT, REC, false);
+        assertEq(d, p);
+        assertEq(keccak256(bytes(AegisCCHSK(payable(d)).VERSION())), keccak256("cchs-k-20/1.0.0"));
+    }
+
+    function test_variantsGetDistinctAddresses() public view {
+        assertTrue(f.predict(ROOT, REC, true) != f.predict(ROOT, REC, false));
+    }
+
+    function test_deployIsIdempotent() public {
+        address a1 = f.deploy(ROOT, REC, false);
+        address a2 = f.deploy(ROOT, REC, false);
+        assertEq(a1, a2);
+    }
+
+    function test_revert_zeroRoot() public {
+        vm.expectRevert(AegisCCHSBase.ZeroRoot.selector);
+        f.deploy(bytes32(0), REC, false);
+    }
+
+    /// Same factory address + same (root, recRoot) => same account address on every chain.
+    function test_addressIndependentOfChainId() public {
+        address p1 = f.predict(ROOT, REC, false);
+        vm.chainId(56);
+        address p2 = f.predict(ROOT, REC, false);
+        assertEq(p1, p2);
     }
 }

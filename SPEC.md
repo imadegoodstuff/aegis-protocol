@@ -73,7 +73,9 @@ bytes32 root; bytes32 recRoot; uint64 epoch; uint64 nextIdx; uint64 nonce; uint6
 mapping(uint256 => bytes32) cachedRoot;   // key = (epoch << 64) | bottomTreeIdx
 ```
 
-Parameter set `CCHS-S-20`: SHA-256, w = 16, 67 chains, two layers of height 10, 2^20 signatures, 256 recoveries.
+Two contracts share this interface via `AegisCCHSBase`: `AegisCCHS` (`CCHS-S-20`, SHA-256) and `AegisCCHSK` (`CCHS-K-20`, keccak256, EVM default). Both: w = 16, 67 chains, two layers of height 10, 2^20 signatures, 256 recoveries.
+
+`AegisCCHSFactory.deploy(root, recRoot, sha256Variant)` creates either with CREATE2, `salt = keccak256(root ‖ recRoot ‖ variant)`; `predict(...)` returns the address before deployment. Identical factory bytecode at the same address on every EVM chain gives identical account addresses.
 
 No proxy, no `selfdestruct`, no setters, no owner.
 

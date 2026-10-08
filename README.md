@@ -19,7 +19,7 @@ Hash-based hypertree signatures (XMSS^MT, SPHINCS+) carry the full authenticatio
 | SPHINCS+-128s | ~10^6 hashes | 7.8 KB | stateless | SHA-256 |
 | **CCHS (d=2, h=10)** | **~10^6 hashes** | **2.5 KB** | **stateless (chain-held)** | SHA-256 |
 
-Single transaction, no commit-reveal, no finality wait. Measured on the EVM with the SHA-256 precompile: ~275 K gas total on the cached path, ~580 K for the first signature in a subtree, 4 750 B of runtime code, no external verifier contract. Signatures produced by the TypeScript client were executed against the compiled contract in an EVM; front-running, replay, tampering, cache poisoning, and post-recovery use of the old key are all rejected.
+Single transaction, no commit-reveal, no finality wait. Two parameter sets share one account contract: `CCHS-K-20` (keccak256, EVM default) and `CCHS-S-20` (SHA-256, canonical for every other chain). Measured in an EVM: K-20 ~128 K gas on the cached path and ~284 K for the first signature in a subtree; S-20 ~235 K / ~465 K. Runtime code 3.7 KB, no external verifier contract. Accounts are created through a CREATE2 factory, so one key gives the same address on every EVM chain. Signatures produced by the TypeScript client were executed against the compiled contracts; front-running, replay, tampering, cache poisoning, and post-recovery use of the old key are all rejected.
 
 Full specification: [`CCHS.spec.md`](CCHS.spec.md).
 
@@ -46,12 +46,12 @@ There is no trusted setup, committee, admin key, treasury, upgrade path, or gove
 
 ## Chains
 
-The CCHS verifier needs SHA-256, byte concatenation, and 32-byte storage. Signatures are byte-identical across chains (the chain ID is bound inside the digest, so they are not replayable).
+The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storage. With `CCHS-S-20` the same key and the same top-layer proof are valid on every chain (the chain ID is bound inside each operation digest, so operations are not replayable; the subtree registration is portable by design, see `CCHS.spec.md` §5.3).
 
 | Chain | Hash primitive | Status |
 |---|---|---|
-| EVM (Ethereum, BSC, Polygon, Arbitrum, Optimism, Base, Avalanche, Linea, Scroll, Mantle, Blast, Mode, …) | precompile `0x02` | contract complete, interop-tested |
-| TRON | SHA-256 precompile (EVM-compatible) | same artifact |
+| EVM (Ethereum, BSC, Polygon, Arbitrum, Optimism, Base, Avalanche, Linea, Scroll, Mantle, Blast, Mode, …) | `keccak256` (K-20) or precompile `0x02` (S-20) | contracts + factory complete, interop-tested |
+| TRON | same opcodes (EVM-compatible) | same artifacts |
 | Solana | `sha256` syscall | adapter scaffold |
 | Cosmos (CosmWasm) | `sha2_256` | adapter scaffold |
 | Aptos / Sui | `hash::sha2_256` | adapter scaffold |
@@ -94,7 +94,7 @@ cd wallet && npm i && npm run build
 ## Honest limits
 
 - The underlying primitives (WOTS+, Merkle trees, hypertrees) date from 1979–2015 and are extensively studied. The CCHS contribution is the verifier-side caching architecture and the trade-off point it reaches; it is not a new primitive.
-- Pure-JS keygen is ~5 s for 1.3 M hashes; WASM/native is 20–100× faster. The wallet runs it in a Web Worker.
+- Keygen is ~2.3 M hashes (top tree, recovery tree, first subtree). Single-threaded JS: ~3 s. The wallet splits leaves across a Web Worker pool with WASM hash cores (`wallet/src/aegis/cchsPool.ts`): ~0.7 s on a 6-core laptop, byte-identical output. Getting under 100 ms requires running the WOTS+ chain loop inside WASM rather than calling a WASM hash per step; that is the planned use of the Rust `cchs-core` crate compiled to wasm32.
 - Chain consensus security is outside the protocol's scope.
 - Not yet externally audited.
 
