@@ -12,7 +12,7 @@ import {
   type Chain,
   type Hex,
 } from "viem";
-import { sepolia, baseSepolia, mainnet, base, arbitrum, optimism, polygon, bsc, avalanche, linea, scroll } from "viem/chains";
+import { sepolia, baseSepolia, mainnet, base, arbitrum, optimism, polygon, bsc, avalanche, linea, scroll, mantle, blast, mode } from "viem/chains";
 
 export const SUPPORTED_CHAINS: Record<number, Chain> = {
   [sepolia.id]:     sepolia,
@@ -26,10 +26,13 @@ export const SUPPORTED_CHAINS: Record<number, Chain> = {
   [avalanche.id]:   avalanche,
   [linea.id]:       linea,
   [scroll.id]:      scroll,
+  [mantle.id]:      mantle,
+  [blast.id]:       blast,
+  [mode.id]:        mode,
 };
 
 /** Order in which the Protect panel lists EVM chains. */
-export const PROTECT_CHAINS: Chain[] = [mainnet, base, arbitrum, optimism, polygon, bsc, avalanche, linea, scroll, sepolia, baseSepolia];
+export const PROTECT_CHAINS: Chain[] = [mainnet, bsc, polygon, arbitrum, optimism, base, avalanche, linea, scroll, mantle, blast, mode, sepolia, baseSepolia];
 
 export const DEFAULT_CHAIN = sepolia;
 

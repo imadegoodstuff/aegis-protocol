@@ -296,6 +296,68 @@ contract AegisCCHSFactoryTest is Test {
         vm.expectRevert(abi.encodeWithSelector(AegisCCHSFactory.TokenTransferFailed.selector, address(t)));
         f.deployAndMove(ROOT, REC, false, toks);
     }
+
+    /// The account accepts ERC-721 and ERC-1155 safe transfers (any asset can be held).
+    function test_accountAcceptsSafeTransfers() public {
+        address a = f.deploy(ROOT, REC, false);
+        MockNft nft = new MockNft();
+        nft.mint(address(this), 7);
+        nft.safeTransferFrom(address(this), a, 7);
+        assertEq(nft.ownerOf(7), a);
+
+        MockMultiToken mt = new MockMultiToken();
+        mt.mint(address(this), 1, 10);
+        mt.safeTransferFrom(address(this), a, 1, 10, "");
+        assertEq(mt.balanceOf(a, 1), 10);
+        uint256[] memory ids = new uint256[](1); ids[0] = 1;
+        uint256[] memory amts = new uint256[](1); amts[0] = 0;
+        mt.safeBatchTransferFrom(address(this), a, ids, amts, "");
+
+        AegisCCHSBase acct = AegisCCHSBase(payable(a));
+        assertTrue(acct.supportsInterface(0x01ffc9a7));
+        assertTrue(acct.supportsInterface(0x150b7a02));
+        assertTrue(acct.supportsInterface(0x4e2312e0));
+        assertFalse(acct.supportsInterface(0xffffffff));
+    }
+}
+
+interface IERC721ReceiverLike { function onERC721Received(address, address, uint256, bytes calldata) external returns (bytes4); }
+interface IERC1155ReceiverLike {
+    function onERC1155Received(address, address, uint256, uint256, bytes calldata) external returns (bytes4);
+    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata) external returns (bytes4);
+}
+
+/// Minimal ERC-721 that enforces the receiver check exactly like OpenZeppelin.
+contract MockNft {
+    mapping(uint256 => address) public ownerOf;
+    function mint(address to, uint256 id) external { ownerOf[id] = to; }
+    function safeTransferFrom(address from, address to, uint256 id) external {
+        require(ownerOf[id] == from && msg.sender == from, "nft: denied");
+        ownerOf[id] = to;
+        if (to.code.length > 0) {
+            require(IERC721ReceiverLike(to).onERC721Received(msg.sender, from, id, "") == 0x150b7a02, "nft: unsafe recipient");
+        }
+    }
+}
+
+/// Minimal ERC-1155 with the receiver checks.
+contract MockMultiToken {
+    mapping(uint256 => mapping(address => uint256)) public balanceOf;
+    function mint(address to, uint256 id, uint256 amt) external { balanceOf[id][to] += amt; }
+    function safeTransferFrom(address from, address to, uint256 id, uint256 amt, bytes calldata data) external {
+        require(msg.sender == from && balanceOf[id][from] >= amt, "mt: denied");
+        balanceOf[id][from] -= amt; balanceOf[id][to] += amt;
+        if (to.code.length > 0) {
+            require(IERC1155ReceiverLike(to).onERC1155Received(msg.sender, from, id, amt, data) == 0xf23a6e61, "mt: unsafe recipient");
+        }
+    }
+    function safeBatchTransferFrom(address from, address to, uint256[] calldata ids, uint256[] calldata amts, bytes calldata data) external {
+        require(msg.sender == from, "mt: denied");
+        for (uint256 i = 0; i < ids.length; ++i) { balanceOf[ids[i]][from] -= amts[i]; balanceOf[ids[i]][to] += amts[i]; }
+        if (to.code.length > 0) {
+            require(IERC1155ReceiverLike(to).onERC1155BatchReceived(msg.sender, from, ids, amts, data) == 0xbc197c81, "mt: unsafe recipient");
+        }
+    }
 }
 
 contract MockToken {

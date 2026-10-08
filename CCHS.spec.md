@@ -216,13 +216,13 @@ Measured on `evm/src/AegisCCHS.sol` (S-20, SHA-256 precompile from assembly) and
 
 | Case | S-20 execution | S-20 total | K-20 execution | K-20 total |
 |---|---|---|---|---|
-| Cached subtree | ~232 K | **~293 K** | ~118 K | **~179 K** |
-| New subtree (first of 1024) | ~470 K | ~571 K | ~256 K | ~357 K |
-| Recovery | ~206 K | ~265 K | ~111 K | ~170 K |
-| Account deploy via factory | ~1 149 K | — | ~1 127 K | — |
-| Runtime code | 5 296 B | | 5 184 B | |
+| Cached subtree | ~209 K | **~270 K** | ~116 K | **~177 K** |
+| New subtree (first of 1024) | ~452 K | ~553 K | ~249 K | ~350 K |
+| Recovery | ~201 K | ~260 K | ~107 K | ~166 K |
+| Account deploy via factory | ~1 328 K | — | ~1 306 K | — |
+| Runtime code | 6 184 B | | 6 072 B | |
 
-(With optimizer 200 runs and no viaIR the code is 3 831 B / 3 666 B and K-20 cached execution is ~128 K; the deployed build trades 1.5 KB of code for ~10 K gas per signature.)
+The account also implements the ERC-721 and ERC-1155 receiver callbacks and ERC-165, so any asset can be sent to it with a safe transfer; those four pure functions account for ~0.9 KB of the runtime. (Without them: 5 296 B / 5 184 B, S-20 cached ~232 K, K-20 cached ~118 K. With optimizer 200 runs and no viaIR the code is 3 831 B / 3 666 B and K-20 cached execution is ~128 K; the deployed build trades code size for ~10 K gas per signature.)
 
 Execution gas includes the outgoing `call` (9 K for value transfer, 25 K if it creates the recipient), one packed SSTORE, and the event — roughly 45 K that is not verification. K-20 verification proper is ~75 K; S-20 ~185 K.
 
@@ -333,9 +333,9 @@ Key derivation (HKDF-SHA256 from the 32-byte master) is identical across sets; o
 ## 10. Reference implementations
 
 - `evm/src/AegisCCHSBase.sol` — hash-agnostic account logic (execute, recover, cache, digests).
-- `evm/src/AegisCCHS.sol` — `CCHS-S-20`, SHA-256 precompile from assembly. 5 296 B runtime (deployed build).
-- `evm/src/AegisCCHSK.sol` — `CCHS-K-20`, keccak256 opcode. 5 184 B runtime (deployed build).
-- `evm/src/AegisCCHSFactory.sol` — CREATE2 factory for both sets. `deploy` is payable and forwards ETH; `deployAndMove` also pulls approved ERC-20s, so creating and funding an account is one transaction. The factory itself is published through the deterministic-deployment proxy (`deploy/deploy-cchs.mjs`), giving it the address `0x7E49De7bB60161E3A387aA09Fb0070B3D02D0efc` on every EVM chain where it has been deployed; the wallet artifact (`wallet/src/aegis/cchsArtifacts.json`) carries the exact init code so account addresses can be predicted offline.
+- `evm/src/AegisCCHS.sol` — `CCHS-S-20`, SHA-256 precompile from assembly. 6 184 B runtime (deployed build).
+- `evm/src/AegisCCHSK.sol` — `CCHS-K-20`, keccak256 opcode. 6 072 B runtime (deployed build).
+- `evm/src/AegisCCHSFactory.sol` — CREATE2 factory for both sets. `deploy` is payable and forwards ETH; `deployAndMove` also pulls approved ERC-20s, so creating and funding an account is one transaction. The factory itself is published through the deterministic-deployment proxy (`deploy/deploy-cchs.mjs`), giving it the address `0x52aC1CdF75D5f11BCabE8dD0d8429Cd152Ec0091` on every EVM chain where it has been deployed; the wallet artifact (`wallet/src/aegis/cchsArtifacts.json`) carries the exact init code so account addresses can be predicted offline.
 - `evm/test/AegisCCHS.t.sol` — Foundry suites for S-20 and K-20 (front-run by target and by value, replay, tampered chain value, tampered auth path, wrong top layer, cache poisoning, recovery, recovery replay, old key after rotation) plus factory tests (prediction, idempotence, chain independence, ETH forwarding, ERC-20 pull, missing approval). Driven by client-generated vectors.
 - `evm/test/fixtures/cchs-s-20.json`, `cchs-k-20.json` — test vectors (master `0x07…07`, chainId 1, account `0x…cc45`): roots, bottom root 0, three operations (first-in-subtree with top layer, two cached), one recovery. The S-20 file is the ground truth for every non-EVM port in §7.
 - `wallet/src/aegis/cchs.ts` — TypeScript client, both sets (`cchsS`, `cchsK`, `forVariant`): keygen, sign, local verify, digest construction, ABI helpers, range-based leaf generation for parallel keygen.

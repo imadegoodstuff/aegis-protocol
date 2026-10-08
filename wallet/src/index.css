@@ -1076,3 +1076,25 @@ button:focus-visible, a:focus-visible { outline-offset: 3px; }
   .chip { white-space: normal; max-width: 100%; height: auto; line-height: 1.5; padding-top: 4px; padding-bottom: 4px; }
   .mono.addr, .protect-addr, .kv-value { word-break: break-all; }
 }
+
+/* Protect inputs + Spend form */
+.protect-inputs { display: grid; grid-template-columns: 1fr 1.4fr; gap: 14px 18px; margin: 14px 0 6px; }
+.swap-amount textarea { width: 100%; resize: vertical; min-height: 44px; font-family: var(--font-mono); font-size: 12px; background: var(--bg-2, rgba(255,255,255,.02)); border: 1px solid var(--line); border-radius: var(--r-xs); color: var(--text); padding: 9px 10px; }
+.swap-amount textarea:focus { outline: none; border-color: var(--accent); }
+.spend { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--line); }
+.spend-grid { display: grid; grid-template-columns: 1fr 1fr 2fr 1fr; gap: 10px 14px; margin: 10px 0; }
+.spend-grid label { display: flex; flex-direction: column; gap: 5px; font-family: var(--font-mono); font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-3); }
+.spend-grid input, .spend-grid select { font-family: var(--font-mono); font-size: 12.5px; color: var(--text); background: rgba(255,255,255,.02); border: 1px solid var(--line); border-radius: var(--r-xs); padding: 9px 10px; min-height: 40px; }
+.spend-grid input:focus, .spend-grid select:focus { outline: none; border-color: var(--accent); }
+.spend-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.protect-status.ok { color: var(--accent); }
+@media (max-width: 900px) {
+  .protect-inputs { grid-template-columns: 1fr; }
+  .spend-grid { grid-template-columns: 1fr 1fr; }
+  .spend-grid input, .spend-grid select { min-height: 44px; }
+  .spend-actions .btn { width: 100%; }
+}
+@media (max-width: 480px) { .spend-grid { grid-template-columns: 1fr; } }
+.nav-inner { flex-wrap: nowrap; }
+.nav-ticker { flex: 0 1 auto; overflow: hidden; }
+@media (max-width: 1700px) { .nav .chip { display: none; } }

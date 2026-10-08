@@ -42,9 +42,7 @@ function LiveTicker() {
       <span className="dot" />
       <span className="k">set</span><span className="v">CCHS-K-20</span>
       <span className="sep">·</span>
-      <span className="k">gas</span><span className="v num">118 K</span>
-      <span className="sep">·</span>
-      <span className="k">build</span><span className="v num">{BUILD}</span>
+      <span className="k">gas</span><span className="v num">116 K</span>
       <span className="sep">·</span>
       <span className="v num">{clock}</span>
     </div>
@@ -178,7 +176,7 @@ export default function App() {
               <p className="hero-sub fade d2">
                 CCHS turns a smart contract's memory into part of the signature. The verifier checks
                 the upper tree layer once per subtree, caches the result on chain, and the next 1 023
-                signatures carry only the bottom layer: 2.5 KB, ~118 K gas, no elliptic curves, no lattices,
+                signatures carry only the bottom layer: 2.5 KB, ~116 K gas, no elliptic curves, no lattices,
                 no trusted setup. One master key, the same account address on every EVM chain.
               </p>
               <div className="hero-ctas fade d3">
@@ -201,7 +199,7 @@ export default function App() {
           <div className="stats fade d3 parallax-slow">
             <div className="stat">
               <div className="stat-k">execution gas · cached</div>
-              <div className="stat-v num">118<span className="stat-unit">K</span></div>
+              <div className="stat-v num">116<span className="stat-unit">K</span></div>
               <div className="stat-s">CCHS-K-20 · measured · SPHINCS+ C13 ≈ 190 K</div>
             </div>
             <div className="stat">

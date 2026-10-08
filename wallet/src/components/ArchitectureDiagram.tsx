@@ -17,7 +17,7 @@ const ADAPTERS: Adapter[] = [
     addrStatus: "mainnet", pq: "contract",
     address: "CREATE2(factory, keccak(root ‖ recRoot ‖ set), initCode)",
     hash: "keccak256 opcode (S-20: precompile 0x02)", storage: "mapping((epoch<<64)|treeIdx → bytes32)", path: "evm/src/AegisCCHSBase.sol",
-    blurb: "AegisCCHSBase holds all logic; AegisCCHS and AegisCCHSK bind the hash. 15 Foundry tests per set plus factory tests driven by client-generated vectors, interop verified in an EVM. The factory lives at 0x7E49…0efc on every chain once published; it is published nowhere yet." },
+    blurb: "AegisCCHSBase holds all logic; AegisCCHS and AegisCCHSK bind the hash. 15 Foundry tests per set plus factory tests driven by client-generated vectors, interop verified in an EVM. The factory lives at 0x52aC…0091 on every chain once published; it is published nowhere yet." },
   { id: "tron", name: "TRON", family: "TVM (Solidity)", set: "CCHS-K-20",
     addrStatus: "mainnet", pq: "contract",
     address: "base58check(0x41 ‖ keccak256(pk)[12:])",

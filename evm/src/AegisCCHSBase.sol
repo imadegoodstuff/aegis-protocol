@@ -73,6 +73,30 @@ abstract contract AegisCCHSBase {
 
     receive() external payable {}
 
+    // ===================================================== token receivers
+    // The account holds any asset: ETH through `receive`, ERC-20 by plain
+    // transfer, ERC-721 / ERC-1155 through the safe-transfer callbacks below.
+    // Spending any of them is one `execute` call authorized by a CCHS signature.
+
+    function onERC721Received(address, address, uint256, bytes calldata) external pure returns (bytes4) {
+        return 0x150b7a02;
+    }
+
+    function onERC1155Received(address, address, uint256, uint256, bytes calldata) external pure returns (bytes4) {
+        return 0xf23a6e61;
+    }
+
+    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
+        external pure returns (bytes4)
+    {
+        return 0xbc197c81;
+    }
+
+    /// @notice ERC-165: IERC165, IERC721Receiver, IERC1155Receiver.
+    function supportsInterface(bytes4 id) external pure returns (bool) {
+        return id == 0x01ffc9a7 || id == 0x150b7a02 || id == 0x4e2312e0;
+    }
+
     // ============================================================ hash hooks
 
     /// @dev Generic hash of a memory buffer (digests, recovery messages).
