@@ -238,6 +238,38 @@ The top-layer message is the bottom subtree root `R_0`, which contains no chain 
 
 `evm/src/AegisCCHSFactory.sol` deploys either set with CREATE2, `salt = keccak256(root ‖ recRoot ‖ variant)`. With metadata-free bytecode and the factory itself placed by the same deployer at the same nonce on every EVM chain, `(root, recRoot, variant)` maps to one address on all of them. `deploy()` is permissionless and idempotent; `predict()` is pure in the chain ID.
 
+### 5.5 Split cache fill and the single-packet set (CCHS-C-20)
+
+The cache write in §5 is the only place a top-layer signature is consumed, and C3/C4 (§6) make it independent of the bottom-layer check that follows. Nothing therefore requires the two layers to arrive in the same transaction. The verifier can expose the cache fill as its own operation:
+
+```
+cache_subtree(t_0, R_0, sig_1, auth_1):
+    require cachedRoot[epoch, t_0] ∈ {∅, R_0}
+    require MerkleRootFromPath(WOTS_pk_from_sig(1, 0, t_0, R_0, sig_1), t_0, auth_1) == root
+    cachedRoot[epoch, t_0] = R_0
+
+execute(target, data, sig_0, auth_0):          # one layer, always
+    R_0 = cachedRoot[epoch, nextIdx >> h]  ; require R_0 ≠ ∅
+    ... as §5 with the cached branch only
+```
+
+Soundness is unchanged: `cache_subtree` writes only what a valid top-layer signature on `R_0` authorizes (C3), and `execute` accepts only what full verification would accept (C4). Anyone may submit `cache_subtree`; it is idempotent and, by §5.3, the same payload is valid on every chain of the same set. Liveness is also unchanged: the owner can always warm the next subtree before it is needed.
+
+This split matters on chains with a hard transaction-size ceiling. Solana packets are 1 232 bytes; one S-20 layer is 2 464 bytes. For such chains the spec defines a third parameter set whose single layer fits a packet:
+
+| | S-20 / K-20 | **C-20** |
+|---|---|---|
+| hash output `n` | 32 B | 24 B (SHA-256 truncated; 192-bit preimage security, NIST level 3) |
+| Winternitz `w` | 16 | 256 |
+| chains | 64 + 3 = 67 | 24 + 2 = 26 |
+| one layer | 2 464 B | **864 B** |
+| verifier hashes per layer (avg / worst) | ≈ 520 / 1 001 | ≈ 3 300 / 6 386 |
+| keygen hashes (top + recovery + first subtree, single thread) | ≈ 2.3 M | ≈ 15 M |
+
+Measured (`wallet/src/aegis/cchsCompact.ts`, pure JS, Node 24, single thread): keygen top + recovery 15.6 s, first subtree 12.7 s; sign 6.5 ms cached / 12.2 ms with top layer; local verify 6.5 ms / 14.5 ms; a legacy Solana transaction on the cached path with six accounts and a 12-byte inner instruction is 1 201 B (31 B spare), 1 015 B with an address lookup table; the `cache_subtree` transaction is 1 142 B. Bit flip, foreign digest, index replay, wrong cached root, and tampered top-layer path were all rejected; recovery accepted once and rejected on replay. Key derivation is domain-separated (`cchs/sk/c`), so a master seed yields independent C-20 keys. The checksum for `w = 256` is `Σ(255 − m_i) ≤ 6 120`, two base-256 digits.
+
+What C-20 trades: ~6× more verifier compute per layer and ~6× more keygen work for a 2.85× smaller signature. On a chain that meters compute rather than bytes (EVM) it is the wrong trade; on a chain that caps bytes per transaction (Solana) it is the only one that gives a single-transaction hot path without a staging buffer.
+
 ---
 
 ## 6. Security
@@ -285,7 +317,7 @@ The verification algorithm uses only SHA-256, byte concatenation, integer shifts
 | Cosmos (CosmWasm) | `sha2_256` | `Map<u64, Binary>` | ~300 LOC Rust |
 | Aptos / Sui | `hash::sha2_256` | table / dynamic field | ~200 LOC Move |
 | NEAR | `env::sha256` | `LookupMap` | ~250 LOC Rust |
-| TON | `HASHEXT_SHA256` | dict | ~400 LOC Tolk |
+| TON | `HASHEXT_SHA256` | dict | FunC, `ton/` |
 | Starknet | `core::sha256` | `LegacyMap` | ~300 LOC Cairo |
 | Bitcoin | `OP_SHA256` in Tapscript | — | §7.1 |
 
@@ -297,7 +329,17 @@ Bitcoin has no mutable storage, so the cache cannot be held on-chain, and curren
 
 **(b) With OP_CAT, hypertree form.** In-script Merkle verification becomes possible; a single tapleaf can verify any of 2^h bottom keys with the auth path in the witness. The cache is replaced by the UTXO itself: a spend from a "subtree UTXO" carries only the bottom layer, and creating the subtree UTXO carries the top layer. This mirrors CCHS exactly, with UTXO lineage as the cache.
 
-Until then, the honest Bitcoin posture for a hash-only key is to hold BTC on a chain that has the opcodes, or to use the Taproot key path with a Schnorr key whose spend the owner can migrate once an opcode activates.
+**Why no construction under current consensus closes the gap.** The requirement is that a spend be authorized by something a quantum adversary cannot compute, and that the authorization be *bound to the transaction* by rules the network enforces. Every avenue available today fails one of the two:
+
+1. *Key-path or script-path Taproot.* A P2TR output publishes the tweaked key `Q` in the output itself. A discrete-log adversary recovers the key for `Q` without waiting for a spend, so any P2TR UTXO, including one whose internal key is a NUMS point, is spendable by the key path. Script-path restrictions do not help; the key path is always available to whoever holds the key for `Q`.
+2. *Hash-locked scripts (P2WSH).* `OP_SHA256 <h> OP_EQUAL` and any WOTS+ chain check reveal preimages in the witness; nothing ties them to the outputs, so the first miner or relayer to see them can rebuild the transaction to pay elsewhere. This is exactly the missing binding, and it is what `OP_CAT`/`OP_CHECKSIGFROMSTACK` supply.
+3. *Pre-signed transaction trees with key deletion.* They bind the destination, but the key that signed them is an elliptic-curve key whose public key the adversary learns from the output (P2TR) or from the first spend (P2WPKH). Deletion protects against the owner's own future compromise, not against a key recovered from public data.
+4. *Commit-delay-reveal* (publish `H(tx)` first, spend later). Sound as a protocol, but no script can check that a commitment preceded the reveal; enforcement requires a consensus rule, which is why it has only been proposed as a soft fork.
+5. *Length-channel constructions.* Proposals exist that extract bits of the sighash from the DER length of ECDSA signatures checked by `OP_CHECKSIG` and sign those bits with Lamport chains. They do not reach the security level of the rest of this document and are not adopted here.
+
+The conclusion is a statement about Bitcoin consensus, not about CCHS: a hash-only, transaction-binding spend condition needs an introspection opcode. BIP-347 (`OP_CAT`) and the quantum-resistant output proposals built on hash-based signatures are the activation paths; when either is live, (a) and (b) above apply as written.
+
+**Posture until then** (what the wallet does for its Bitcoin address). Use outputs that do not expose the key before the spend, P2WPKH (BIP-84) rather than P2TR, never reuse an address, send change to a fresh address, and derive those keys from the same master so that they are rotated by the same backup. This limits a quantum adversary to the window between broadcast and confirmation, which is the strongest guarantee available without consensus changes. It is not post-quantum security and the wallet does not label it as such.
 
 ---
 
@@ -323,10 +365,11 @@ Hybrid deployments (`AegisAccountV3`) may keep ECDSA as the daily path and use C
 | Name | Hash | d | h | Capacity | Sig (amortized) | Use |
 |---|---|---|---|---|---|---|
 | `CCHS-S-20` | SHA-256 | 2 | 10 | 2^20 | 2.5 KB | canonical; every non-EVM port; EVM when cross-chain byte identity is wanted |
-| `CCHS-K-20` | keccak256 | 2 | 10 | 2^20 | 2.5 KB | EVM default; ~200 K total gas cached |
+| `CCHS-K-20` | keccak256 | 2 | 10 | 2^20 | 2.5 KB | EVM default; ~177 K total gas cached |
+| `CCHS-C-20` | SHA-256/24, w = 256 | 2 | 10 | 2^20 | 864 B | packet-limited chains (Solana); cache fill is its own transaction (§5.5) |
 | `CCHS-S-30` | SHA-256 | 3 | 10 | 2^30 | 2.5 KB | institutional; not yet implemented |
 
-Key derivation (HKDF-SHA256 from the 32-byte master) is identical across sets; only the tweakable hash differs, so one master yields distinct, independent trees per set.
+Key derivation (HKDF-SHA256 from the 32-byte master) is identical for S-20 and K-20 and domain-separated for C-20 (`cchs/sk/c`); the tweakable hash differs per set, so one master yields distinct, independent trees per set.
 
 ---
 
@@ -338,7 +381,8 @@ Key derivation (HKDF-SHA256 from the 32-byte master) is identical across sets; o
 - `evm/src/AegisCCHSFactory.sol` — CREATE2 factory for both sets. `deploy` is payable and forwards ETH; `deployAndMove` also pulls approved ERC-20s, so creating and funding an account is one transaction. The factory itself is published through the deterministic-deployment proxy (`deploy/deploy-cchs.mjs`, or the wallet's first Protect on a chain where it is missing; the sender does not matter), giving it the address `0x52aC1CdF75D5f11BCabE8dD0d8429Cd152Ec0091` on every EVM chain where it has been deployed; the wallet artifact (`wallet/src/aegis/cchsArtifacts.json`) carries the exact init code so account addresses can be predicted offline.
 - `evm/test/AegisCCHS.t.sol` — Foundry suites for S-20 and K-20 (front-run by target and by value, replay, tampered chain value, tampered auth path, wrong top layer, cache poisoning, recovery, recovery replay, old key after rotation) plus factory tests (prediction, idempotence, chain independence, ETH forwarding, ERC-20 pull, missing approval). Driven by client-generated vectors.
 - `evm/test/fixtures/cchs-s-20.json`, `cchs-k-20.json` — test vectors (master `0x07…07`, chainId 1, account `0x…cc45`): roots, bottom root 0, three operations (first-in-subtree with top layer, two cached), one recovery. The S-20 file is the ground truth for every non-EVM port in §7.
-- `wallet/src/aegis/cchs.ts` — TypeScript client, both sets (`cchsS`, `cchsK`, `forVariant`): keygen, sign, local verify, digest construction, ABI helpers, range-based leaf generation for parallel keygen.
+- `wallet/src/aegis/cchs.ts` — TypeScript client, S-20 and K-20 (`cchsS`, `cchsK`, `forVariant`): keygen, sign, local verify, digest construction, ABI helpers, range-based leaf generation for parallel keygen.
+- `wallet/src/aegis/cchsCompact.ts` — `CCHS-C-20` client (`cchsC`): keygen, sign, `topLayer` for the split cache fill, `bottomRootOf` / `verifyTopLayer` mirroring the two on-chain operations, recovery, digests with chain tags. `evm/test/fixtures/cchs-c-20.json` is its vector file (master `0x07…07`, tag `solana`).
 
 **Interop verified** (2026-10-08): for both sets, signatures produced by `cchs.ts` were executed against the compiled contracts in an EVM (`@ethereumjs/vm`, Cancun), with accounts created through the factory (predicted address = deployed address, idempotent). First-in-subtree, cached, front-run to a different target, tampered chain value, recovery rotation, and post-rotation rejection of the old key all behaved as specified. Client digests matched `nextDigest()` byte-for-byte.
 
@@ -349,4 +393,5 @@ Key derivation (HKDF-SHA256 from the 32-byte master) is identical across sets; o
 1. **Out-of-order leaf use.** Sequential `nextIdx` forbids skipping a subtree whose bottom keys may have leaked. A `skipSubtree` operation authorized by a layer-1 signature is straightforward but not in v1.
 2. **Cache eviction.** `cachedRoot` grows by one slot per 1024 signatures. Negligible, but a recovery epoch counter is used so old entries are logically cleared without gas-costly deletion.
 3. **Formal verification.** Reduce §6 sketches to a machine-checked proof.
-4. **Bitcoin without OP_CAT.** Option (a) works but forgoes caching. A covenant-free way to get amortization on Bitcoin is open.
+4. **Bitcoin.** Nothing binds a hash-based witness to a transaction under current consensus (§7.1); the open problem is the opcode, not the scheme. Once it exists, option (a) forgoes caching and (b) recovers it through UTXO lineage.
+5. **C-20 keygen cost.** ~15 M hashes single-threaded (~28 s in JS). The worker pool and WASM hash cores used for S-20/K-20 are not yet wired to C-20; doing so is mechanical and should bring it to a few seconds.

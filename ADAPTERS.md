@@ -24,7 +24,7 @@ The CCHS verifier (`CCHS.spec.md` §5) requires only SHA-256, byte concatenation
 | 14 | Sui | Move | `sui/` | Move 2024 | `blake2b_256(0x00 ‖ pk)` | `hash::sha2_256` | implemented (shared object, SUI balance, v1) | **implemented** (CI-compiled, layer verify tested against vectors) |
 | 15 | NEAR | WASM | `near/` | Rust / near-sdk | `hex(ed25519_pk)` | `env::sha256_array` | implemented (`cchs-core` + contract) | implemented (CI-compiled, core verified against vectors) |
 | 16 | TON | TVM (TON) | `ton/` | FunC | `hash(StateInit)` | `HASHEXT_SHA256` | implemented (internal-message account: `send_raw_message` action, recover, dict cache) | **implemented, sandbox-tested** (fixture roots + full execute/cache/replay/recover flow); not yet deployed |
-| 17 | Bitcoin | Script | `bitcoin/` | Tapscript | BIP-86 P2TR | `OP_SHA256` | design (`CCHS.spec.md` §7.1) | flat Tapscript tree today; cached variant needs OP_CAT |
+| 17 | Bitcoin | Script | `bitcoin/` | Tapscript | BIP-84 P2WPKH (key hidden until spend) | `OP_SHA256` | design (`CCHS.spec.md` §7.1) | flat Tapscript tree today; cached variant needs OP_CAT |
 
 Address derivation for all 23 supported chains is implemented and produces standard, wallet-importable addresses: `wallet/src/aegis/derive.ts`.
 
