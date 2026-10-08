@@ -4,6 +4,7 @@
 
 import { createSHA256, createKeccak, type IHasher } from 'hash-wasm';
 import { makeCchs, type Cchs, type HashFn, type Variant } from './cchs';
+import { makeCompact, type Compact } from './cchsCompact';
 
 function bind(h: IHasher): HashFn {
   return (data: Uint8Array) => {
@@ -23,4 +24,11 @@ export function fastCchs(variant: Variant): Promise<Cchs> {
     cache[variant] = p;
   }
   return p;
+}
+
+let compact: Promise<Compact> | undefined;
+/** WASM-backed CCHS-C-20 instance (memoized). */
+export function fastCompact(): Promise<Compact> {
+  if (!compact) compact = createSHA256().then((h) => makeCompact(bind(h)));
+  return compact;
 }

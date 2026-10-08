@@ -5,9 +5,9 @@
 // thread then folds them into the tree (1023 node hashes, negligible).
 // Everything produced here is byte-identical to the single-threaded `keygen`.
 
-import { H, LEAVES, REC_H, type CchsKey, type CchsPublic, type Tree, type Variant } from './cchs';
-import { fastCchs } from './cchsFast';
-import type { LeavesRequest, LeavesResponse } from './cchsWorkerCore';
+import { H, LEAVES, REC_H, type CchsKey, type CchsPublic, type Tree } from './cchs';
+import { fastCchs, fastCompact } from './cchsFast';
+import { leafBytes, type LeavesRequest, type LeavesResponse, type PoolVariant } from './cchsWorkerCore';
 
 export interface WorkerLike {
   postMessage(msg: unknown, transfer?: Transferable[]): void;
@@ -57,7 +57,7 @@ export class CchsPool {
   }
 
   /** All `count` leaves of (layer, treeIdx), computed across the pool. */
-  async leaves(key: CchsKey, variant: Variant, layer: number, treeIdx: bigint, count: number): Promise<Uint8Array[]> {
+  async leaves(key: CchsKey, variant: PoolVariant, layer: number, treeIdx: bigint, count: number): Promise<Uint8Array[]> {
     const chunks = Math.min(count, this.size * 2); // 2 chunks per worker smooths uneven cores
     const per = Math.ceil(count / chunks);
     const jobs: Promise<LeavesResponse>[] = [];
@@ -67,13 +67,14 @@ export class CchsPool {
     const out: Uint8Array[] = new Array(count);
     for (const r of await Promise.all(jobs)) {
       const buf = r.leaves!;
-      for (let i = 0; i < buf.length / 32; i++) out[r.from! + i] = buf.subarray(i * 32, i * 32 + 32);
+      const n = leafBytes(variant);
+      for (let i = 0; i < buf.length / n; i++) out[r.from! + i] = buf.subarray(i * n, i * n + n);
     }
     return out;
   }
 
-  async tree(key: CchsKey, variant: Variant, layer: number, treeIdx: bigint, height: number): Promise<Tree> {
-    const [c, leaves] = await Promise.all([fastCchs(variant), this.leaves(key, variant, layer, treeIdx, 1 << height)]);
+  async tree(key: CchsKey, variant: PoolVariant, layer: number, treeIdx: bigint, height: number): Promise<Tree> {
+    const [c, leaves] = await Promise.all([variant === 'C' ? fastCompact() : fastCchs(variant), this.leaves(key, variant, layer, treeIdx, 1 << height)]);
     return c.buildTreeFromLeaves(layer, treeIdx, leaves);
   }
 
@@ -82,7 +83,7 @@ export class CchsPool {
    * (top layer, recovery tree, bottom subtree 0), all in one parallel pass.
    * `cache` receives the same keys `sign`/`signRecovery` look up.
    */
-  async keygen(key: CchsKey, variant: Variant, cache?: Map<string, Tree>, opts: { firstSubtree?: boolean } = {}): Promise<CchsPublic & { tookMs: number }> {
+  async keygen(key: CchsKey, variant: PoolVariant, cache?: Map<string, Tree>, opts: { firstSubtree?: boolean } = {}): Promise<CchsPublic & { tookMs: number }> {
     const t0 = performance.now();
     const withBottom = opts.firstSubtree ?? true;
     const [top, rec, bottom0] = await Promise.all([

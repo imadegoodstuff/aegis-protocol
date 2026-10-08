@@ -2,11 +2,15 @@
 // host (tests, worker_threads). Computes a contiguous range of WOTS+ leaves.
 
 import type { Variant } from './cchs';
-import { fastCchs } from './cchsFast';
+import { fastCchs, fastCompact } from './cchsFast';
+
+/** Parameter sets the pool can generate leaves for. */
+export type PoolVariant = Variant | 'C';
+export const leafBytes = (v: PoolVariant): number => (v === 'C' ? 24 : 32);
 
 export interface LeavesRequest {
   id: number;
-  variant: Variant;
+  variant: PoolVariant;
   master: Uint8Array;
   layer: number;
   treeIdx: string; // bigint as decimal string (structured clone of bigint is fine, string keeps JSON hosts simple)
@@ -24,10 +28,12 @@ export interface LeavesResponse {
 
 export async function handleLeaves(req: LeavesRequest): Promise<LeavesResponse> {
   try {
-    const c = await fastCchs(req.variant);
-    const leaves = c.leavesRange({ master: req.master }, req.layer, BigInt(req.treeIdx), req.from, req.to);
-    const out = new Uint8Array(leaves.length * 32);
-    for (let i = 0; i < leaves.length; i++) out.set(leaves[i], i * 32);
+    const leaves = req.variant === 'C'
+      ? (await fastCompact()).leavesRange({ master: req.master }, req.layer, BigInt(req.treeIdx), req.from, req.to)
+      : (await fastCchs(req.variant)).leavesRange({ master: req.master }, req.layer, BigInt(req.treeIdx), req.from, req.to);
+    const n = leafBytes(req.variant);
+    const out = new Uint8Array(leaves.length * n);
+    for (let i = 0; i < leaves.length; i++) out.set(leaves[i], i * n);
     return { id: req.id, ok: true, from: req.from, leaves: out };
   } catch (e) {
     return { id: req.id, ok: false, error: e instanceof Error ? e.message : String(e) };

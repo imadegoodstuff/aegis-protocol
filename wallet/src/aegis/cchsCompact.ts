@@ -21,7 +21,7 @@
 import { sha256 } from '@noble/hashes/sha256';
 import { hmac } from '@noble/hashes/hmac';
 import { concatBytes } from '@noble/hashes/utils';
-import { adrs, eq, type CchsKey, type CchsPublic, type Tree, type LayerSig, type CchsSignature } from './cchs';
+import { adrs, eq, type CchsKey, type CchsPublic, type Tree, type LayerSig, type CchsSignature, type HashFn } from './cchs';
 
 export const N = 24;
 export const W = 256;
@@ -39,8 +39,9 @@ const enc = new TextEncoder();
 function u32be(n: number): Uint8Array { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, n >>> 0); return b; }
 function u64be(n: bigint): Uint8Array { const b = new Uint8Array(8); new DataView(b.buffer).setBigUint64(0, n); return b; }
 
-/** F_n(x) = SHA-256(x)[0..24). */
-function hashN(data: Uint8Array): Uint8Array { return sha256(data).subarray(0, N); }
+/** Builds a CCHS-C-20 instance over the given SHA-256 (pure JS or WASM). F_n(x) = SHA-256(x)[0..24). */
+export function makeCompact(sha: HashFn) {
+const hashN = (data: Uint8Array): Uint8Array => sha(data).subarray(0, N);
 
 // ------------------------------------------------------------ key derivation
 type Hmac = ReturnType<typeof hmac.create>;
@@ -55,7 +56,7 @@ const skInfo = new Uint8Array(SK_PREFIX.length + 1 + 8 + 4 + 1 + 1);
 skInfo.set(SK_PREFIX, 0);
 skInfo[skInfo.length - 1] = 0x01;
 /** HKDF-SHA256(master, "cchs/sk/c" ‖ layer ‖ treeIdx ‖ leafIdx ‖ chainIdx)[0..24). */
-export function sk(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number, chainIdx: number): Uint8Array {
+function sk(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number, chainIdx: number): Uint8Array {
   const o = SK_PREFIX.length;
   skInfo[o] = layer; skInfo.set(u64be(treeIdx), o + 1); skInfo.set(u32be(leafIdx), o + 9); skInfo[o + 13] = chainIdx;
   return expanderOf(key.master)._cloneInto().update(skInfo).digest().subarray(0, N);
@@ -63,7 +64,7 @@ export function sk(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number
 
 // -------------------------------------------------------------------- digits
 /** 24 message bytes ‖ 2 checksum bytes (csum = Σ(255 − m_i) ≤ 6 120, big-endian). */
-export function digits(m: Uint8Array): Uint8Array {
+function digits(m: Uint8Array): Uint8Array {
   if (m.length !== N) throw new Error('message must be 24 bytes');
   const d = new Uint8Array(LEN);
   let csum = 0;
@@ -93,17 +94,17 @@ function nodeHash(layer: number, treeIdx: bigint, parentPos: number, level: numb
   scratch80.set(left, 32); scratch80.set(right, 32 + N);
   return hashN(scratch80);
 }
-export function wotsLeaf(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number): Uint8Array {
+function wotsLeaf(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number): Uint8Array {
   const ends: Uint8Array[] = new Array(LEN);
   for (let c = 0; c < LEN; c++) ends[c] = chainSteps(layer, treeIdx, leafIdx, c, 0, W - 1, sk(key, layer, treeIdx, leafIdx, c));
   return leafFromEnds(layer, treeIdx, leafIdx, ends);
 }
-export function leavesRange(key: CchsKey, layer: number, treeIdx: bigint, from: number, to: number): Uint8Array[] {
+function leavesRange(key: CchsKey, layer: number, treeIdx: bigint, from: number, to: number): Uint8Array[] {
   const out: Uint8Array[] = new Array(to - from);
   for (let j = from; j < to; j++) out[j - from] = wotsLeaf(key, layer, treeIdx, j);
   return out;
 }
-export function buildTreeFromLeaves(layer: number, treeIdx: bigint, leaves: Uint8Array[]): Tree {
+function buildTreeFromLeaves(layer: number, treeIdx: bigint, leaves: Uint8Array[]): Tree {
   const height = Math.log2(leaves.length);
   const levels: Uint8Array[][] = [leaves];
   for (let k = 0; k < height; k++) {
@@ -113,7 +114,7 @@ export function buildTreeFromLeaves(layer: number, treeIdx: bigint, leaves: Uint
   }
   return { height, levels, root: levels[height][0] };
 }
-export function buildTree(key: CchsKey, layer: number, treeIdx: bigint, height: number): Tree {
+function buildTree(key: CchsKey, layer: number, treeIdx: bigint, height: number): Tree {
   return buildTreeFromLeaves(layer, treeIdx, leavesRange(key, layer, treeIdx, 0, 1 << height));
 }
 function authPath(t: Tree, leafIdx: number): Uint8Array[] {
@@ -121,7 +122,7 @@ function authPath(t: Tree, leafIdx: number): Uint8Array[] {
   for (let k = 0; k < t.height; k++) { path.push(t.levels[k][pos ^ 1].slice()); pos >>= 1; }
   return path;
 }
-export function rootFromPath(layer: number, treeIdx: bigint, leaf: Uint8Array, leafIdx: number, path: Uint8Array[]): Uint8Array {
+function rootFromPath(layer: number, treeIdx: bigint, leaf: Uint8Array, leafIdx: number, path: Uint8Array[]): Uint8Array {
   let r = leaf, pos = leafIdx;
   for (let k = 0; k < path.length; k++) {
     r = (pos & 1) === 0 ? nodeHash(layer, treeIdx, pos >> 1, k, r, path[k]) : nodeHash(layer, treeIdx, pos >> 1, k, path[k], r);
@@ -130,7 +131,7 @@ export function rootFromPath(layer: number, treeIdx: bigint, leaf: Uint8Array, l
   return r;
 }
 
-export function keygen(key: CchsKey, cache?: Map<string, Tree>): CchsPublic {
+function keygen(key: CchsKey, cache?: Map<string, Tree>): CchsPublic {
   const top = buildTree(key, 1, 0n, H), rec = buildTree(key, 0xff, 0n, REC_H);
   cache?.set('1/0', top); cache?.set('ff/0', rec);
   return { root: top.root, recRoot: rec.root };
@@ -147,14 +148,14 @@ function wotsEndsFromSig(layer: number, treeIdx: bigint, leafIdx: number, m: Uin
   return out;
 }
 /** Number of hash calls a verifier spends on one layer for message `m` (for cost tables). */
-export function verifySteps(m: Uint8Array): number {
+function verifySteps(m: Uint8Array): number {
   const d = digits(m); let s = 0;
   for (let c = 0; c < LEN; c++) s += W - 1 - d[c];
   return s + 1 + H; // chains + leaf + path
 }
 
 /** Sign the 24-byte message `m` at leaf `idx`. `subtreeCached` omits the top layer. */
-export function sign(key: CchsKey, idx: number, m: Uint8Array, subtreeCached: boolean, treeCache?: Map<string, Tree>): CchsSignature {
+function sign(key: CchsKey, idx: number, m: Uint8Array, subtreeCached: boolean, treeCache?: Map<string, Tree>): CchsSignature {
   if (idx < 0 || idx >= CAPACITY) throw new Error('index exhausted');
   const treeIdx = BigInt(idx >> H), leafIdx = idx & (LEAVES - 1);
   const ck = `0/${treeIdx}`;
@@ -166,7 +167,7 @@ export function sign(key: CchsKey, idx: number, m: Uint8Array, subtreeCached: bo
 }
 
 /** Top-layer proof for bottom tree `treeIdx` alone: the payload of a `cache_subtree` transaction. */
-export function topLayer(key: CchsKey, treeIdx: bigint, bottomRoot: Uint8Array, treeCache?: Map<string, Tree>): LayerSig {
+function topLayer(key: CchsKey, treeIdx: bigint, bottomRoot: Uint8Array, treeCache?: Map<string, Tree>): LayerSig {
   let top = treeCache?.get('1/0');
   if (!top) { top = buildTree(key, 1, 0n, H); treeCache?.set('1/0', top); }
   const leaf = Number(treeIdx);
@@ -174,18 +175,18 @@ export function topLayer(key: CchsKey, treeIdx: bigint, bottomRoot: Uint8Array, 
 }
 
 /** Bottom-layer root recomputed from a layer-0 signature (what the verifier compares with the cache). */
-export function bottomRootOf(idx: number, m: Uint8Array, l0: LayerSig): Uint8Array {
+function bottomRootOf(idx: number, m: Uint8Array, l0: LayerSig): Uint8Array {
   const treeIdx = BigInt(idx >> H), leafIdx = idx & (LEAVES - 1);
   return rootFromPath(0, treeIdx, leafFromEnds(0, treeIdx, leafIdx, wotsEndsFromSig(0, treeIdx, leafIdx, m, l0.wots)), leafIdx, l0.auth);
 }
 /** Verify a top-layer proof for bottom root `r0` of tree `treeIdx` against `root`. */
-export function verifyTopLayer(root: Uint8Array, treeIdx: bigint, r0: Uint8Array, l1: LayerSig): boolean {
+function verifyTopLayer(root: Uint8Array, treeIdx: bigint, r0: Uint8Array, l1: LayerSig): boolean {
   const leaf = Number(treeIdx);
   const r1 = rootFromPath(1, 0n, leafFromEnds(1, 0n, leaf, wotsEndsFromSig(1, 0n, leaf, r0, l1.wots)), leaf, l1.auth);
   return eq(r1, root);
 }
 /** Local verifier mirroring the on-chain state machine. Returns the bottom root to cache, or throws. */
-export function verify(pub: CchsPublic, idx: number, m: Uint8Array, s: CchsSignature, cachedBottomRoot?: Uint8Array): Uint8Array {
+function verify(pub: CchsPublic, idx: number, m: Uint8Array, s: CchsSignature, cachedBottomRoot?: Uint8Array): Uint8Array {
   if (s.idx !== idx) throw new Error('index mismatch');
   const r0 = bottomRootOf(idx, m, s.l0);
   if (cachedBottomRoot) { if (!eq(cachedBottomRoot, r0)) throw new Error('bad subtree root'); return r0; }
@@ -194,12 +195,12 @@ export function verify(pub: CchsPublic, idx: number, m: Uint8Array, s: CchsSigna
   return r0;
 }
 
-export function signRecovery(key: CchsKey, recNonce: number, m: Uint8Array, treeCache?: Map<string, Tree>): LayerSig {
+function signRecovery(key: CchsKey, recNonce: number, m: Uint8Array, treeCache?: Map<string, Tree>): LayerSig {
   let rec = treeCache?.get('ff/0');
   if (!rec) { rec = buildTree(key, 0xff, 0n, REC_H); treeCache?.set('ff/0', rec); }
   return { wots: wotsSign(key, 0xff, 0n, recNonce, m), auth: authPath(rec, recNonce) };
 }
-export function verifyRecovery(recRoot: Uint8Array, recNonce: number, m: Uint8Array, s: LayerSig): boolean {
+function verifyRecovery(recRoot: Uint8Array, recNonce: number, m: Uint8Array, s: LayerSig): boolean {
   const r = rootFromPath(0xff, 0n, leafFromEnds(0xff, 0n, recNonce, wotsEndsFromSig(0xff, 0n, recNonce, m, s.wots)), recNonce, s.auth);
   return eq(r, recRoot);
 }
@@ -209,18 +210,28 @@ export function verifyRecovery(recRoot: Uint8Array, recNonce: number, m: Uint8Ar
  * the EVM chain id, as in every non-EVM port:
  *   M = SHA-256("AEGIS_CCHS_V1" ‖ tag ‖ account ‖ nonce(8) ‖ idx(8) ‖ SHA-256(call))[0..24)
  */
-export function executeDigest(p: { tag: string; account: Uint8Array; nonce: bigint; idx: bigint; callHash: Uint8Array }): Uint8Array {
+function executeDigest(p: { tag: string; account: Uint8Array; nonce: bigint; idx: bigint; callHash: Uint8Array }): Uint8Array {
   return hashN(concatBytes(enc.encode('AEGIS_CCHS_V1'), enc.encode(p.tag), p.account, u64be(p.nonce), u64be(p.idx), p.callHash));
 }
-export function recoveryDigest(p: { tag: string; account: Uint8Array; recNonce: bigint; newRoot: Uint8Array; newRecRoot: Uint8Array }): Uint8Array {
+function recoveryDigest(p: { tag: string; account: Uint8Array; recNonce: bigint; newRoot: Uint8Array; newRecRoot: Uint8Array }): Uint8Array {
   return hashN(concatBytes(enc.encode('AEGIS_CCHS_RECOVER_V1'), enc.encode(p.tag), p.account, u64be(p.recNonce), p.newRoot, p.newRecRoot));
 }
 
-export function signatureBytes(s: CchsSignature): number { return s.l1 ? SIG_BYTES_FIRST : SIG_BYTES_CACHED; }
+function signatureBytes(s: CchsSignature): number { return s.l1 ? SIG_BYTES_FIRST : SIG_BYTES_CACHED; }
 
-export const cchsC = {
+return {
   variant: 'C' as const, N, W, LEN, H, REC_H,
   sk, digits, wotsLeaf, leavesRange, buildTree, buildTreeFromLeaves, rootFromPath,
   keygen, sign, topLayer, bottomRootOf, verifyTopLayer, verify, signRecovery, verifyRecovery,
   executeDigest, recoveryDigest, verifySteps, signatureBytes,
 };
+}
+export type Compact = ReturnType<typeof makeCompact>;
+
+/** CCHS-C-20 over the pure-JS SHA-256. The worker pool binds the WASM core instead (see cchsFast.ts). */
+export const cchsC: Compact = makeCompact(sha256);
+export const {
+  sk, digits, wotsLeaf, leavesRange, buildTree, buildTreeFromLeaves, rootFromPath,
+  keygen, sign, topLayer, bottomRootOf, verifyTopLayer, verify, signRecovery, verifyRecovery,
+  executeDigest, recoveryDigest, verifySteps, signatureBytes,
+} = cchsC;
