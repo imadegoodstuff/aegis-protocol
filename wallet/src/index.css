@@ -340,6 +340,49 @@ body::before {
 .footer-bottom { font-family: var(--font-mono); font-size: 11px; color: var(--fg-3); }
 
 /* ================================================================
+   Derive panel
+   ================================================================ */
+.derive { padding: 28px; margin-top: 32px; }
+.derive-head { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+.derive-input { display: grid; gap: 16px; margin-bottom: 24px; }
+.derive-label { display: grid; gap: 6px; font-size: 12px; color: var(--fg-2); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.06em; }
+.derive-area, .derive-input-s {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--bg-0);
+  border: 1px solid var(--border-hi);
+  border-radius: var(--r-md);
+  color: var(--fg-0); font-size: 13px;
+  font-family: var(--font-mono);
+  outline: none;
+  resize: vertical;
+  transition: border-color 0.15s;
+}
+.derive-area:focus, .derive-input-s:focus { border-color: var(--accent-cyan); }
+.derive-input-s { height: 40px; flex: 1; }
+.link-btn { background: none; border: none; color: var(--accent-cyan); cursor: pointer; font-family: var(--font-mono); font-size: 11px; text-decoration: underline; }
+.derive-out { display: grid; gap: 24px; }
+.derive-section { padding-top: 16px; border-top: 1px solid var(--border); }
+.derive-section-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+.addr-strip {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 16px; background: var(--bg-0); border: 1px solid var(--border-hi);
+  border-radius: var(--r-md); margin-bottom: 14px;
+}
+.addr-value { font-family: var(--font-mono); color: var(--accent-lime); font-size: 15px; word-break: break-all; }
+.chain-grid-tight .chain-cell { padding: 12px 16px; }
+.kv { display: grid; gap: 10px; }
+.kv-row {
+  display: grid; gap: 4px; padding: 12px 14px;
+  background: var(--bg-0); border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.kv-label { font-size: 11px; color: var(--fg-3); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.04em; }
+.kv-val { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.kv-val span { color: var(--fg-0); font-size: 12px; word-break: break-all; }
+.kv-val .btn { padding: 4px 10px; font-size: 11px; }
+
+/* ================================================================
    Reveal
    ================================================================ */
 .fade { opacity: 0; transform: translateY(16px); transition: opacity 0.8s, transform 0.8s; }

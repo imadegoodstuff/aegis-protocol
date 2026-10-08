@@ -21,6 +21,8 @@
 
 extern crate alloc;
 
+pub mod wasm_api;
+
 use alloc::string::String;
 use alloc::vec::Vec;
 use bip39::Mnemonic;

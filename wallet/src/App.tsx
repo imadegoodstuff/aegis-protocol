@@ -1,5 +1,6 @@
 import { useEffect, useRef } from "react";
 import ChainDashboard from "./components/ChainDashboard";
+import DerivePanel from "./components/DerivePanel";
 import Terminal from "./components/Terminal";
 
 export default function App() {
@@ -63,7 +64,7 @@ export default function App() {
             and more. No bridge. No pool. No admin. No token.
           </p>
           <div className="hero-ctas fade">
-            <a className="btn btn-primary" href="#chains">Launch preview →</a>
+            <a className="btn btn-primary" href="#chains">Try live derivation →</a>
             <a className="btn" href="#verify">10-second self-verify</a>
             <a className="btn" href="#spec">Read the spec</a>
           </div>
@@ -104,6 +105,9 @@ export default function App() {
           </div>
           <div className="fade">
             <ChainDashboard />
+          </div>
+          <div className="fade">
+            <DerivePanel />
           </div>
           <div className="fade">
             <Terminal />

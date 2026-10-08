@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.28;
 
 import "forge-std/Test.sol";
 import {AegisAccount} from "../src/AegisAccount.sol";
@@ -19,8 +19,8 @@ contract AegisAccountTest is Test {
     uint256 constant ECDSA_PK      = 0xA11CE;
     address          ecdsaOwner;
 
-    // "SPHINCS+ pk" placeholder
-    bytes constant PK = hex"deadbeefcafebabe00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+    // "SPHINCS+ pk" placeholder (64 bytes = pkSeed || pkRoot in production)
+    bytes constant PK = hex"deadbeefcafebabe00112233445566778899aabbccddeeffdeadbeefcafebabe00112233445566778899aabbccddeeffdeadbeefcafebabe00112233445566778899aabbccddeeffdeadbeefcafebabe00112233445566778899aabbccddeeff";
 
     function setUp() public {
         ecdsaOwner = vm.addr(ECDSA_PK);

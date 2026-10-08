@@ -2,9 +2,10 @@
 pragma solidity ^0.8.26;
 
 import "forge-std/Script.sol";
-import {SphincsVerifierStub} from "../src/SphincsVerifierStub.sol";
-import {AegisAccountFactory} from "../src/AegisAccountFactory.sol";
-import {ISphincsVerifier} from "../src/interfaces/ISphincsVerifier.sol";
+import {SphincsVerifierStub}  from "../src/SphincsVerifierStub.sol";
+import {SphincsC13Verifier}   from "../src/SphincsC13Verifier.sol";
+import {AegisAccountFactory}  from "../src/AegisAccountFactory.sol";
+import {ISphincsVerifier}     from "../src/interfaces/ISphincsVerifier.sol";
 
 /// @notice Deploys Verifier (nonce 0) and Factory (nonce 1) from a dedicated
 ///         deployer EOA so that the two addresses are identical across every
@@ -26,11 +27,19 @@ contract DeployMultichain is Script {
         address feeCollector = vm.envAddress("AEGIS_FEE_COLLECTOR");
         require(feeCollector != address(0), "FEE_COLLECTOR=0");
 
+        // AEGIS_VERIFIER="prod" (default) uses the real SPHINCS+ C13 verifier.
+        // "stub" uses the SHA256-based stub for ultra-cheap test deployments.
+        string memory kind = vm.envOr("AEGIS_VERIFIER", string("prod"));
+
         uint256 pk = vm.envUint("AEGIS_DEPLOYER_KEY");
         vm.startBroadcast(pk);
 
-        // nonce 0 -> SphincsVerifier (stub for v0.1; replace with C13 fork in prod)
-        verifier = address(new SphincsVerifierStub());
+        // nonce 0 -> SphincsVerifier
+        if (keccak256(bytes(kind)) == keccak256(bytes("stub"))) {
+            verifier = address(new SphincsVerifierStub());
+        } else {
+            verifier = address(new SphincsC13Verifier());
+        }
 
         // nonce 1 -> Factory
         factory = address(new AegisAccountFactory(ISphincsVerifier(verifier), feeCollector));
@@ -38,6 +47,7 @@ contract DeployMultichain is Script {
         vm.stopBroadcast();
 
         console2.log("Chain id        :", block.chainid);
+        console2.log("Verifier kind   :", kind);
         console2.log("Verifier        :", verifier);
         console2.log("Factory         :", factory);
         console2.log("Fee collector   :", feeCollector);

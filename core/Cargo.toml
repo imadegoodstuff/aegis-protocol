@@ -10,7 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["std"]
-std = []
+std  = []
 wasm = ["wasm-bindgen", "getrandom/js"]
 
 [dependencies]

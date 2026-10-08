@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.26;
+pragma solidity ^0.8.28;
 
 import {AegisAccount} from "./AegisAccount.sol";
 import {ISphincsVerifier} from "./interfaces/ISphincsVerifier.sol";
