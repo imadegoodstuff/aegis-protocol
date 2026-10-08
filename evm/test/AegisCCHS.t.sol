@@ -308,7 +308,7 @@ contract AegisCCHSFactoryTest is Test {
         MockMultiToken mt = new MockMultiToken();
         mt.mint(address(this), 1, 10);
         mt.safeTransferFrom(address(this), a, 1, 10, "");
-        assertEq(mt.balanceOf(a, 1), 10);
+        assertEq(mt.balanceOf(1, a), 10);
         uint256[] memory ids = new uint256[](1); ids[0] = 1;
         uint256[] memory amts = new uint256[](1); amts[0] = 0;
         mt.safeBatchTransferFrom(address(this), a, ids, amts, "");
