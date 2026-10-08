@@ -1,8 +1,8 @@
 [package]
 name = "aegis_account"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Aegis post-quantum smart account for Solana (SVM)"
+description = "Aegis CCHS-S-20 post-quantum smart account for Solana (SVM)"
 
 [lib]
 crate-type = ["cdylib", "lib"]
@@ -13,7 +13,9 @@ no-entrypoint = []
 no-idl = []
 no-log-ix-name = []
 cpi = ["no-entrypoint"]
+idl-build = ["anchor-lang/idl-build"]
 default = []
 
 [dependencies]
-anchor-lang = "0.30.1"
+anchor-lang = { version = "0.30.1", features = ["init-if-needed"] }
+cchs-core   = { path = "../../../cchs-core", default-features = false }

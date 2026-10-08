@@ -1,0 +1,23 @@
+[package]
+name = "cchs-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "CCHS-S-20 (Chain-Cached Hypertree Signatures) verifier core: WOTS+ / Merkle / cache state machine over an injected SHA-256"
+
+[lib]
+crate-type = ["rlib"]
+
+[features]
+default = []
+# Enables the standard library. Also pulls in the `sha2` backend so the
+# fixture tests have a native hash (`cargo test --features std`).
+std = ["sha2"]
+# Implements the `Sha256` trait for `sha2::Sha256` (no_std compatible).
+sha2 = ["dep:sha2"]
+
+[dependencies]
+sha2 = { version = "0.10", default-features = false, optional = true }
+
+[dev-dependencies]
+serde_json = "1"

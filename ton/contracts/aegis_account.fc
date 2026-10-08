@@ -1,126 +1,369 @@
-;; Aegis — post-quantum smart account on TON (FunC).
-;; State machine mirrors evm/src/AegisAccount.sol.
+;; Aegis CCHS - Chain-Cached Hypertree Signature account for TON (FunC).
 ;;
-;; Storage layout (one cell):
-;;   int pq_pk_hash          256 bits
-;;   int guardian_wc_addr    256 bits  (standard addr)
-;;   int fallback_pubkey_hash 256 bits
-;;   int nonce               64 bits
-;;   int exit_timestamp      32 bits   (unix seconds)
-;;   int exit_nonce          64 bits
-;;   int initialized         1 bit
+;; Parameter set CCHS-S-20: WOTS+ (SHA-256, w = 16, 67 chains) under a two-layer
+;; hypertree of height 10 + 10 (2^20 signatures) plus a single-layer recovery
+;; tree of height 8. Every hash input is byte-identical to evm/src/AegisCCHS.sol
+;; and wallet/src/aegis/cchs.ts; ground truth is evm/test/fixtures/cchs-s-20.json.
 ;;
-;; All state writes behind PQ sig verification (TODO: real sphincs_verify).
+;; Spec: ../../CCHS.spec.md        Cell layout and gas notes: ../README.md
 ;;
-;; This file is a *skeleton* — operation handlers emit log(...) and update state
-;; but do not yet implement SPHINCS+ verification. SPHINCS+ in FunC is costly;
-;; v0.2 will decide between (a) a dedicated TVM extension op, (b) SHRINCS impl,
-;; or (c) a merkle-batched off-chain prover with on-chain root commit.
+;; Hash primitives used (see README "Hashing on TVM"):
+;;   HASHEXT_SHA256 over 1 builder  - chain step (64 B) and Merkle node (96 B)
+;;   HASHEXT_SHA256 over 2 builders - recovery digest (128 B, > 1023 bits)
+;;   HASHEXT_SHA256 over a tuple    - leaf compression (2176 B, 23 builders)
+;; SHA256U (string_hash) is deliberately not used: it is limited to one slice
+;; of at most 127 bytes and gains nothing over HASHEXT on a builder.
 
 #include "imports/stdlib.fc";
 
-const int TIMELOCK_SECONDS = 7 * 24 * 60 * 60;
-const int OP_INITIALIZE                   = 0x1;
-const int OP_EXECUTE                      = 0x2;
-const int OP_INITIATE_EMERGENCY_EXIT      = 0x3;
-const int OP_CANCEL_EMERGENCY_EXIT        = 0x4;
-const int OP_FINALIZE_EMERGENCY_EXIT      = 0x5;
+;; ------------------------------------------------------------------ params
+const int W            = 16;
+const int LEN          = 67;        ;; 64 message + 3 checksum chains
+const int H            = 10;        ;; tree height per layer
+const int REC_H        = 8;         ;; recovery tree height
+const int LEAVES       = 1024;      ;; 2^H
+const int CAPACITY     = 1048576;   ;; 2^(2H)
+const int REC_CAPACITY = 256;       ;; 2^REC_H
 
-const int ERR_ALREADY_INIT        = 100;
-const int ERR_NOT_INITIALIZED     = 101;
-const int ERR_BAD_NONCE           = 102;
-const int ERR_INVALID_PQ_SIG      = 103;
-const int ERR_NO_PENDING_EXIT     = 104;
-const int ERR_TIMELOCK_NOT_READY  = 105;
+const int TYPE_CHAIN     = 0;
+const int TYPE_LEAF      = 1;
+const int TYPE_NODE      = 2;
+const int LAYER_RECOVERY = 0xff;
 
-(int, int, int, int, int, int, int) load_data() inline {
+;; --------------------------------------------------------------------- ops
+const int op::execute = 0x41455845;  ;; "AEXE"
+const int op::recover = 0x41455243;  ;; "AERC"
+
+;; ------------------------------------------------------------------ errors
+const int err::wrong_op          = 0xffff;
+const int err::exhausted         = 200;
+const int err::bad_subtree_root  = 201;
+const int err::missing_top_layer = 202;
+const int err::bad_top_root      = 203;
+const int err::bad_recovery      = 204;
+const int err::zero_root         = 205;
+const int err::external_disabled = 206;
+
+;; ----------------------------------------------------------------- hashing
+;; HASHEXT_SHA256 pops n, then n slices/builders; the deepest item is hashed
+;; first, so FunC argument order equals byte order.
+int sha256_b(builder b) asm "1 PUSHINT HASHEXT_SHA256";
+int sha256_2b(builder a, builder b) asm "2 PUSHINT HASHEXT_SHA256";
+;; EXPLODEVAR unpacks the tuple t (length m <= 255) to x_1 ... x_m m, which is
+;; exactly the operand layout HASHEXT expects.
+int sha256_tuple(tuple parts) asm "255 PUSHINT EXPLODEVAR HASHEXT_SHA256";
+
+;; ADRS = layer(1) || treeIdx(8) || type(1) || leafIdx(4) || chainIdx(1) || step(1) || pad(16)
+;; Returned as one 256-bit integer (the 16 pad bytes are the low 128 bits).
+int adrs256(int layer, int tree_idx, int typ, int leaf_idx, int chain_idx, int step) inline {
+  return (layer << 248) | (tree_idx << 184) | (typ << 176) | (leaf_idx << 144) | (chain_idx << 136) | (step << 128);
+}
+
+;; F(ADRS, x) = sha256(ADRS || x)                    64-byte input
+int chain_f(int adrs, int x) inline {
+  return sha256_b(begin_cell()
+    .store_uint(adrs, 256)
+    .store_uint(x, 256));
+}
+
+;; T_node(ADRS, l, r) = sha256(ADRS || l || r)        96-byte input
+int node_t(int adrs, int l, int r) inline {
+  return sha256_b(begin_cell()
+    .store_uint(adrs, 256)
+    .store_uint(l, 256)
+    .store_uint(r, 256));
+}
+
+;; ---------------------------------------------------------- value streams
+;; A signature is a stream of 256-bit values stored three per cell (768 bits)
+;; with a reference to the cell holding the next values. Any packing where
+;; every cell holds whole values is accepted; the canonical packing is 3/cell.
+(slice, int) next_val(slice s) inline {
+  if (s.slice_bits() < 256) {
+    s = s~load_ref().begin_parse();
+  }
+  int v = s~load_uint(256);
+  return (s, v);
+}
+
+;; ------------------------------------------------------------------- WOTS+
+;; Reads 67 chain values from `sig`, completes every chain to its end and
+;; compresses the ends into the leaf hash:
+;;   leaf = sha256(ADRS_leaf || pk_0 || ... || pk_66)    2176-byte input
+;; Digits: 64 base-16 nibbles of m (high nibble first) then the 3-digit
+;; big-endian base-16 checksum sum(15 - d_i).
+(slice, int) load_wots_leaf(slice sig, int layer, int tree_idx, int leaf_idx, int m) {
+  int csum = 0;
+  int t = m;
+  repeat (64) {
+    csum += 15 - (t & 15);
+    t >>= 4;
+  }
+
+  int chain_base = adrs256(layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
+
+  ;; Leaf input is accumulated as builders of 3 x 256 bits in a tuple:
+  ;; slot 0 = ADRS_leaf, slots 1..67 = pk_c.  68 slots -> 23 builders.
+  tuple parts = empty_tuple();
+  builder cur = begin_cell()
+    .store_uint(adrs256(layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0), 256);
+  int fill = 1;
+
+  int c = 0;
+  repeat (LEN) {
+    int d = 0;
+    if (c < 64) {
+      d = (m >> (252 - 4 * c)) & 15;
+    } elseif (c == 64) {
+      d = (csum >> 8) & 15;
+    } elseif (c == 65) {
+      d = (csum >> 4) & 15;
+    } else {
+      d = csum & 15;
+    }
+
+    int x = sig~next_val();
+    int s = d;
+    while (s < W - 1) {
+      x = chain_f(chain_base | (c << 136) | (s << 128), x);
+      s += 1;
+    }
+
+    if (fill == 3) {
+      parts~tpush(cur);
+      cur = begin_cell();
+      fill = 0;
+    }
+    cur = cur.store_uint(x, 256);
+    fill += 1;
+    c += 1;
+  }
+  parts~tpush(cur);
+
+  return (sig, sha256_tuple(parts));
+}
+
+;; Reads a WOTS+ signature followed by `height` auth-path siblings from `sig`
+;; and returns the recomputed root of tree (layer, tree_idx).
+(slice, int) load_layer_root(slice sig, int layer, int tree_idx, int leaf_idx, int height, int m) {
+  int node = sig~load_wots_leaf(layer, tree_idx, leaf_idx, m);
+  int pos = leaf_idx;
+  int k = 0;
+  repeat (height) {
+    int sib = sig~next_val();
+    int a = adrs256(layer, tree_idx, TYPE_NODE, pos >> 1, k, 0);
+    if (pos & 1) {
+      node = node_t(a, sib, node);
+    } else {
+      node = node_t(a, node, sib);
+    }
+    pos >>= 1;
+    k += 1;
+  }
+  return (sig, node);
+}
+
+;; ----------------------------------------------------------------- storage
+;; root:uint256 rec_root:uint256 epoch:uint64 next_idx:uint64 nonce:uint64
+;; rec_nonce:uint64 cache:(HashmapE 128 uint256)   key = epoch << 64 | tree_idx
+(int, int, int, int, int, int, cell) load_data() inline {
   slice ds = get_data().begin_parse();
-  int init  = ds~load_uint(1);
-  int pkh   = ds~load_uint(256);
-  int grd   = ds~load_uint(256);
-  int fbh   = ds~load_uint(256);
-  int nonce = ds~load_uint(64);
-  int exits = ds~load_uint(32);
-  int exitn = ds~load_uint(64);
-  return (init, pkh, grd, fbh, nonce, exits, exitn);
+  int root      = ds~load_uint(256);
+  int rec_root  = ds~load_uint(256);
+  int epoch     = ds~load_uint(64);
+  int next_idx  = ds~load_uint(64);
+  int nonce     = ds~load_uint(64);
+  int rec_nonce = ds~load_uint(64);
+  cell cache    = ds~load_dict();
+  return (root, rec_root, epoch, next_idx, nonce, rec_nonce, cache);
 }
 
-() save_data(int init, int pkh, int grd, int fbh, int nonce, int exits, int exitn) impure inline {
-  set_data(
-    begin_cell()
-      .store_uint(init,  1)
-      .store_uint(pkh,   256)
-      .store_uint(grd,   256)
-      .store_uint(fbh,   256)
-      .store_uint(nonce, 64)
-      .store_uint(exits, 32)
-      .store_uint(exitn, 64)
-    .end_cell()
-  );
+() save_data(int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) impure inline {
+  set_data(begin_cell()
+    .store_uint(root, 256)
+    .store_uint(rec_root, 256)
+    .store_uint(epoch, 64)
+    .store_uint(next_idx, 64)
+    .store_uint(nonce, 64)
+    .store_uint(rec_nonce, 64)
+    .store_dict(cache)
+    .end_cell());
 }
 
+int my_addr_hash() inline {
+  (int wc, int addr_hash) = parse_std_addr(my_address());
+  return addr_hash;
+}
+
+;; ----------------------------------------------------------------- digests
+;; M = sha256("AEGIS_CCHS_V1" || "ton" || addr_hash(32) || nonce(8) || idx(8) || cell_hash(action)(32))
+;; 96 bytes = 768 bits, one builder.
+;; `action` = cell { mode:uint8  msg:^Cell } so the send mode is signed too.
+int execute_digest(int addr_hash, int nonce, int idx, cell action) inline {
+  return sha256_b(begin_cell()
+    .store_slice("AEGIS_CCHS_V1")
+    .store_slice("ton")
+    .store_uint(addr_hash, 256)
+    .store_uint(nonce, 64)
+    .store_uint(idx, 64)
+    .store_uint(cell_hash(action), 256));
+}
+
+;; M_rec = sha256("AEGIS_CCHS_RECOVER_V1" || "ton" || addr_hash(32) || rec_nonce(8) || new_root(32) || new_rec_root(32))
+;; 128 bytes = 1024 bits > one builder, so two 512-bit builders are hashed as one stream.
+int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root) inline {
+  builder p1 = begin_cell()
+    .store_slice("AEGIS_CCHS_RECOVER_V1")
+    .store_slice("ton")
+    .store_uint(addr_hash, 256)
+    .store_uint(rec_nonce, 64);
+  builder p2 = begin_cell()
+    .store_uint(new_root, 256)
+    .store_uint(new_rec_root, 256);
+  return sha256_2b(p1, p2);
+}
+
+;; ---------------------------------------------------------------- handlers
+;; execute body:
+;;   op:uint32 query_id:uint64 has_l1:uint1
+;;   ref[0] = l0 stream   (67 wots || 10 auth)
+;;   ref[1] = action      { mode:uint8  msg:^Cell }
+;;   ref[2] = l1 stream   (67 wots || 10 auth)   present iff has_l1
+() handle_execute(slice body) impure inline {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+
+  int query_id = body~load_uint(64);
+  int has_l1   = body~load_uint(1);
+  slice l0     = body~load_ref().begin_parse();
+  cell action  = body~load_ref();
+
+  int idx = next_idx;
+  throw_unless(err::exhausted, idx < CAPACITY);
+
+  int m = execute_digest(my_addr_hash(), nonce, idx, action);
+
+  int tree_idx = idx >> H;
+  int leaf_idx = idx & (LEAVES - 1);
+  int r0 = l0~load_layer_root(0, tree_idx, leaf_idx, H, m);
+
+  int key = (epoch << 64) | tree_idx;
+  (slice cached, int found) = cache.udict_get?(128, key);
+  if (found) {
+    throw_unless(err::bad_subtree_root, cached.preload_uint(256) == r0);
+  } else {
+    throw_unless(err::missing_top_layer, has_l1);
+    slice l1 = body~load_ref().begin_parse();
+    ;; Top layer: tree 0, leaf = tree_idx, message = r0.
+    int r1 = l1~load_layer_root(1, 0, tree_idx, H, r0);
+    throw_unless(err::bad_top_root, r1 == root);
+    cache~udict_set_builder(128, key, begin_cell().store_uint(r0, 256));
+  }
+
+  ;; Effects before interaction.
+  save_data(root, rec_root, epoch, idx + 1, nonce + 1, rec_nonce, cache);
+
+  slice a = action.begin_parse();
+  int mode = a~load_uint(8);
+  cell msg = a~load_ref();
+  send_raw_message(msg, mode);
+}
+
+;; recover body:
+;;   op:uint32 query_id:uint64 new_root:uint256 new_rec_root:uint256
+;;   ref[0] = recovery stream (67 wots || 8 auth)
+() handle_recover(slice body) impure inline {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+
+  int query_id     = body~load_uint(64);
+  int new_root     = body~load_uint(256);
+  int new_rec_root = body~load_uint(256);
+  slice sig        = body~load_ref().begin_parse();
+
+  throw_if(err::zero_root, (new_root == 0) | (new_rec_root == 0));
+  throw_unless(err::exhausted, rec_nonce < REC_CAPACITY);
+
+  int m = recovery_digest(my_addr_hash(), rec_nonce, new_root, new_rec_root);
+  int r = sig~load_layer_root(LAYER_RECOVERY, 0, rec_nonce, REC_H, m);
+  throw_unless(err::bad_recovery, r == rec_root);
+
+  ;; New roots, fresh index space, new cache epoch; nonce keeps counting.
+  save_data(new_root, new_rec_root, epoch + 1, 0, nonce, rec_nonce + 1, cache);
+}
+
+;; ------------------------------------------------------------ entry points
 () recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
-  if (in_msg_body.slice_empty?()) { return (); }
+  if (in_msg_body.slice_empty?()) {
+    return ();                       ;; plain transfer
+  }
+  slice cs = in_msg_full.begin_parse();
+  int flags = cs~load_uint(4);
+  if (flags & 1) {
+    return ();                       ;; bounced message
+  }
   int op = in_msg_body~load_uint(32);
-
-  (int init, int pkh, int grd, int fbh, int nonce, int exits, int exitn) = load_data();
-
-  if (op == OP_INITIALIZE) {
-    throw_if(ERR_ALREADY_INIT, init);
-    int new_pkh = in_msg_body~load_uint(256);
-    int new_grd = in_msg_body~load_uint(256);
-    int new_fbh = in_msg_body~load_uint(256);
-    save_data(1, new_pkh, new_grd, new_fbh, 0, 0, 0);
+  if (op == 0) {
+    return ();                       ;; transfer with text comment
+  }
+  if (op == op::execute) {
+    handle_execute(in_msg_body);
     return ();
   }
-
-  throw_unless(ERR_NOT_INITIALIZED, init);
-
-  if (op == OP_EXECUTE) {
-    int provided_nonce = in_msg_body~load_uint(64);
-    throw_unless(ERR_BAD_NONCE, provided_nonce == nonce + 1);
-    ;; TODO: load pq_pk and pq_sig, verify sphincs_verify(pq_pk, digest, sig)
-    nonce = provided_nonce;
-    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
+  if (op == op::recover) {
+    handle_recover(in_msg_body);
     return ();
   }
-
-  if (op == OP_INITIATE_EMERGENCY_EXIT) {
-    ;; TODO: verify fallback ed25519 sig under fbh
-    exits = now() + TIMELOCK_SECONDS;
-    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
-    return ();
-  }
-
-  if (op == OP_CANCEL_EMERGENCY_EXIT) {
-    throw_unless(ERR_NO_PENDING_EXIT, exits);
-    ;; TODO: verify PQ sig
-    exits = 0;
-    exitn = exitn + 1;
-    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
-    return ();
-  }
-
-  if (op == OP_FINALIZE_EMERGENCY_EXIT) {
-    throw_unless(ERR_NO_PENDING_EXIT, exits);
-    throw_unless(ERR_TIMELOCK_NOT_READY, now() >= exits);
-    exits = 0;
-    exitn = exitn + 1;
-    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
-    ;; Build message to guardian with all balance; mode = 128 (carry all balance)
-    cell to_guardian = begin_cell()
-      .store_uint(0x18, 6)                 ;; nobounce flag
-      .store_uint(4, 3)                    ;; addr_std$10, workchain 0 (set externally)
-      .store_uint(grd, 256)
-      .store_coins(0)                       ;; placeholder; mode 128 ignores this
-      .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
-    .end_cell();
-    send_raw_message(to_guardian, 128);     ;; carry whole balance
-    return ();
-  }
+  throw(err::wrong_op);
 }
 
-;; Views
-int get_nonce()           method_id { var (_,_,_,_,n,_,_) = load_data(); return n; }
-int get_exit_timestamp()  method_id { var (_,_,_,_,_,e,_) = load_data(); return e; }
-int get_pq_pk_hash()      method_id { var (_,h,_,_,_,_,_) = load_data(); return h; }
+;; External messages are refused. Verification costs ~10^5 gas, far above the
+;; 10k gas credit available before accept_message(); accepting first would let
+;; anyone drain the balance with invalid messages. Operations are submitted as
+;; internal messages from any wallet or relayer, which pays for gas. The
+;; signature, not the sender, is what authorizes the action.
+() recv_external(slice in_msg_body) impure {
+  throw(err::external_disabled);
+}
+
+;; ------------------------------------------------------------- get methods
+(int, int, int, int, int, int) get_account_state() method_id {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  return (root, rec_root, epoch, next_idx, nonce, rec_nonce);
+}
+
+int get_cached_root(int epoch, int tree_idx) method_id {
+  (int root, int rec_root, int e, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (slice v, int found) = cache.udict_get?(128, (epoch << 64) | tree_idx);
+  return found ? v.preload_uint(256) : 0;
+}
+
+int needs_top_layer() method_id {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (slice v, int found) = cache.udict_get?(128, (epoch << 64) | (next_idx >> H));
+  return found ? 0 : -1;
+}
+
+;; Digest the client must sign for the next execute of `action` (pass cell_hash(action)).
+int get_next_digest(int action_hash) method_id {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  return sha256_b(begin_cell()
+    .store_slice("AEGIS_CCHS_V1")
+    .store_slice("ton")
+    .store_uint(my_addr_hash(), 256)
+    .store_uint(nonce, 64)
+    .store_uint(next_idx, 64)
+    .store_uint(action_hash, 256));
+}
+
+int get_recovery_digest(int new_root, int new_rec_root) method_id {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  return recovery_digest(my_addr_hash(), rec_nonce, new_root, new_rec_root);
+}
+
+;; Pure verifier entry point for clients and tests: recomputes the root of
+;; tree (layer, tree_idx) from a signature stream (67 wots || height auth)
+;; on message m at leaf_idx. Does not touch storage.
+int compute_layer_root(int layer, int tree_idx, int leaf_idx, int height, int m, cell sig) method_id {
+  slice s = sig.begin_parse();
+  int r = s~load_layer_root(layer, tree_idx, leaf_idx, height, m);
+  return r;
+}

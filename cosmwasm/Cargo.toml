@@ -1,8 +1,8 @@
 [package]
 name = "aegis-cosmwasm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
-description = "Aegis post-quantum smart account for CosmWasm chains"
+description = "Aegis CCHS-S-20 post-quantum smart account for CosmWasm chains"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -28,4 +28,5 @@ cosmwasm-schema = "2.1"
 cw-storage-plus = "2.0"
 serde           = { version = "1", default-features = false, features = ["derive"] }
 thiserror       = "1"
-sha2            = "0.10"
+sha2            = { version = "0.10", default-features = false }
+cchs-core       = { path = "../cchs-core", default-features = false, features = ["sha2"] }

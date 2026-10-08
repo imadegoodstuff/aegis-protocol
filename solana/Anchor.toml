@@ -7,7 +7,7 @@ seeds = false
 skip-lint = false
 
 [programs.localnet]
-aegis_account = "AegisLnTkKk1x4VXx7v4p8h8rF1gKxh2M9W3PqV8n2bYz"
+aegis_account = "4Zto6EPTKp6p8VwMRCUKg28BhNjXDcpHMvEisRherJsr"
 
 [registry]
 url = "https://api.apr.dev"

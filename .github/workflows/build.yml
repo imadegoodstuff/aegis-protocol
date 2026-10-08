@@ -29,6 +29,16 @@ jobs:
       - run: cargo build --release
       - run: cargo test --lib
 
+  cchs-core:
+    name: CCHS core (Rust, fixture vectors)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: cchs-core } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --no-default-features
+      - run: cargo test -p cchs-core --features std
+
   wallet:
     name: Wallet UI (Vite)
     runs-on: ubuntu-latest
@@ -60,31 +70,70 @@ jobs:
         with: { targets: wasm32-unknown-unknown }
       - run: cargo build --release --target wasm32-unknown-unknown --lib
 
-  # Solana / Aptos / Sui / Starknet / TON need their own toolchain installs
-  # which take 5+ min each; wire them in as separate workflows later.
-  # Placeholders:
+  aptos:
+    name: Aptos (Move)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: aptos } }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install aptos CLI
+        run: |
+          curl -fsSL "https://aptos.dev/scripts/install_cli.sh" | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - run: aptos --version
+      - run: aptos move compile --named-addresses aegis=0x1
+      - run: aptos move test --named-addresses aegis=0x1
 
+  sui:
+    name: Sui (Move)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sui } }
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install sui CLI (latest mainnet release binary)
+        run: |
+          set -euo pipefail
+          TAG=$(gh api 'repos/MystenLabs/sui/releases?per_page=40' \
+                --jq '[.[] | select(.prerelease == false) | select(.tag_name | startswith("mainnet-v"))][0].tag_name')
+          echo "Using sui release $TAG"
+          gh release download "$TAG" -R MystenLabs/sui -p "sui-${TAG}-ubuntu-x86_64.tgz" -O sui.tgz
+          mkdir -p "$HOME/sui-bin" && tar -xzf sui.tgz -C "$HOME/sui-bin"
+          SUI_BIN=$(find "$HOME/sui-bin" -type f -name 'sui' | head -n 1)
+          chmod +x "$SUI_BIN"
+          echo "$(dirname "$SUI_BIN")" >> "$GITHUB_PATH"
+      - run: sui --version
+      - run: sui move build
+      - run: sui move test
+
+  cairo:
+    name: Starknet (Cairo, Scarb 2.8.5)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: cairo } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: software-mansion/setup-scarb@v1
+        with: { scarb-version: "2.8.5" }
+      - run: scarb --version
+      - run: scarb build
+      - run: scarb test
+
+  ton:
+    name: TON (FunC via func-js + sandbox)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: ton } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm install
+      - run: npm run build
+      - run: npm test
+
+  # Solana needs the Anchor toolchain (5+ min install); wired in as a
+  # separate workflow once anchor-cli is cached.
   solana:
     name: Solana (Anchor) · placeholder
     runs-on: ubuntu-latest
     steps: [ { run: 'echo "Anchor build runs in a dedicated workflow once anchor-cli is cached"' } ]
-
-  aptos:
-    name: Aptos (Move) · placeholder
-    runs-on: ubuntu-latest
-    steps: [ { run: 'echo "aptos-cli install + move compile pending"' } ]
-
-  sui:
-    name: Sui (Move) · placeholder
-    runs-on: ubuntu-latest
-    steps: [ { run: 'echo "sui-cli install + move build pending"' } ]
-
-  cairo:
-    name: Starknet (Cairo) · placeholder
-    runs-on: ubuntu-latest
-    steps: [ { run: 'echo "scarb install + build pending"' } ]
-
-  ton:
-    name: TON (FunC) · placeholder
-    runs-on: ubuntu-latest
-    steps: [ { run: 'echo "func-js install + compile pending"' } ]

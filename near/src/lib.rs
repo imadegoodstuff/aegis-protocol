@@ -1,139 +1,340 @@
-//! Aegis — post-quantum smart account for NEAR.
-//! Deploy one contract per user as a subaccount:
-//!   <pq_pk_hash_hex[..16]>.aegis.near
+//! Aegis CCHS-S-20 post-quantum smart account for NEAR.
 //!
-//! State machine mirrors `evm/src/AegisAccount.sol`.
+//! Authorization is a WOTS+ (SHA-256, w = 16, 67 chains) signature under a
+//! two-layer hypertree of height 10 + 10. The top-layer proof for each bottom
+//! subtree is verified once and cached in `cache[(epoch, tree_idx)]`; the
+//! next 1023 signatures in that subtree carry only the bottom layer. The
+//! verification algorithm lives in `cchs-core` and is byte-exact with
+//! `evm/src/AegisCCHS.sol`; this contract only adds the NEAR-specific digest,
+//! storage and promise dispatch.
+//!
+//! Message digest (32 bytes, signed by the client):
+//!   sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(current_account_id) ‖ nonce u64 BE
+//!          ‖ idx u64 BE ‖ sha256(len(receiver_id) u32 BE ‖ receiver_id
+//!                              ‖ len(method) u32 BE ‖ method
+//!                              ‖ len(args) u32 BE ‖ args ‖ deposit u128 BE))
+//! Recovery digest:
+//!   sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id)
+//!          ‖ rec_nonce u64 BE ‖ new_root ‖ new_rec_root)
+//!
+//! The variable-length fields of the inner call hash are length-prefixed so
+//! that `(receiver_id, method, args)` cannot be re-split into a different call
+//! with the same digest.
+//!
+//! `execute` and `recover` take Borsh-encoded arguments (`Vec<[u8; 32]>` for
+//! chain values and auth paths); `new` and the views use JSON.
+//!
+//! Spec: ../../CCHS.spec.md
 
-use near_sdk::{env, log, near, store::LookupMap, AccountId, Promise, NearToken};
-use near_sdk::base64::Engine as _;
+use near_sdk::json_types::{Base64VecU8, U128, U64};
+use near_sdk::store::LookupMap;
+use near_sdk::{env, near, AccountId, Gas, NearToken, PanicOnDefault, Promise};
 
-const TIMELOCK_NS: u64 = 7u64 * 24 * 60 * 60 * 1_000_000_000;
-pub const PROTOCOL_FEE_BPS: u16 = 1000;
-pub const MAX_FEE_BPS: u16     = 2000;
+use cchs_core::{CchsState, LayerSig, Sha256, H, LEN, REC_H};
 
-#[near(contract_state)]
-pub struct AegisAccount {
-    pub pq_pk_hash:          [u8; 32],
-    pub guardian:            AccountId,
-    pub fallback_pubkey:     Vec<u8>,
-    pub fee_collector:       AccountId,
-    pub nonce:               u64,
-    pub exit_timestamp_ns:   u64,
-    pub exit_nonce:          u64,
-    pub initialized:         bool,
-    #[allow(dead_code)]
-    pub reserved:            LookupMap<String, u64>,
+pub const DOMAIN_EXECUTE: &[u8] = b"AEGIS_CCHS_V1";
+pub const DOMAIN_RECOVER: &[u8] = b"AEGIS_CCHS_RECOVER_V1";
+pub const CHAIN_TAG: &[u8] = b"near";
+
+// ------------------------------------------------------------------- hash
+
+/// SHA-256 through the `sha256` host function. Input is accumulated in a
+/// buffer and hashed in one host call per digest.
+pub struct NearSha256 {
+    buf: Vec<u8>,
 }
 
-impl Default for AegisAccount {
+impl Default for NearSha256 {
     fn default() -> Self {
-        Self {
-            pq_pk_hash: [0u8; 32],
-            guardian: "nobody.near".parse().unwrap(),
-            fallback_pubkey: Vec::new(),
-            fee_collector: "nobody.near".parse().unwrap(),
-            nonce: 0,
-            exit_timestamp_ns: 0,
-            exit_nonce: 0,
-            initialized: false,
-            reserved: LookupMap::new(b"r"),
-        }
+        NearSha256 { buf: Vec::with_capacity(32 + 32 * LEN) }
     }
+}
+
+impl Sha256 for NearSha256 {
+    fn update(&mut self, data: &[u8]) {
+        self.buf.extend_from_slice(data);
+    }
+    fn finish(&mut self) -> [u8; 32] {
+        let out = env::sha256_array(&self.buf);
+        self.buf.clear();
+        out
+    }
+}
+
+// ------------------------------------------------------------------ types
+
+/// One layer of a signature: 67 chain values and the authentication path
+/// (10 siblings for the hypertree layers, 8 for the recovery tree).
+#[near(serializers = [borsh])]
+pub struct LayerSigArg {
+    pub wots: Vec<[u8; 32]>,
+    pub auth: Vec<[u8; 32]>,
+}
+
+#[near(serializers = [json])]
+pub struct StateView {
+    pub root: Base64VecU8,
+    pub rec_root: Base64VecU8,
+    pub epoch: U64,
+    pub next_idx: U64,
+    pub nonce: U64,
+    pub rec_nonce: U64,
+}
+
+// --------------------------------------------------------------- contract
+
+#[near(contract_state)]
+#[derive(PanicOnDefault)]
+pub struct AegisCchs {
+    root: [u8; 32],
+    rec_root: [u8; 32],
+    epoch: u64,
+    next_idx: u64,
+    nonce: u64,
+    rec_nonce: u64,
+    /// cachedRoot[(epoch, bottomTreeIdx)] = verified bottom subtree root.
+    cache: LookupMap<(u64, u64), [u8; 32]>,
 }
 
 #[near]
-impl AegisAccount {
-    /// One-shot initializer. Immutable after this call succeeds.
+impl AegisCchs {
+    /// Deploy-time initializer. `root` and `rec_root` are 32-byte base64.
     #[init]
-    pub fn new(
-        pq_pk_hash: [u8; 32],
-        guardian: AccountId,
-        fallback_pubkey: Vec<u8>,
-        fee_collector: AccountId,
-    ) -> Self {
+    pub fn new(root: Base64VecU8, rec_root: Base64VecU8) -> Self {
+        let root = b32(&root.0, "root");
+        let rec_root = b32(&rec_root.0, "rec_root");
+        let st = CchsState::new(root, rec_root).unwrap_or_else(|e| env::panic_str(e.as_str()));
         Self {
-            pq_pk_hash, guardian, fallback_pubkey, fee_collector,
-            nonce: 0, exit_timestamp_ns: 0, exit_nonce: 0,
-            initialized: true,
-            reserved: LookupMap::new(b"r"),
+            root: st.root,
+            rec_root: st.rec_root,
+            epoch: 0,
+            next_idx: 0,
+            nonce: 0,
+            rec_nonce: 0,
+            cache: LookupMap::new(b"c"),
         }
     }
 
-    /// Execute: PQ-sig gated. TODO(v0.2): actually verify.
+    /// Call `receiver_id.method(args)` with `deposit` yoctoNEAR and `gas`,
+    /// authorized by a CCHS signature on the digest of
+    /// `(this account, nonce, next_idx, receiver_id, method, args, deposit)`.
+    /// `l1` is required on the first use of a bottom subtree.
     pub fn execute(
         &mut self,
-        provided_nonce: u64,
-        _pq_pk: Vec<u8>,
-        _pq_sig: Vec<u8>,
-        target: AccountId,
-        attached_yocto: String,     // u128 as string (NEAR convention)
-        method: String,
-        args_base64: String,
-        gas_tgas: u64,
+        #[serializer(borsh)] l0: LayerSigArg,
+        #[serializer(borsh)] l1: Option<LayerSigArg>,
+        #[serializer(borsh)] receiver_id: AccountId,
+        #[serializer(borsh)] method: String,
+        #[serializer(borsh)] args: Vec<u8>,
+        #[serializer(borsh)] deposit: u128,
+        #[serializer(borsh)] gas: u64,
     ) -> Promise {
-        assert!(self.initialized, "not initialized");
-        assert_eq!(provided_nonce, self.nonce + 1, "bad nonce");
-        // TODO: sha256(pq_pk) == pq_pk_hash; sphincs_verify
-        self.nonce = provided_nonce;
-        log!("Executed nonce={}", provided_nonce);
+        let mut state = self.state();
+        let idx = state.next_idx;
+        let tree_idx = idx >> H;
 
-        let args = near_sdk::base64::engine::general_purpose::STANDARD
-            .decode(args_base64.as_bytes())
-            .expect("bad base64");
-        let yocto: u128 = attached_yocto.parse().unwrap_or(0);
-        Promise::new(target).function_call(
+        let mut h = NearSha256::default();
+        let digest = execute_digest(&mut h, state.nonce, idx, &receiver_id, &method, &args, deposit);
+
+        let l0_w = wots_arr(&l0.wots);
+        check_auth(&l0.auth, H);
+        let l0_sig = LayerSig { wots: &l0_w, auth: &l0.auth };
+
+        let l1_w = l1.as_ref().map(|l| wots_arr(&l.wots));
+        let l1_sig = match (&l1, &l1_w) {
+            (Some(l), Some(w)) => {
+                check_auth(&l.auth, H);
+                Some(LayerSig { wots: w, auth: &l.auth })
+            }
+            _ => None,
+        };
+
+        let key = (state.epoch, tree_idx);
+        let cached = self.cache.get(&key).copied();
+
+        let outcome = state
+            .execute_verify(&mut h, &digest, l0_sig, l1_sig, cached)
+            .unwrap_or_else(|e| env::panic_str(e.as_str()));
+
+        self.store(&state);
+        if outcome.cache_write {
+            self.cache.insert(key, outcome.subtree_root);
+            near_sdk::log!("subtree_cached epoch={} tree_idx={}", state.epoch, tree_idx);
+        }
+        near_sdk::log!("executed idx={} receiver={} method={}", idx, receiver_id, method);
+
+        Promise::new(receiver_id).function_call(
             method,
             args,
-            NearToken::from_yoctonear(yocto),
-            near_sdk::Gas::from_tgas(gas_tgas),
+            NearToken::from_yoctonear(deposit),
+            Gas::from_gas(gas),
         )
     }
 
-    pub fn initiate_emergency_exit(&mut self, _fallback_sig: Vec<u8>) {
-        // TODO: verify ed25519 sig under fallback_pubkey
-        let now = env::block_timestamp();
-        self.exit_timestamp_ns = now + TIMELOCK_NS;
-        log!("Exit initiated unlock_at_ns={}", self.exit_timestamp_ns);
-    }
+    /// Rotate both roots, authorized by the recovery tree at leaf
+    /// `rec_nonce`. Resets `next_idx` and bumps `epoch`, which logically
+    /// clears the subtree cache.
+    pub fn recover(
+        &mut self,
+        #[serializer(borsh)] new_root: [u8; 32],
+        #[serializer(borsh)] new_rec_root: [u8; 32],
+        #[serializer(borsh)] wots: Vec<[u8; 32]>,
+        #[serializer(borsh)] auth: Vec<[u8; 32]>,
+    ) {
+        let mut state = self.state();
+        let mut h = NearSha256::default();
+        let digest = recover_digest(&mut h, state.rec_nonce, &new_root, &new_rec_root);
 
-    pub fn cancel_emergency_exit(&mut self, _pq_pk: Vec<u8>, _pq_sig: Vec<u8>) {
-        assert!(self.exit_timestamp_ns != 0, "no pending exit");
-        // TODO: verify PQ sig
-        self.exit_timestamp_ns = 0;
-        self.exit_nonce += 1;
-    }
+        let w = wots_arr(&wots);
+        check_auth(&auth, REC_H);
 
-    /// Sweeps all native NEAR balance to guardian. FT sweeps go through separate
-    /// ft_transfer promises in a batched call orchestrated client-side.
-    pub fn finalize_emergency_exit(&mut self) -> Promise {
-        assert!(self.exit_timestamp_ns != 0, "no pending exit");
-        let now = env::block_timestamp();
-        assert!(now >= self.exit_timestamp_ns, "timelock not elapsed");
-
-        let balance = env::account_balance();
-        self.exit_timestamp_ns = 0;
-        self.exit_nonce += 1;
-        Promise::new(self.guardian.clone()).transfer(balance)
+        let epoch = state
+            .recover_verify(&mut h, &digest, new_root, new_rec_root, &w, &auth)
+            .unwrap_or_else(|e| env::panic_str(e.as_str()));
+        self.store(&state);
+        near_sdk::log!("recovered epoch={}", epoch);
     }
 
     // ---- views ----
-    pub fn get_nonce(&self) -> u64 { self.nonce }
-    pub fn get_exit_timestamp_ns(&self) -> u64 { self.exit_timestamp_ns }
-    pub fn get_guardian(&self) -> AccountId { self.guardian.clone() }
 
-    pub fn get_pq_pk_hash(&self) -> String {
-        hex::encode(self.pq_pk_hash)
+    pub fn get_state(&self) -> StateView {
+        StateView {
+            root: Base64VecU8(self.root.to_vec()),
+            rec_root: Base64VecU8(self.rec_root.to_vec()),
+            epoch: U64(self.epoch),
+            next_idx: U64(self.next_idx),
+            nonce: U64(self.nonce),
+            rec_nonce: U64(self.rec_nonce),
+        }
+    }
+
+    /// Whether the next `execute` must include the top layer.
+    pub fn needs_top_layer(&self) -> bool {
+        let key = (self.epoch, self.next_idx >> H);
+        CchsState::needs_top_layer(self.cache.get(&key).copied())
+    }
+
+    /// Digest the client must sign for the next `execute`.
+    pub fn next_digest(
+        &self,
+        receiver_id: AccountId,
+        method: String,
+        args: Base64VecU8,
+        deposit: U128,
+    ) -> Base64VecU8 {
+        let mut h = NearSha256::default();
+        let d = execute_digest(&mut h, self.nonce, self.next_idx, &receiver_id, &method, &args.0, deposit.0);
+        Base64VecU8(d.to_vec())
+    }
+
+    /// Digest the client must sign for the next `recover`.
+    pub fn next_recovery_digest(&self, new_root: Base64VecU8, new_rec_root: Base64VecU8) -> Base64VecU8 {
+        let mut h = NearSha256::default();
+        let d = recover_digest(
+            &mut h,
+            self.rec_nonce,
+            &b32(&new_root.0, "new_root"),
+            &b32(&new_rec_root.0, "new_rec_root"),
+        );
+        Base64VecU8(d.to_vec())
     }
 }
 
-// avoid pulling the `hex` crate just for one display helper.
-mod hex {
-    pub fn encode(b: impl AsRef<[u8]>) -> String {
-        let mut s = String::with_capacity(b.as_ref().len() * 2);
-        for byte in b.as_ref() {
-            use core::fmt::Write;
-            write!(&mut s, "{:02x}", byte).unwrap();
+impl AegisCchs {
+    fn state(&self) -> CchsState {
+        CchsState {
+            root: self.root,
+            rec_root: self.rec_root,
+            epoch: self.epoch,
+            next_idx: self.next_idx,
+            nonce: self.nonce,
+            rec_nonce: self.rec_nonce,
         }
-        s
+    }
+
+    fn store(&mut self, s: &CchsState) {
+        self.root = s.root;
+        self.rec_root = s.rec_root;
+        self.epoch = s.epoch;
+        self.next_idx = s.next_idx;
+        self.nonce = s.nonce;
+        self.rec_nonce = s.rec_nonce;
+    }
+}
+
+// ---------------------------------------------------------------- digests
+
+/// `sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(current_account_id) ‖ nonce BE ‖ idx BE ‖ inner)`
+/// with `inner = sha256(len ‖ receiver_id ‖ len ‖ method ‖ len ‖ args ‖ deposit u128 BE)`.
+pub fn execute_digest(
+    h: &mut NearSha256,
+    nonce: u64,
+    idx: u64,
+    receiver_id: &AccountId,
+    method: &str,
+    args: &[u8],
+    deposit: u128,
+) -> [u8; 32] {
+    let receiver = receiver_id.as_str().as_bytes();
+    h.update(&(receiver.len() as u32).to_be_bytes());
+    h.update(receiver);
+    h.update(&(method.len() as u32).to_be_bytes());
+    h.update(method.as_bytes());
+    h.update(&(args.len() as u32).to_be_bytes());
+    h.update(args);
+    h.update(&deposit.to_be_bytes());
+    let inner = h.finish();
+
+    let self_id = account_id_hash(h);
+
+    h.update(DOMAIN_EXECUTE);
+    h.update(CHAIN_TAG);
+    h.update(&self_id);
+    h.update(&nonce.to_be_bytes());
+    h.update(&idx.to_be_bytes());
+    h.update(&inner);
+    h.finish()
+}
+
+/// `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id) ‖ rec_nonce BE ‖ new_root ‖ new_rec_root)`
+pub fn recover_digest(h: &mut NearSha256, rec_nonce: u64, new_root: &[u8; 32], new_rec_root: &[u8; 32]) -> [u8; 32] {
+    let self_id = account_id_hash(h);
+    h.update(DOMAIN_RECOVER);
+    h.update(CHAIN_TAG);
+    h.update(&self_id);
+    h.update(&rec_nonce.to_be_bytes());
+    h.update(new_root);
+    h.update(new_rec_root);
+    h.finish()
+}
+
+fn account_id_hash(h: &mut NearSha256) -> [u8; 32] {
+    h.update(env::current_account_id().as_str().as_bytes());
+    h.finish()
+}
+
+// ---------------------------------------------------------------- helpers
+
+fn b32(v: &[u8], what: &str) -> [u8; 32] {
+    if v.len() != 32 {
+        env::panic_str(&format!("{what}: expected 32 bytes, got {}", v.len()));
+    }
+    let mut out = [0u8; 32];
+    out.copy_from_slice(v);
+    out
+}
+
+fn wots_arr(v: &[[u8; 32]]) -> [[u8; 32]; LEN] {
+    if v.len() != LEN {
+        env::panic_str(&format!("wots: expected {LEN} chain values, got {}", v.len()));
+    }
+    let mut out = [[0u8; 32]; LEN];
+    out.copy_from_slice(v);
+    out
+}
+
+fn check_auth(auth: &[[u8; 32]], height: usize) {
+    if auth.len() != height {
+        env::panic_str(&format!("auth: expected {height} siblings, got {}", auth.len()));
     }
 }

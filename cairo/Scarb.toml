@@ -1,10 +1,17 @@
 [package]
-name = "aegis_starknet"
-version = "0.1.0"
+name = "aegis_cchs"
+version = "0.2.0"
 edition = "2024_07"
+description = "Aegis CCHS-S-20 hash-based post-quantum account for Starknet"
 
 [dependencies]
-starknet = ">=2.6.0"
+starknet = "2.8.5"
+
+[dev-dependencies]
+cairo_test = "2.8.5"
+
+[scripts]
+test = "scarb cairo-test"
 
 [[target.starknet-contract]]
 sierra = true
