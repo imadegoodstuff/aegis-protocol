@@ -1,6 +1,7 @@
 # rust
 target/
 Cargo.lock
+**/target/
 
 # foundry
 evm/out/
@@ -8,6 +9,25 @@ evm/cache/
 evm/broadcast/
 evm/deployments/
 evm/lib/
+
+# move / sui / aptos
+build/
+sui/build/
+aptos/build/
+
+# anchor
+solana/target/
+solana/.anchor/
+
+# ton
+ton/*.fif
+ton/*.cell
+
+# cairo
+cairo/target/
+
+# wasm artifacts
+*.wasm
 
 # cairo
 cairo/target/

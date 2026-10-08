@@ -1,0 +1,31 @@
+[package]
+name = "aegis-cosmwasm"
+version = "0.1.0"
+edition = "2021"
+description = "Aegis post-quantum smart account for CosmWasm chains"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = true
+debug-assertions = false
+codegen-units = 1
+panic = "abort"
+incremental = false
+overflow-checks = true
+
+[features]
+default = []
+library = []
+
+[dependencies]
+cosmwasm-std    = { version = "2.1", features = ["cosmwasm_2_0"] }
+cosmwasm-schema = "2.1"
+cw-storage-plus = "2.0"
+serde           = { version = "1", default-features = false, features = ["derive"] }
+thiserror       = "1"
+sha2            = "0.10"

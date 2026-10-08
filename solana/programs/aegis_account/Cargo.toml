@@ -1,0 +1,19 @@
+[package]
+name = "aegis_account"
+version = "0.1.0"
+edition = "2021"
+description = "Aegis post-quantum smart account for Solana (SVM)"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "aegis_account"
+
+[features]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+cpi = ["no-entrypoint"]
+default = []
+
+[dependencies]
+anchor-lang = "0.30.1"

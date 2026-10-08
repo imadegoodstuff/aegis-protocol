@@ -1,0 +1,90 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  evm:
+    name: EVM (Foundry)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: evm } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with: { version: stable }
+      - run: forge --version
+      - run: forge install OpenZeppelin/openzeppelin-contracts foundry-rs/forge-std --no-commit || true
+      - run: forge build --sizes
+      - run: forge test -vv
+
+  core:
+    name: Core (Rust)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: core } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
+      - run: cargo test --lib
+
+  wallet:
+    name: Wallet UI (Vite)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: wallet } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci || npm install
+      - run: npm run build
+
+  cosmwasm:
+    name: CosmWasm (Rust wasm32)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: cosmwasm } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - run: cargo build --release --target wasm32-unknown-unknown --lib
+
+  near:
+    name: NEAR (Rust wasm32)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: near } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { targets: wasm32-unknown-unknown }
+      - run: cargo build --release --target wasm32-unknown-unknown --lib
+
+  # Solana / Aptos / Sui / Starknet / TON need their own toolchain installs
+  # which take 5+ min each; wire them in as separate workflows later.
+  # Placeholders:
+
+  solana:
+    name: Solana (Anchor) · placeholder
+    runs-on: ubuntu-latest
+    steps: [ { run: 'echo "Anchor build runs in a dedicated workflow once anchor-cli is cached"' } ]
+
+  aptos:
+    name: Aptos (Move) · placeholder
+    runs-on: ubuntu-latest
+    steps: [ { run: 'echo "aptos-cli install + move compile pending"' } ]
+
+  sui:
+    name: Sui (Move) · placeholder
+    runs-on: ubuntu-latest
+    steps: [ { run: 'echo "sui-cli install + move build pending"' } ]
+
+  cairo:
+    name: Starknet (Cairo) · placeholder
+    runs-on: ubuntu-latest
+    steps: [ { run: 'echo "scarb install + build pending"' } ]
+
+  ton:
+    name: TON (FunC) · placeholder
+    runs-on: ubuntu-latest
+    steps: [ { run: 'echo "func-js install + compile pending"' } ]

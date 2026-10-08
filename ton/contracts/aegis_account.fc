@@ -1,0 +1,126 @@
+;; Aegis — post-quantum smart account on TON (FunC).
+;; State machine mirrors evm/src/AegisAccount.sol.
+;;
+;; Storage layout (one cell):
+;;   int pq_pk_hash          256 bits
+;;   int guardian_wc_addr    256 bits  (standard addr)
+;;   int fallback_pubkey_hash 256 bits
+;;   int nonce               64 bits
+;;   int exit_timestamp      32 bits   (unix seconds)
+;;   int exit_nonce          64 bits
+;;   int initialized         1 bit
+;;
+;; All state writes behind PQ sig verification (TODO: real sphincs_verify).
+;;
+;; This file is a *skeleton* — operation handlers emit log(...) and update state
+;; but do not yet implement SPHINCS+ verification. SPHINCS+ in FunC is costly;
+;; v0.2 will decide between (a) a dedicated TVM extension op, (b) SHRINCS impl,
+;; or (c) a merkle-batched off-chain prover with on-chain root commit.
+
+#include "imports/stdlib.fc";
+
+const int TIMELOCK_SECONDS = 7 * 24 * 60 * 60;
+const int OP_INITIALIZE                   = 0x1;
+const int OP_EXECUTE                      = 0x2;
+const int OP_INITIATE_EMERGENCY_EXIT      = 0x3;
+const int OP_CANCEL_EMERGENCY_EXIT        = 0x4;
+const int OP_FINALIZE_EMERGENCY_EXIT      = 0x5;
+
+const int ERR_ALREADY_INIT        = 100;
+const int ERR_NOT_INITIALIZED     = 101;
+const int ERR_BAD_NONCE           = 102;
+const int ERR_INVALID_PQ_SIG      = 103;
+const int ERR_NO_PENDING_EXIT     = 104;
+const int ERR_TIMELOCK_NOT_READY  = 105;
+
+(int, int, int, int, int, int, int) load_data() inline {
+  slice ds = get_data().begin_parse();
+  int init  = ds~load_uint(1);
+  int pkh   = ds~load_uint(256);
+  int grd   = ds~load_uint(256);
+  int fbh   = ds~load_uint(256);
+  int nonce = ds~load_uint(64);
+  int exits = ds~load_uint(32);
+  int exitn = ds~load_uint(64);
+  return (init, pkh, grd, fbh, nonce, exits, exitn);
+}
+
+() save_data(int init, int pkh, int grd, int fbh, int nonce, int exits, int exitn) impure inline {
+  set_data(
+    begin_cell()
+      .store_uint(init,  1)
+      .store_uint(pkh,   256)
+      .store_uint(grd,   256)
+      .store_uint(fbh,   256)
+      .store_uint(nonce, 64)
+      .store_uint(exits, 32)
+      .store_uint(exitn, 64)
+    .end_cell()
+  );
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+  if (in_msg_body.slice_empty?()) { return (); }
+  int op = in_msg_body~load_uint(32);
+
+  (int init, int pkh, int grd, int fbh, int nonce, int exits, int exitn) = load_data();
+
+  if (op == OP_INITIALIZE) {
+    throw_if(ERR_ALREADY_INIT, init);
+    int new_pkh = in_msg_body~load_uint(256);
+    int new_grd = in_msg_body~load_uint(256);
+    int new_fbh = in_msg_body~load_uint(256);
+    save_data(1, new_pkh, new_grd, new_fbh, 0, 0, 0);
+    return ();
+  }
+
+  throw_unless(ERR_NOT_INITIALIZED, init);
+
+  if (op == OP_EXECUTE) {
+    int provided_nonce = in_msg_body~load_uint(64);
+    throw_unless(ERR_BAD_NONCE, provided_nonce == nonce + 1);
+    ;; TODO: load pq_pk and pq_sig, verify sphincs_verify(pq_pk, digest, sig)
+    nonce = provided_nonce;
+    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
+    return ();
+  }
+
+  if (op == OP_INITIATE_EMERGENCY_EXIT) {
+    ;; TODO: verify fallback ed25519 sig under fbh
+    exits = now() + TIMELOCK_SECONDS;
+    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
+    return ();
+  }
+
+  if (op == OP_CANCEL_EMERGENCY_EXIT) {
+    throw_unless(ERR_NO_PENDING_EXIT, exits);
+    ;; TODO: verify PQ sig
+    exits = 0;
+    exitn = exitn + 1;
+    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
+    return ();
+  }
+
+  if (op == OP_FINALIZE_EMERGENCY_EXIT) {
+    throw_unless(ERR_NO_PENDING_EXIT, exits);
+    throw_unless(ERR_TIMELOCK_NOT_READY, now() >= exits);
+    exits = 0;
+    exitn = exitn + 1;
+    save_data(init, pkh, grd, fbh, nonce, exits, exitn);
+    ;; Build message to guardian with all balance; mode = 128 (carry all balance)
+    cell to_guardian = begin_cell()
+      .store_uint(0x18, 6)                 ;; nobounce flag
+      .store_uint(4, 3)                    ;; addr_std$10, workchain 0 (set externally)
+      .store_uint(grd, 256)
+      .store_coins(0)                       ;; placeholder; mode 128 ignores this
+      .store_uint(0, 1 + 4 + 4 + 64 + 32 + 1 + 1)
+    .end_cell();
+    send_raw_message(to_guardian, 128);     ;; carry whole balance
+    return ();
+  }
+}
+
+;; Views
+int get_nonce()           method_id { var (_,_,_,_,n,_,_) = load_data(); return n; }
+int get_exit_timestamp()  method_id { var (_,_,_,_,_,e,_) = load_data(); return e; }
+int get_pq_pk_hash()      method_id { var (_,h,_,_,_,_,_) = load_data(); return h; }

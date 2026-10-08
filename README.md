@@ -32,19 +32,22 @@
 6. **部署 key 已烧**：发射当天公开直播烧毁
 7. **前端去中心化**：IPFS CID + ENS contenthash
 
-## 支持范围（launch day 真实版本）
+## 支持范围（所有适配器已 scaffold；SPHINCS+ verify 为 TODO）
 
-| 链家族 | 覆盖 | 时间 |
-|---|---|---|
-| EVM (ETH / BSC / Polygon / Arb / Op / Base / Avalanche / Linea / Scroll / Mantle / Blast / Mode 等 30+) | ✅ Launch day | 同地址 (CREATE2) |
-| Starknet | ✅ Launch day | 独立地址 (同种子派生) |
-| Solana | 🔜 Launch + 3 月 | 独立地址 |
-| Cosmos (CosmWasm) | 🔜 Launch + 3 月 | 独立地址 |
-| TRON | 🔜 Launch + 2 月 | 同 EVM 地址 |
-| Aptos / Sui | 🔜 Launch + 6 月 | 独立地址 |
-| NEAR | 🔜 Launch + 4 月 | 独立地址 |
-| TON | 🔜 Launch + 6 月 | 独立地址 |
-| Bitcoin | ⏸ 等 BIP-360 激活 | - |
+| 链家族 | 骨架状态 | 地址派生 | 真实 verify 工时 | 目录 |
+|---|---|---|---|---|
+| EVM × 30+ (ETH / BSC / Polygon / Arb / Op / Base / Avalanche / Linea / Scroll / Mantle / Blast / Mode …) | ✅ 账户 + factory 跑通，测试通过 | CREATE2 同地址 | 2 w (fork C13) | `evm/` |
+| Starknet | 🟡 constructor + storage | pedersen 独立地址 | 4 w | `cairo/` |
+| TRON | 🟡 复用 EVM 字节码 | base58check (同 20 B) | 1 w (地址编码) | `tron/` |
+| Solana | 🟡 Anchor 程序 + state machine | PDA(seed) 独立地址 | 4 w | `solana/` |
+| Cosmos (CosmWasm) | 🟡 完整 state machine | bech32 独立地址 | 3 w | `cosmwasm/` |
+| Aptos | 🟡 Move module | sha3-256 独立地址 | 6 w | `aptos/` |
+| Sui | 🟡 Move module (shared object) | blake2b-256 独立地址 | 6 w | `sui/` |
+| NEAR | 🟡 near-sdk 合约 | subaccount 独立地址 | 4 w | `near/` |
+| TON | 🟡 FunC 合约 (完整 state) | hash(StateInit) 独立地址 | 6 w | `ton/` |
+| Bitcoin | 📝 设计文档 only | — | 等 BIP-360 激活 | `bitcoin/` |
+
+详见 [`ADAPTERS.md`](ADAPTERS.md) 的完整矩阵。
 
 ## 诚实限制
 
@@ -103,10 +106,19 @@ scarb build
 aegis/
 ├── README.md                  (这里)
 ├── SPEC.md                    1 页技术规范
-├── core/                      Rust/WASM 核心 (SPHINCS+ 密钥派生 + 签名)
-├── evm/                       Foundry 工程 (智能账户 + 验证器 + 部署脚本)
-├── cairo/                     Starknet 账户 (Cairo 1)
-├── wallet/                    Tauri + React 钱包
+├── ADAPTERS.md                每条链适配器状态矩阵
+├── core/                      Rust/WASM 核心 (BIP-39 → SPHINCS+ + ECDSA fallback)
+├── evm/                       Foundry 工程 (智能账户 + 验证器 + 部署脚本)  ✅ 跑通
+├── cairo/                     Starknet 账户 (Cairo 1)                      🟡
+├── tron/                      TRON 适配 (复用 EVM 字节码)                   🟡
+├── solana/                    Anchor 工作区 (SVM program)                   🟡
+├── cosmwasm/                  CosmWasm 合约 (Osmosis/Neutron/Injective ...) 🟡
+├── aptos/                     Move 模块                                    🟡
+├── sui/                       Move 2024 (shared object)                   🟡
+├── near/                      near-sdk Rust 合约                          🟡
+├── ton/                       FunC 合约                                   🟡
+├── bitcoin/                   设计文档 (等 BIP-360)                        📝
+├── wallet/                    Vite + React UI (已部署到 fly)
 └── docs/                      白皮书 / 威胁模型 / 用户自验指南
 ```
 
