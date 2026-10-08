@@ -264,4 +264,48 @@ contract AegisCCHSFactoryTest is Test {
         address p2 = f.predict(ROOT, REC, false);
         assertEq(p1, p2);
     }
+
+    function test_deployForwardsValue() public {
+        vm.deal(address(this), 3 ether);
+        address a = f.deploy{value: 1 ether}(ROOT, REC, false);
+        assertEq(a.balance, 1 ether);
+        // funding an already-deployed account through the same call
+        f.deploy{value: 2 ether}(ROOT, REC, false);
+        assertEq(a.balance, 3 ether);
+        assertEq(address(f).balance, 0);
+    }
+
+    function test_deployAndMovePullsTokens() public {
+        MockToken t = new MockToken();
+        t.mint(address(this), 500);
+        t.approve(address(f), type(uint256).max);
+        address[] memory toks = new address[](1);
+        toks[0] = address(t);
+        vm.deal(address(this), 1 ether);
+        address a = f.deployAndMove{value: 0.5 ether}(ROOT, REC, false, toks);
+        assertEq(t.balanceOf(a), 500);
+        assertEq(t.balanceOf(address(this)), 0);
+        assertEq(a.balance, 0.5 ether);
+    }
+
+    function test_deployAndMove_revertsWithoutApproval() public {
+        MockToken t = new MockToken();
+        t.mint(address(this), 500);
+        address[] memory toks = new address[](1);
+        toks[0] = address(t);
+        vm.expectRevert(abi.encodeWithSelector(AegisCCHSFactory.TokenTransferFailed.selector, address(t)));
+        f.deployAndMove(ROOT, REC, false, toks);
+    }
+}
+
+contract MockToken {
+    mapping(address => uint256) public balanceOf;
+    mapping(address => mapping(address => uint256)) public allowance;
+    function mint(address to, uint256 amt) external { balanceOf[to] += amt; }
+    function approve(address s, uint256 amt) external returns (bool) { allowance[msg.sender][s] = amt; return true; }
+    function transferFrom(address from, address to, uint256 amt) external returns (bool) {
+        require(allowance[from][msg.sender] >= amt && balanceOf[from] >= amt, "mock: denied");
+        allowance[from][msg.sender] -= amt; balanceOf[from] -= amt; balanceOf[to] += amt;
+        return true;
+    }
 }

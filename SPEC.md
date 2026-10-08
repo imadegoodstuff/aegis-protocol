@@ -24,13 +24,15 @@ This document defines the Aegis account model, key and address derivation, and t
 ```
 BIP-39 mnemonic (24 words, 256-bit entropy)
   └─ PBKDF2-HMAC-SHA512(mnemonic, "mnemonic" ‖ passphrase, 2048) → 64-byte seed
-       ├─ HKDF-SHA256(seed, "aegis-cchs-v1")                 → 32-byte CCHS master
-       ├─ HKDF-SHA256(seed, "aegis/sphincs+/192s/v1", 72)    → SLH-DSA-SHAKE-192s seed
-       ├─ HKDF-SHA256(seed, "aegis/ecdsa/v1")                → secp256k1 key (EVM, Cosmos, …)
-       └─ HKDF-SHA256(seed, "aegis/ed25519/v1")              → ed25519 key (Solana, Aptos, Sui, NEAR, TON)
+       ├─ HKDF-SHA256(seed, "aegis/cchs/master/v1", 32)       → 32-byte CCHS master
+       ├─ HKDF-SHA512(seed, "aegis/sphincs+/192s/v1", 72)     → SLH-DSA-SHAKE-192s seed
+       ├─ HKDF-SHA512(seed, "aegis/ecdsa/fallback/v1", 32)    → secp256k1 key (EVM, Cosmos, …)
+       └─ HKDF-SHA512(seed, "aegis/ed25519/v1", 32)           → ed25519 key (Solana, Aptos, Sui, NEAR, TON)
 ```
 
-All CCHS secret material (every WOTS+ chain of every leaf of every tree) is derived lazily from the 32-byte master as specified in `CCHS.spec.md` §3. The client stores nothing else.
+(HKDF salt is empty in every case. Labels and hash functions match `wallet/src/aegis/derive.ts` and `cchsAccount.ts`.)
+
+All CCHS secret material (every WOTS+ chain of every leaf of every tree) is derived lazily from the 32-byte master as specified in `CCHS.spec.md` §3; the same master feeds both parameter sets (`CCHS-K-20` for EVM, `CCHS-S-20` elsewhere) and the Bitcoin WOTS+ tree (layer byte `0xb0`). The client stores nothing else.
 
 ---
 

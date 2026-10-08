@@ -12,7 +12,7 @@ import {
   type Chain,
   type Hex,
 } from "viem";
-import { sepolia, baseSepolia, mainnet, base, arbitrum, optimism, polygon } from "viem/chains";
+import { sepolia, baseSepolia, mainnet, base, arbitrum, optimism, polygon, bsc, avalanche, linea, scroll } from "viem/chains";
 
 export const SUPPORTED_CHAINS: Record<number, Chain> = {
   [sepolia.id]:     sepolia,
@@ -22,7 +22,14 @@ export const SUPPORTED_CHAINS: Record<number, Chain> = {
   [arbitrum.id]:    arbitrum,
   [optimism.id]:    optimism,
   [polygon.id]:     polygon,
+  [bsc.id]:         bsc,
+  [avalanche.id]:   avalanche,
+  [linea.id]:       linea,
+  [scroll.id]:      scroll,
 };
+
+/** Order in which the Protect panel lists EVM chains. */
+export const PROTECT_CHAINS: Chain[] = [mainnet, base, arbitrum, optimism, polygon, bsc, avalanche, linea, scroll, sepolia, baseSepolia];
 
 export const DEFAULT_CHAIN = sepolia;
 
@@ -74,8 +81,11 @@ export async function switchChain(chainId: number): Promise<void> {
   }
 }
 
+// Public endpoints used when a chain's viem default is unreliable from browsers.
+const RPC_OVERRIDES: Record<number, string> = { [polygon.id]: "https://1rpc.io/matic" };
+
 export function makePublicClient(chain: Chain): PublicClient {
-  return createPublicClient({ chain, transport: http() });
+  return createPublicClient({ chain, transport: http(RPC_OVERRIDES[chain.id]) });
 }
 
 export function makeWalletClient(chain: Chain, account: Address): WalletClient {

@@ -19,7 +19,7 @@ Hash-based hypertree signatures (XMSS^MT, SPHINCS+) carry the full authenticatio
 | SPHINCS+-128s | ~10^6 hashes | 7.8 KB | stateless | SHA-256 |
 | **CCHS (d=2, h=10)** | **~10^6 hashes** | **2.5 KB** | **stateless (chain-held)** | SHA-256 |
 
-Single transaction, no commit-reveal, no finality wait. Two parameter sets share one account contract: `CCHS-K-20` (keccak256, EVM default) and `CCHS-S-20` (SHA-256, canonical for every other chain). Measured in an EVM: K-20 ~128 K gas on the cached path and ~284 K for the first signature in a subtree; S-20 ~235 K / ~465 K. Runtime code 3.7 KB, no external verifier contract. Accounts are created through a CREATE2 factory, so one key gives the same address on every EVM chain. Signatures produced by the TypeScript client were executed against the compiled contracts; front-running, replay, tampering, cache poisoning, and post-recovery use of the old key are all rejected.
+Single transaction, no commit-reveal, no finality wait. Two parameter sets share one account contract: `CCHS-K-20` (keccak256, EVM default) and `CCHS-S-20` (SHA-256, canonical for every other chain). Measured in an EVM: K-20 ~118 K execution gas on the cached path and ~256 K for the first signature in a subtree; S-20 ~232 K / ~470 K. Runtime code 5.2 KB, no external verifier contract. Accounts are created and funded in one transaction through a CREATE2 factory that lives at the same address on every EVM chain, so one key gives the same account address everywhere, and the address is known before anything is deployed. Signatures produced by the TypeScript client were executed against the compiled contracts; front-running, replay, tampering, cache poisoning, and post-recovery use of the old key are all rejected.
 
 Full specification: [`CCHS.spec.md`](CCHS.spec.md).
 
@@ -89,7 +89,14 @@ cd deploy && npm i && node deploy.mjs --compile-only
 
 # Wallet
 cd wallet && npm i && npm run build
+
+# CCHS factory: build the deterministic artifact, check or publish it per chain
+cd deploy && node deploy-cchs.mjs --build
+node deploy-cchs.mjs --status
+AEGIS_DEPLOYER_KEY=0x… node deploy-cchs.mjs sepolia base arbitrum
 ```
+
+The factory is published through the deterministic-deployment proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so it has the address `0x7E49De7bB60161E3A387aA09Fb0070B3D02D0efc` on every chain where it has been published. Any funded key can publish it; the result does not depend on who sends the transaction. `--status` reports where it is live. The wallet's **Protect** panel predicts the user's account address offline from `wallet/src/aegis/cchsArtifacts.json`, shows live per-chain state, and creates + funds the account in one transaction where the factory exists.
 
 ## Honest limits
 

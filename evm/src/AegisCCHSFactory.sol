@@ -11,27 +11,60 @@ import {AegisCCHSK} from "./AegisCCHSK.sol";
 ///         account for anyone; deployment is permissionless and idempotent.
 ///
 ///         No owner. No upgrade. No fee.
+interface IERC20Minimal {
+    function transferFrom(address from, address to, uint256 amount) external returns (bool);
+    function balanceOf(address owner) external view returns (uint256);
+}
+
 contract AegisCCHSFactory {
     event AccountDeployed(address indexed account, bytes32 indexed root, bool sha256Variant);
 
     error DeployFailed();
+    error FundFailed();
+    error TokenTransferFailed(address token);
 
     /// @notice Deploy (or return) the account for `(root, recRoot, variant)`.
+    ///         Any ETH sent with the call is forwarded to the account, so
+    ///         "create my post-quantum account and move ETH into it" is one
+    ///         transaction.
     /// @param sha256Variant  true → `AegisCCHS` (CCHS-S-20), false → `AegisCCHSK` (CCHS-K-20, EVM default)
     function deploy(bytes32 root, bytes32 recRoot, bool sha256Variant)
-        external returns (address account)
+        public payable returns (address account)
     {
         account = predict(root, recRoot, sha256Variant);
-        if (account.code.length != 0) return account;
-
-        bytes32 salt = _salt(root, recRoot, sha256Variant);
-        if (sha256Variant) {
-            account = address(new AegisCCHS{salt: salt}(root, recRoot));
-        } else {
-            account = address(new AegisCCHSK{salt: salt}(root, recRoot));
+        if (account.code.length == 0) {
+            bytes32 salt = _salt(root, recRoot, sha256Variant);
+            if (sha256Variant) {
+                account = address(new AegisCCHS{salt: salt}(root, recRoot));
+            } else {
+                account = address(new AegisCCHSK{salt: salt}(root, recRoot));
+            }
+            if (account == address(0)) revert DeployFailed();
+            emit AccountDeployed(account, root, sha256Variant);
         }
-        if (account == address(0)) revert DeployFailed();
-        emit AccountDeployed(account, root, sha256Variant);
+        if (msg.value != 0) {
+            (bool ok,) = account.call{value: msg.value}("");
+            if (!ok) revert FundFailed();
+        }
+    }
+
+    /// @notice `deploy` plus pulling the caller's full balance of each listed
+    ///         ERC-20 into the account. Requires prior `approve` to this
+    ///         factory for each token. Tokens are moved by `transferFrom`
+    ///         from `msg.sender`; the factory never holds funds.
+    function deployAndMove(bytes32 root, bytes32 recRoot, bool sha256Variant, address[] calldata erc20s)
+        external payable returns (address account)
+    {
+        account = deploy(root, recRoot, sha256Variant);
+        for (uint256 i = 0; i < erc20s.length; i++) {
+            IERC20Minimal t = IERC20Minimal(erc20s[i]);
+            uint256 bal = t.balanceOf(msg.sender);
+            if (bal == 0) continue;
+            (bool ok, bytes memory ret) = address(t).call(
+                abi.encodeWithSelector(t.transferFrom.selector, msg.sender, account, bal)
+            );
+            if (!ok || (ret.length != 0 && !abi.decode(ret, (bool)))) revert TokenTransferFailed(erc20s[i]);
+        }
     }
 
     /// @notice Counterfactual address for `(root, recRoot, variant)`.

@@ -212,19 +212,21 @@ WOTS_pk_from_sig(layer, t, j, msg, sig):
 
 ### 5.2 Gas (EVM) — measured
 
-Measured on `evm/src/AegisCCHS.sol` (S-20, SHA-256 precompile from assembly) and `evm/src/AegisCCHSK.sol` (K-20, keccak256 opcode), solc 0.8.37, optimizer 200, Cancun, with the TypeScript client producing the signatures. Execution gas excludes the 21 K intrinsic and calldata (2 464 B ≈ 40 K cached, 4 928 B ≈ 80 K first-in-subtree, at 16 gas/byte; EIP-7623 raises this for calldata-dominated transactions).
+Measured on `evm/src/AegisCCHS.sol` (S-20, SHA-256 precompile from assembly) and `evm/src/AegisCCHSK.sol` (K-20, keccak256 opcode) with the deployed build settings (solc 0.8.37, optimizer 1 000 000 runs, viaIR, Cancun, no metadata — `deploy/deploy-cchs.mjs --build`), the TypeScript client producing the signatures. Execution gas excludes the 21 K intrinsic and calldata (2 464 B ≈ 40 K cached, 4 928 B ≈ 80 K first-in-subtree, at 16 gas/byte; EIP-7623 raises this for calldata-dominated transactions).
 
 | Case | S-20 execution | S-20 total | K-20 execution | K-20 total |
 |---|---|---|---|---|
-| Cached subtree | ~205 K | **~265 K** | ~138 K | **~200 K** |
-| New subtree (first of 1024) | ~496 K | ~600 K | ~276 K | ~380 K |
-| Recovery | ~217 K | ~275 K | ~127 K | ~185 K |
-| Account deploy via factory | ~854 K | — | ~821 K | — |
-| Runtime code | 3 831 B | | 3 666 B | |
+| Cached subtree | ~232 K | **~293 K** | ~118 K | **~179 K** |
+| New subtree (first of 1024) | ~470 K | ~571 K | ~256 K | ~357 K |
+| Recovery | ~206 K | ~265 K | ~111 K | ~170 K |
+| Account deploy via factory | ~1 149 K | — | ~1 127 K | — |
+| Runtime code | 5 296 B | | 5 184 B | |
 
-Execution gas includes the outgoing `call` (9 K for value transfer, 25 K if it creates the recipient), one packed SSTORE, and the event — roughly 45 K that is not verification. K-20 verification proper is ~90 K; S-20 ~160 K.
+(With optimizer 200 runs and no viaIR the code is 3 831 B / 3 666 B and K-20 cached execution is ~128 K; the deployed build trades 1.5 KB of code for ~10 K gas per signature.)
 
-SPHINCS+ C13 on-chain verification is ~190 K compute + 3 688 B calldata (~59 K) + 21 K ≈ 270 K per signature and needs a separate 14.6 KB verifier contract. K-20 is ~25 % cheaper than that on every signature, S-20 is at parity; both use 1/4 the code and no external contract.
+Execution gas includes the outgoing `call` (9 K for value transfer, 25 K if it creates the recipient), one packed SSTORE, and the event — roughly 45 K that is not verification. K-20 verification proper is ~75 K; S-20 ~185 K.
+
+SPHINCS+ C13 on-chain verification is ~190 K compute + 3 688 B calldata (~59 K) + 21 K ≈ 270 K per signature and needs a separate 14.6 KB verifier contract. K-20 is ~1/3 cheaper than that on every signature, S-20 is at parity; both use about 1/3 the code and no external contract.
 
 **Which set to deploy.** `CCHS-K-20` is the EVM default: signatures are bound to a chain ID, so an EVM account never shares a signature with Bitcoin Script, and the keccak opcode is the cheaper primitive. `CCHS-S-20` is the cross-chain canonical set and the one every non-EVM port implements. Both are deployed by the same factory (§5.4).
 
@@ -331,10 +333,10 @@ Key derivation (HKDF-SHA256 from the 32-byte master) is identical across sets; o
 ## 10. Reference implementations
 
 - `evm/src/AegisCCHSBase.sol` — hash-agnostic account logic (execute, recover, cache, digests).
-- `evm/src/AegisCCHS.sol` — `CCHS-S-20`, SHA-256 precompile from assembly. 3 831 B runtime.
-- `evm/src/AegisCCHSK.sol` — `CCHS-K-20`, keccak256 opcode. 3 666 B runtime.
-- `evm/src/AegisCCHSFactory.sol` — CREATE2 factory for both sets; same address on every EVM chain.
-- `evm/test/AegisCCHS.t.sol` — Foundry suites for S-20 and K-20 (front-run by target and by value, replay, tampered chain value, tampered auth path, wrong top layer, cache poisoning, recovery, recovery replay, old key after rotation) plus factory tests. Driven by client-generated vectors.
+- `evm/src/AegisCCHS.sol` — `CCHS-S-20`, SHA-256 precompile from assembly. 5 296 B runtime (deployed build).
+- `evm/src/AegisCCHSK.sol` — `CCHS-K-20`, keccak256 opcode. 5 184 B runtime (deployed build).
+- `evm/src/AegisCCHSFactory.sol` — CREATE2 factory for both sets. `deploy` is payable and forwards ETH; `deployAndMove` also pulls approved ERC-20s, so creating and funding an account is one transaction. The factory itself is published through the deterministic-deployment proxy (`deploy/deploy-cchs.mjs`), giving it the address `0x7E49De7bB60161E3A387aA09Fb0070B3D02D0efc` on every EVM chain where it has been deployed; the wallet artifact (`wallet/src/aegis/cchsArtifacts.json`) carries the exact init code so account addresses can be predicted offline.
+- `evm/test/AegisCCHS.t.sol` — Foundry suites for S-20 and K-20 (front-run by target and by value, replay, tampered chain value, tampered auth path, wrong top layer, cache poisoning, recovery, recovery replay, old key after rotation) plus factory tests (prediction, idempotence, chain independence, ETH forwarding, ERC-20 pull, missing approval). Driven by client-generated vectors.
 - `evm/test/fixtures/cchs-s-20.json`, `cchs-k-20.json` — test vectors (master `0x07…07`, chainId 1, account `0x…cc45`): roots, bottom root 0, three operations (first-in-subtree with top layer, two cached), one recovery. The S-20 file is the ground truth for every non-EVM port in §7.
 - `wallet/src/aegis/cchs.ts` — TypeScript client, both sets (`cchsS`, `cchsK`, `forVariant`): keygen, sign, local verify, digest construction, ABI helpers, range-based leaf generation for parallel keygen.
 

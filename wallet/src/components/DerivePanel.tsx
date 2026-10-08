@@ -4,6 +4,7 @@ import { useDerived } from "../aegis/useAegisWorker";
 import CopyBtn from "./CopyBtn";
 import PqSignDemo from "./PqSignDemo";
 import SwapPanel  from "./SwapPanel";
+import ProtectPanel from "./ProtectPanel";
 
 const SAMPLE = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -75,6 +76,7 @@ export default function DerivePanel() {
         </div>
       )}
 
+      {result && <ProtectPanel mnemonic={mnemonic} />}
       {result && <SwapPanel  mnemonic={mnemonic} />}
       {result && <PqSignDemo mnemonic={mnemonic} />}
 
