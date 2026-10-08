@@ -162,10 +162,10 @@ export default function App() {
             elliptic curves.
           </h1>
           <p className="hero-sub fade d2">
-            Aegis is a per-user, immutable smart account signed with
-            SPHINCS+-192s. One BIP-39 mnemonic maps to the same CREATE address on
-            every EVM chain plus independent accounts on Starknet, Solana, Cosmos
-            and Move. No bridge, no pool, no admin, no token.
+            One BIP-39 mnemonic → real mainnet-usable addresses on 23 chains
+            today (importable to MetaMask, Phantom, Keplr, Petra, Sui, Sparrow,
+            TronLink, near-cli) plus a real FIPS 205 SLH-DSA-SHAKE-192s key for
+            the post-quantum insurance layer. No bridge, no pool, no admin, no token.
           </p>
           <div className="hero-ctas fade d3">
             <a className="btn btn-primary" href="#chains">Derive my addresses →</a>
@@ -181,14 +181,14 @@ export default function App() {
 
           <div className="stats fade d3 parallax-slow">
             <div className="stat">
-              <div className="stat-k">chains · live</div>
-              <div className="stat-v">13</div>
-              <div className="stat-s">12 EVM + Starknet · same identity</div>
+              <div className="stat-k">mainnet addresses</div>
+              <div className="stat-v">23</div>
+              <div className="stat-s">12 EVM + Solana + TRON + 5 Cosmos + NEAR + Aptos + Sui + Bitcoin</div>
             </div>
             <div className="stat">
-              <div className="stat-k">testnet-ready</div>
-              <div className="stat-v">11</div>
-              <div className="stat-s">Solana, TRON, 5 Cosmos, Aptos, Sui, NEAR, TON</div>
+              <div className="stat-k">preview / roadmap</div>
+              <div className="stat-v">2</div>
+              <div className="stat-s">TON (StateInit SDK) · Starknet (account factory)</div>
             </div>
             <div className="stat">
               <div className="stat-k">timelock</div>

@@ -6,7 +6,7 @@ export default function ChainDashboard() {
       <div className="chain-dash-head">
         <div>
           <div className="chain-dash-title">Deployment matrix</div>
-          <div className="chain-dash-sub">one BIP-39 seed · 13 live surfaces</div>
+          <div className="chain-dash-sub">one BIP-39 seed · 23 mainnet-usable addresses · importable to native wallets</div>
         </div>
         <div className="chain-dash-addr">
           <span className="k">EVM</span>
@@ -19,17 +19,18 @@ export default function ChainDashboard() {
         {CHAINS.map((c) => (
           <div key={c.name} className="chain-cell">
             <div className="chain-name">
-              <span className={`chain-dot ${c.status !== "live" ? "pending" : ""}`} />
+              <span className={`chain-dot ${c.status !== "mainnet" ? "pending" : ""}`} />
               <span className="chain-label">{c.name}</span>
             </div>
             <span
               className={`chain-status ${
-                c.status === "live" ? "ok" : c.status === "testnet" ? "soon" : ""
+                c.status === "mainnet" ? "ok" : c.status === "preview" ? "soon" : ""
               }`}
+              title={c.wallet ? `Import to ${c.wallet}` : ""}
             >
-              {c.status === "live"
-                ? c.sameAddr ? "LIVE · SAME ADDR" : "LIVE"
-                : c.status === "testnet" ? "TESTNET-READY" : "RESEARCH"}
+              {c.status === "mainnet"
+                ? c.sameAddr ? "MAINNET · SAME ADDR" : "MAINNET"
+                : c.status === "preview" ? "PREVIEW" : "RESEARCH"}
             </span>
           </div>
         ))}

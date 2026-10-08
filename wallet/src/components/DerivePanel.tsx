@@ -114,22 +114,24 @@ export default function DerivePanel() {
 
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--accent-2)" }}>Non-EVM — independent per family</span>
-              <span className="chip">same seed · different derivation per chain</span>
+              <span className="section-eyebrow" style={{ color: "var(--accent-2)" }}>
+                Non-EVM — real mainnet addresses, importable to native wallets
+              </span>
+              <span className="chip chip-accent">standard scheme · same seed</span>
             </div>
             <div className="kv">
-              <KV label="Solana · base58(ed25519_pk)"             val={result.solanaAddress} />
-              <KV label="TRON · base58check (T…)"                 val={result.tronBase58} />
-              <KV label="Osmosis · bech32(osmo1…)"                val={result.cosmosOsmo} />
-              <KV label="Injective · bech32(inj1…)"               val={result.cosmosInj} />
-              <KV label="Neutron · bech32(neutron1…)"             val={result.cosmosNeutron} />
-              <KV label="Juno · bech32(juno1…)"                   val={result.cosmosJuno} />
-              <KV label="Stargaze · bech32(stars1…)"              val={result.cosmosStargaze} />
-              <KV label="NEAR · hex(sha256(pq_pk))"               val={result.nearImplicit} />
-              <KV label="Aptos · sha3_256(pq_pk ‖ 0xFE)"          val={result.aptosAddress} />
-              <KV label="Sui · blake2b_256(0xFE ‖ pq_pk)"         val={result.suiAddress} />
-              <KV label="TON · workchain 0 preview"               val={result.tonPreview} />
-              <KV label="Bitcoin · BIP-84 P2WPKH (bc1q…)"         val={result.btcSegwit} />
+              <KV label="Solana  ·  import to Phantom / Backpack"           val={result.solanaAddress} />
+              <KV label="TRON  ·  import to TronLink"                       val={result.tronBase58} />
+              <KV label="Osmosis  ·  import to Keplr"                       val={result.cosmosOsmo} />
+              <KV label="Injective  ·  import to Keplr (Ethermint path)"    val={result.cosmosInj} />
+              <KV label="Neutron  ·  import to Keplr / Leap"                val={result.cosmosNeutron} />
+              <KV label="Juno  ·  import to Keplr / Leap"                   val={result.cosmosJuno} />
+              <KV label="Stargaze  ·  import to Keplr / Leap"               val={result.cosmosStargaze} />
+              <KV label="NEAR  ·  implicit account (ed25519)"               val={result.nearImplicit} />
+              <KV label="Aptos  ·  import to Petra / Pontem"                val={result.aptosAddress} />
+              <KV label="Sui  ·  import to Sui Wallet / Suiet"              val={result.suiAddress} />
+              <KV label="Bitcoin  ·  BIP-84 P2WPKH, import to Sparrow"      val={result.btcSegwit} />
+              <KV label="TON  ·  ed25519 pubkey (preview; import secret to Tonkeeper)" val={result.tonPreview} />
             </div>
           </div>
         </div>
