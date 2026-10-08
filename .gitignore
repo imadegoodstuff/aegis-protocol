@@ -1,0 +1,30 @@
+# rust
+target/
+Cargo.lock
+
+# foundry
+evm/out/
+evm/cache/
+evm/broadcast/
+evm/deployments/
+evm/lib/
+
+# cairo
+cairo/target/
+
+# node
+node_modules/
+wallet/dist/
+wallet/src-tauri/target/
+wallet/serve.log
+wallet/serve.err
+wallet/package-lock.json
+
+# env
+.env
+.env.*
+!.env.example
+
+# os
+.DS_Store
+Thumbs.db

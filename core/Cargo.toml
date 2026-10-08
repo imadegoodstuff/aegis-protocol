@@ -1,0 +1,38 @@
+[package]
+name = "aegis-core"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Chain-agnostic BIP-39 -> SPHINCS+ derivation and signing for the Aegis protocol"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["std"]
+std = []
+wasm = ["wasm-bindgen", "getrandom/js"]
+
+[dependencies]
+# Real SPHINCS+ (SLH-DSA) impl. Use pqcrypto's SLH-DSA wrapper when available,
+# or Rust-native sphincsplus crate. v0.1 pins to pqcrypto-sphincsplus.
+pqcrypto-sphincsplus = { version = "0.7", default-features = false }
+pqcrypto-traits      = "0.3"
+
+# Deterministic derivation
+bip39   = "2"
+hkdf    = "0.12"
+sha2    = "0.10"
+sha3    = "0.10"
+zeroize = { version = "1", features = ["derive"] }
+rand_core = "0.6"
+getrandom = "0.2"
+
+# ECDSA fallback (secp256k1), only for the fallback path
+k256 = { version = "0.13", features = ["ecdsa", "sha256"] }
+
+# Optional WASM bindings
+wasm-bindgen = { version = "0.2", optional = true }
+
+[dev-dependencies]
+hex = "0.4"
