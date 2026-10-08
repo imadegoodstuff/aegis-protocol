@@ -34,7 +34,7 @@ export default function App() {
             <a className="nav-link" href="#spec">Spec</a>
             <a
               className="btn"
-              href="https://github.com/"
+              href="https://github.com/imadegoodstuff/aegis-protocol"
               target="_blank"
               rel="noreferrer"
             >
