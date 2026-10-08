@@ -1,7 +1,7 @@
 const CHAINS = [
   "Ethereum", "BSC", "Polygon", "Arbitrum", "Optimism", "Base", "Avalanche",
   "Linea", "Scroll", "Mantle", "Blast", "Mode", "Starknet",
-  "Solana", "Osmosis", "Injective", "Neutron", "TRON",
+  "Solana", "TRON", "Osmosis", "Injective", "Neutron", "Juno", "Stargaze",
   "Aptos", "Sui", "NEAR", "TON", "Bitcoin",
 ];
 

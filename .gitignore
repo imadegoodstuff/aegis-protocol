@@ -50,3 +50,5 @@ wallet/lighthouse-mobile.json
 # os
 .DS_Store
 Thumbs.db
+
+deploy/.deployer-key.local

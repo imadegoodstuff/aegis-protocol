@@ -1,4 +1,4 @@
-export type ChainStatus = "live" | "soon" | "research";
+export type ChainStatus = "live" | "testnet" | "research";
 
 export type Chain = {
   name: string;
@@ -7,7 +7,12 @@ export type Chain = {
   sameAddr?: boolean;
 };
 
-/** 排序：先 live 的 EVM (同地址)，再 Starknet，再 soon */
+/** Status legend:
+ *  live     = contract + verifier scaffold deployable; wallet shows derived address
+ *  testnet  = full address derivation live in wallet + adapter skeleton + deploy script
+ *             (needs funded deployer EOA/account to go on-chain)
+ *  research = blocked on external dependency (e.g. BIP-360 activation for Bitcoin)
+ */
 export const CHAINS: Chain[] = [
   { name: "Ethereum",    family: "EVM",      status: "live", sameAddr: true },
   { name: "BSC",         family: "EVM",      status: "live", sameAddr: true },
@@ -23,14 +28,17 @@ export const CHAINS: Chain[] = [
   { name: "Mode",        family: "EVM",      status: "live", sameAddr: true },
   { name: "Starknet",    family: "Starknet", status: "live" },
 
-  { name: "Solana",      family: "SVM",      status: "soon" },
-  { name: "Osmosis",     family: "Cosmos",   status: "soon" },
-  { name: "Injective",   family: "Cosmos",   status: "soon" },
-  { name: "TRON",        family: "EVM",      status: "soon" },
-  { name: "NEAR",        family: "Other",    status: "soon" },
-  { name: "Aptos",       family: "Move",     status: "soon" },
-  { name: "Sui",         family: "Move",     status: "soon" },
-  { name: "TON",         family: "Other",    status: "soon" },
+  { name: "Solana",      family: "SVM",      status: "testnet" },
+  { name: "TRON",        family: "EVM",      status: "testnet" },
+  { name: "Osmosis",     family: "Cosmos",   status: "testnet" },
+  { name: "Injective",   family: "Cosmos",   status: "testnet" },
+  { name: "Neutron",     family: "Cosmos",   status: "testnet" },
+  { name: "Juno",        family: "Cosmos",   status: "testnet" },
+  { name: "Stargaze",    family: "Cosmos",   status: "testnet" },
+  { name: "NEAR",        family: "Other",    status: "testnet" },
+  { name: "Aptos",       family: "Move",     status: "testnet" },
+  { name: "Sui",         family: "Move",     status: "testnet" },
+  { name: "TON",         family: "Other",    status: "testnet" },
 
   { name: "Bitcoin",     family: "Bitcoin",  status: "research" },
 ];

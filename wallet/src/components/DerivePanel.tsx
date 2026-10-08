@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { derive, isValidMnemonic, type Derived } from "../aegis/derive";
 import CopyBtn from "./CopyBtn";
+import PqSignDemo from "./PqSignDemo";
+import SwapPanel  from "./SwapPanel";
 
 const SAMPLE = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
 
@@ -22,10 +24,11 @@ export default function DerivePanel() {
   return (
     <div className="card derive">
       <div className="derive-head">
-        <div className="section-eyebrow">Live derivation · in your browser</div>
-        <h3>Type a BIP-39 phrase · see your Aegis addresses on every chain</h3>
+        <div className="section-eyebrow">Live derivation · in your browser · real FIPS 205</div>
+        <h3>Type a BIP-39 phrase · derive a real SLH-DSA public key + per-chain addresses</h3>
         <p>
-          Nothing leaves your browser. No network call. Open DevTools and verify.
+          Nothing leaves your browser. No network call. SPHINCS+ keygen runs via{" "}
+          <code>@noble/post-quantum</code> — audited FIPS 205 SLH-DSA-SHAKE-192s.
           The sample phrase is the well-known Hardhat / Foundry test vector; safe to use.
         </p>
       </div>
@@ -67,6 +70,9 @@ export default function DerivePanel() {
         </label>
       </div>
 
+      {result && <SwapPanel  mnemonic={mnemonic} />}
+      {result && <PqSignDemo mnemonic={mnemonic} />}
+
       {result && (
         <div className="derive-out">
           <div className="derive-section">
@@ -103,16 +109,22 @@ export default function DerivePanel() {
 
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--iris)" }}>Non-EVM — independent per family</span>
-              <span className="chip">same seed · different derivation</span>
+              <span className="section-eyebrow" style={{ color: "var(--accent-2)" }}>Non-EVM — independent per family</span>
+              <span className="chip">same seed · different derivation per chain</span>
             </div>
             <div className="kv">
-              <KV label="Osmosis (bech32 osmo1…)"    val={result.cosmosOsmo} />
-              <KV label="Injective (bech32 inj1…)"   val={result.cosmosInj} />
-              <KV label="Neutron (bech32 neutron1…)" val={result.cosmosNeutron} />
-              <KV label="NEAR implicit account"      val={result.nearImplicit} />
-              <KV label="TRON (base58check T…)"      val={result.tronBase58} />
-              <KV label="TRON raw 21B (hex)"         val={result.tronRawHex} />
+              <KV label="Solana · base58(ed25519_pk)"             val={result.solanaAddress} />
+              <KV label="TRON · base58check (T…)"                 val={result.tronBase58} />
+              <KV label="Osmosis · bech32(osmo1…)"                val={result.cosmosOsmo} />
+              <KV label="Injective · bech32(inj1…)"               val={result.cosmosInj} />
+              <KV label="Neutron · bech32(neutron1…)"             val={result.cosmosNeutron} />
+              <KV label="Juno · bech32(juno1…)"                   val={result.cosmosJuno} />
+              <KV label="Stargaze · bech32(stars1…)"              val={result.cosmosStargaze} />
+              <KV label="NEAR · hex(sha256(pq_pk))"               val={result.nearImplicit} />
+              <KV label="Aptos · sha3_256(pq_pk ‖ 0xFE)"          val={result.aptosAddress} />
+              <KV label="Sui · blake2b_256(0xFE ‖ pq_pk)"         val={result.suiAddress} />
+              <KV label="TON · workchain 0 preview"               val={result.tonPreview} />
+              <KV label="Bitcoin · BIP-84 P2WPKH (bc1q…)"         val={result.btcSegwit} />
             </div>
           </div>
         </div>

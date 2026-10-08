@@ -625,6 +625,85 @@ html, body, #root {
 .btn-copy.copied { color: var(--accent); border-color: rgba(158,236,217,.4); }
 
 /* ================================================================
+   Swap Panel — one-click PQ upgrade
+   ================================================================ */
+.swap-panel { padding: 32px; margin-top: 28px; border: 1px solid rgba(158,236,217,.22); }
+:root[data-theme="light"] .swap-panel { border-color: rgba(13,143,116,.3); }
+.swap-head { margin-bottom: 24px; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+.swap-head h3 { font-family: var(--font-display); font-size: 22px; font-weight: 600; letter-spacing: -0.012em; margin-bottom: 8px; }
+.swap-head p  { color: var(--text-3); font-size: 13.5px; line-height: 1.6; }
+.swap-head p code, .swap-done code, .swap-pending code {
+  padding: 1px 5px; background: rgba(255,255,255,.05); border-radius: 3px;
+  font-family: var(--font-mono); font-size: 11.5px; color: var(--text-2);
+}
+:root[data-theme="light"] .swap-head p code { background: rgba(10,13,20,.05); }
+
+.swap-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: var(--r-sm); overflow: hidden; margin-bottom: 16px; }
+.swap-cell { padding: 14px 16px; background: var(--ink-1); }
+.swap-cell .k { font-family: var(--font-mono); font-size: 10px; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 6px; }
+.swap-cell .v { font-size: 14px; color: var(--text); font-family: var(--font-mono); word-break: break-all; }
+.swap-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
+
+.swap-cta { width: 100%; padding: 14px 20px; font-size: 14px; justify-content: center; }
+.swap-cta-group { display: flex; flex-direction: column; gap: 12px; }
+
+.swap-amount { display: grid; gap: 6px; }
+.swap-amount > span { font-size: 10.5px; color: var(--text-4); font-family: var(--font-mono); text-transform: uppercase; letter-spacing: 0.08em; }
+.swap-amount input {
+  padding: 13px 16px; background: var(--ink-0); border: 1px solid var(--line-2);
+  border-radius: var(--r-sm); color: var(--text); font-size: 15px; font-family: var(--font-mono);
+  outline: none;
+}
+.swap-amount input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(158,236,217,.08); }
+.swap-amount .hint { font-size: 11px; color: var(--text-4); font-family: var(--font-mono); text-transform: none; letter-spacing: 0; }
+
+.swap-note { padding: 12px 16px; border-radius: var(--r-sm); font-size: 12.5px; font-family: var(--font-mono); line-height: 1.55; }
+.swap-note.warn { background: rgba(212,168,96,.08); border: 1px solid rgba(212,168,96,.3); color: var(--warn); }
+.swap-note.err  { background: rgba(255,110,160,.08); border: 1px solid rgba(255,110,160,.3); color: var(--rose); margin-top: 14px; }
+
+.swap-done { padding: 20px; background: rgba(158,236,217,.05); border: 1px solid rgba(158,236,217,.3); border-radius: var(--r-md); display: grid; gap: 10px; }
+.done-head { font-family: var(--font-display); font-size: 17px; font-weight: 600; color: var(--accent); }
+.done-row { display: grid; grid-template-columns: 70px 1fr auto; gap: 12px; align-items: center; font-family: var(--font-mono); font-size: 12px; }
+.done-row > span:first-child { color: var(--text-4); text-transform: uppercase; letter-spacing: 0.08em; font-size: 10px; }
+.done-row > span:nth-child(2) { color: var(--text); word-break: break-all; }
+.done-note { font-size: 12.5px; color: var(--text-2); line-height: 1.6; margin-top: 6px; }
+:root[data-theme="light"] .swap-done { background: rgba(13,143,116,.05); border-color: rgba(13,143,116,.3); }
+
+.swap-pending { margin-top: 16px; padding: 14px 16px; background: var(--ink-0); border: 1px dashed var(--line-2); border-radius: var(--r-sm); }
+.swap-pending .k { font-size: 11px; color: var(--text-3); font-family: var(--font-mono); margin-bottom: 6px; }
+.swap-pending .v { font-size: 13px; color: var(--accent); margin-bottom: 6px; }
+.swap-pending .hint { font-size: 11.5px; color: var(--text-3); font-family: var(--font-mono); line-height: 1.55; }
+.swap-pending a { color: var(--accent); }
+
+/* ================================================================
+   PQ Sign Demo
+   ================================================================ */
+.pq-demo { padding: 32px; margin-top: 28px; border: 1px solid rgba(158,236,217,.2); }
+:root[data-theme="light"] .pq-demo { border-color: rgba(13,143,116,.3); }
+.pq-demo-head { margin-bottom: 20px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.pq-demo-head h3 { font-family: var(--font-display); font-size: 20px; font-weight: 600; letter-spacing: -0.012em; margin-bottom: 6px; }
+.pq-demo-head p { color: var(--text-3); font-size: 13px; line-height: 1.55; }
+.pq-demo-actions {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 16px 0; border-top: 1px solid var(--line);
+  margin-bottom: 20px;
+}
+.pq-demo-meta { display: flex; gap: 20px; font-family: var(--font-mono); font-size: 11px; color: var(--text-3); flex-wrap: wrap; }
+.pq-demo-meta span { display: inline-flex; gap: 6px; align-items: center; }
+.pq-demo-meta b { color: var(--text-4); font-weight: 500; text-transform: uppercase; letter-spacing: 0.08em; }
+.pq-demo-out { display: grid; gap: 10px; margin-top: 10px; }
+.pq-demo-row {
+  display: grid; grid-template-columns: 100px 1fr auto; gap: 14px; align-items: center;
+  padding: 12px 14px; background: var(--ink-0); border: 1px solid var(--line); border-radius: var(--r-sm);
+}
+.pq-demo-k { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-4); text-transform: uppercase; letter-spacing: 0.08em; }
+.pq-demo-v { font-size: 12px; color: var(--text); word-break: break-all; }
+.pq-demo-note { padding: 14px 16px; background: rgba(158,236,217,.04); border: 1px solid rgba(158,236,217,.14); border-radius: var(--r-sm); font-size: 12.5px; color: var(--text-2); line-height: 1.55; }
+.pq-demo-note code { background: rgba(255,255,255,.05); padding: 1px 5px; border-radius: 3px; font-family: var(--font-mono); font-size: 11.5px; }
+:root[data-theme="light"] .pq-demo-note { background: rgba(13,143,116,.05); border-color: rgba(13,143,116,.18); }
+:root[data-theme="light"] .pq-demo-note code { background: rgba(10,13,20,.05); }
+
+/* ================================================================
    Theme toggle
    ================================================================ */
 .theme-toggle {

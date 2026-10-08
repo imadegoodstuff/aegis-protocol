@@ -1,0 +1,1 @@
+{"name":"aegis-deploy","private":true,"type":"module","scripts":{"deploy:sepolia":"node deploy.mjs sepolia","deploy:base-sepolia":"node deploy.mjs base-sepolia"},"dependencies":{"viem":"^2.21.0","solc":"^0.8.28"}}

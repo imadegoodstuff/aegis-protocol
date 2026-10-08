@@ -173,8 +173,8 @@ export default function App() {
             <a className="btn btn-ghost" href="#arch">Architecture</a>
           </div>
           <div className="hero-meta fade d3">
-            <span><b>SIG</b> SPHINCS+-192s · 3,688 B</span>
-            <span><b>HASH</b> keccak256</span>
+            <span><b>SIG</b> SLH-DSA-SHAKE-192s · live in wallet</span>
+            <span><b>HASH</b> SHAKE-256 / keccak256</span>
             <span><b>LATTICE</b> none</span>
             <span><b>PAIRING</b> none</span>
           </div>
@@ -186,9 +186,9 @@ export default function App() {
               <div className="stat-s">12 EVM + Starknet · same identity</div>
             </div>
             <div className="stat">
-              <div className="stat-k">roadmap</div>
-              <div className="stat-v">23</div>
-              <div className="stat-s">+ SVM, Cosmos, Move, TRON, TON, NEAR</div>
+              <div className="stat-k">testnet-ready</div>
+              <div className="stat-v">11</div>
+              <div className="stat-s">Solana, TRON, 5 Cosmos, Aptos, Sui, NEAR, TON</div>
             </div>
             <div className="stat">
               <div className="stat-k">timelock</div>
@@ -277,7 +277,7 @@ export default function App() {
             <div className="card promise-card good">
               <h3><span className="ic">✓</span> Protected by Aegis</h3>
               <ul className="promise-list">
-                <li><span className="mark">▶</span> SPHINCS+-192s hash-only signatures on every supported chain</li>
+                <li><span className="mark">▶</span> Wallet produces real FIPS 205 SLH-DSA-SHAKE-192s signatures in-browser today (via <code>@noble/post-quantum</code>)</li>
                 <li><span className="mark">▶</span> Non-custodial: funds in your per-user immutable contract</li>
                 <li><span className="mark">▶</span> No admin, no upgrade, no selfdestruct, no pause</li>
                 <li><span className="mark">▶</span> ECDSA fallback: 7-day timelock to your pre-committed guardian</li>
@@ -287,8 +287,10 @@ export default function App() {
               </ul>
             </div>
             <div className="card promise-card bad">
-              <h3><span className="ic">!</span> Honestly out of scope</h3>
+              <h3><span className="ic">!</span> Honestly out of scope · work-in-progress</h3>
               <ul className="promise-list">
+                <li><span className="mark">▶</span> On-chain Solidity verifier for SLH-DSA-SHAKE-192s not yet deployed; vendored C13 variant (keccak-tweakable-hash, 3,688 B sigs) is in <code>evm/src/vendor/</code> but needs matching signer</li>
+                <li><span className="mark">▶</span> No AegisAccount deployed to any mainnet yet · Sepolia end-to-end integration pending audit</li>
                 <li><span className="mark">▶</span> We cannot save you if the underlying chain's consensus is broken</li>
                 <li><span className="mark">▶</span> We cannot recover a lost mnemonic or a compromised device</li>
                 <li><span className="mark">▶</span> We cannot undo a wrong guardian address committed at deploy time</li>

@@ -24,12 +24,12 @@ export default function ChainDashboard() {
             </div>
             <span
               className={`chain-status ${
-                c.status === "live" ? "ok" : c.status === "soon" ? "soon" : ""
+                c.status === "live" ? "ok" : c.status === "testnet" ? "soon" : ""
               }`}
             >
               {c.status === "live"
                 ? c.sameAddr ? "LIVE · SAME ADDR" : "LIVE"
-                : c.status === "soon" ? "ROADMAP" : "RESEARCH"}
+                : c.status === "testnet" ? "TESTNET-READY" : "RESEARCH"}
             </span>
           </div>
         ))}
