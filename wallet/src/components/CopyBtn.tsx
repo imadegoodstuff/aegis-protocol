@@ -5,6 +5,7 @@ export default function CopyBtn({ value, label = "copy" }: { value: string; labe
   return (
     <button
       className={"btn btn-sm btn-copy" + (done ? " copied" : "")}
+      aria-label={`Copy ${value.length > 40 ? value.slice(0, 20) + '…' : value} to clipboard`}
       onClick={() => {
         void navigator.clipboard?.writeText(value);
         setDone(true);

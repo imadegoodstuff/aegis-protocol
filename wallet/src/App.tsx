@@ -98,9 +98,10 @@ export default function App() {
 
   return (
     <div>
-      <div className="mesh" />
-      <div className="grid" />
-      <div className="grain" />
+      <a className="skip-link" href="#main">Skip to content</a>
+      <div className="mesh" aria-hidden="true" />
+      <div className="grid" aria-hidden="true" />
+      <div className="grain" aria-hidden="true" />
       {cpEnabled && (
         <Suspense fallback={null}>
           <CommandPalette />
@@ -134,6 +135,9 @@ export default function App() {
           </div>
         </div>
       </nav>
+
+      {/* MAIN */}
+      <main id="main">
 
       {/* HERO */}
       <header className="hero">
@@ -346,6 +350,8 @@ export default function App() {
           </div>
         </div>
       </section>
+
+      </main>
 
       {/* FOOTER */}
       <footer className="footer">
