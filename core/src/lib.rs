@@ -23,7 +23,7 @@ extern crate alloc;
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use bip39::{Language, Mnemonic};
+use bip39::Mnemonic;
 use hkdf::Hkdf;
 use k256::{
     ecdsa::{Signature as EcdsaSignature, SigningKey as EcdsaSigningKey, signature::Signer},
@@ -63,7 +63,7 @@ impl std::error::Error for AegisError {}
 
 /// Derive the full Aegis identity from a BIP-39 mnemonic and optional passphrase.
 pub fn identity_from_mnemonic(mnemonic: &str, passphrase: &str) -> Result<Identity, AegisError> {
-    let m = Mnemonic::parse_in(Language::English, mnemonic).map_err(|_| AegisError::BadMnemonic)?;
+    let m = Mnemonic::parse_normalized(mnemonic).map_err(|_| AegisError::BadMnemonic)?;
     let seed = m.to_seed(passphrase);
 
     // --- SPHINCS+-192s (STUB) ---
