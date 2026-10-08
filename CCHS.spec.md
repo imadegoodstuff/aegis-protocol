@@ -316,7 +316,8 @@ Hybrid deployments (`AegisAccountV3`) may keep ECDSA as the daily path and use C
 ## 10. Reference implementations
 
 - `evm/src/AegisCCHS.sol` — Solidity, `CCHS-S-20`. Compiles with solc 0.8.37; 4 750 B runtime.
-- `evm/test/AegisCCHS.t.sol` — Foundry tests incl. front-run, replay, cache-poisoning, recovery.
+- `evm/test/AegisCCHS.t.sol` — Foundry tests incl. front-run, replay, cache-poisoning, recovery. Driven by client-generated vectors.
+- `evm/test/fixtures/cchs-s-20.json` — test vectors (`CCHS-S-20`, master `0x07…07`, chainId 1): roots, three operations (first-in-subtree with top layer, two cached), one recovery. Shared ground truth for every chain implementation in §7.
 - `wallet/src/aegis/cchs.ts` — TypeScript client: keygen, sign, local verify, digest construction, ABI helpers.
 
 **Interop verified** (2026-10-08): signatures produced by `cchs.ts` were executed against the compiled contract in an EVM (`@ethereumjs/vm`, Cancun). First-in-subtree, cached, replay, front-run to a different target, tampered chain value, tampered auth path, recovery rotation, and post-rotation rejection of the old key all behaved as specified. Digest computed by the client matched `nextDigest()` byte-for-byte.
