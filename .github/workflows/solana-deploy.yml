@@ -17,6 +17,11 @@ on:
         default: devnet
         type: choice
         options: [devnet, mainnet-beta]
+      buffer_seed:
+        description: "Resume: 12-word seed of the buffer account printed by a failed deploy (optional)"
+        required: false
+        default: ""
+        type: string
 
 concurrency: solana-deploy
 
@@ -63,11 +68,24 @@ jobs:
             sleep 15
           done
           solana balance
+      # The CLI needs the payer to hold the program-data rent while the buffer
+      # already holds the same amount (the buffer is refunded at the end), so
+      # a deploy can stop after writing the buffer; the seed phrase it prints
+      # resumes it without paying for a second buffer.
       - name: Deploy
+        env:
+          BUFFER_SEED: ${{ inputs.buffer_seed }}
         run: |
+          BUFFER_ARGS=()
+          if [ -n "$BUFFER_SEED" ]; then
+            printf '%s\n\n' "$BUFFER_SEED" | solana-keygen recover -o "$RUNNER_TEMP/buffer.json" --force
+            echo "resuming with buffer $(solana-keygen pubkey "$RUNNER_TEMP/buffer.json")"
+            BUFFER_ARGS=(--buffer "$RUNNER_TEMP/buffer.json")
+          fi
           solana program deploy target/deploy/aegis_account.so \
             --program-id "$RUNNER_TEMP/program.json" \
             --upgrade-authority "$RUNNER_TEMP/deployer.json" \
+            "${BUFFER_ARGS[@]}" \
             --max-sign-attempts 30 \
             --with-compute-unit-price 1000
           solana program show "$(solana-keygen pubkey "$RUNNER_TEMP/program.json")"
@@ -83,3 +101,4 @@ jobs:
             echo "commit ${{ github.sha }}, ELF sha256 $(sha256sum target/deploy/aegis_account.so | cut -d' ' -f1)"
           } >> "$GITHUB_STEP_SUMMARY"
           shred -u "$RUNNER_TEMP/program.json" "$RUNNER_TEMP/deployer.json"
+          rm -f "$RUNNER_TEMP/buffer.json"
