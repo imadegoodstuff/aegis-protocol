@@ -196,14 +196,23 @@ abstract contract CCHSVectorTest is Test {
         a.execute(target, value, "", 6, l0);
     }
 
-    /// Abandoned leaves stay abandoned: after the jump to 1024, leaf 5 is below nextIdx.
+    /// Abandoned leaves stay abandoned: after 0 -> 5 -> 1024, every leaf below
+    /// 1025 is rejected before any hashing, used (1) or never used (6).
     function test_revert_backwardIndexAfterSkip() public {
         _exec(0);
+        (uint64 i5, AegisCCHSBase.LayerSig memory l0, , ) = _skipOp(0);
+        a.execute(target, value, "", i5, l0);
         (uint64 i1024, AegisCCHSBase.LayerSig memory m0, , AegisCCHSBase.LayerSig memory m1) = _skipOp(1);
         a.executeFirst(target, value, "", i1024, m0, m1);
-        (uint64 i5, AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _skipOp(0);
+        assertEq(a.nextIdx(), 1025);
+
+        (AegisCCHSBase.LayerSig memory l1, , ) = _op(1);
         vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
-        a.execute(target, value, "", i5, l0);
+        a.execute(target, value, "", 1, l1);
+        vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
+        a.execute(target, value, "", 6, l1);
+        vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
+        a.executeFirst(target, value, "", 1024, m0, m1);
     }
 
     /// Cache poisoning: genuine top-layer signature paired with a tampered
