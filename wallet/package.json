@@ -9,7 +9,8 @@
     "start": "serve -s dist -l tcp://0.0.0.0:8080",
     "vectors": "tsx scripts/check-vectors.mts",
     "evm-flow": "tsx scripts/evm-flow.mts",
-    "index-discipline": "tsx scripts/check-index-discipline.mts"
+    "index-discipline": "tsx scripts/check-index-discipline.mts",
+    "btc": "tsx scripts/check-btc.mts"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",

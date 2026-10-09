@@ -58,7 +58,7 @@ The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storag
 | NEAR | `env::sha256` | verifier contract on `cchs-core`, fixture-tested, not deployed |
 | TON | `HASHEXT_SHA256` | FunC verifier, fixture-tested, not deployed |
 | Starknet | `core::sha256` | Cairo verifier, fixture-tested, not deployed |
-| Bitcoin | `OP_SHA256` + `OP_CAT` (BIP-347, not active) | tree/leaf-script builder in `wallet/src/aegis/btcTapscript.ts`; sighash binding needs OP_CAT, see `CCHS.spec.md` §7.1 |
+| Bitcoin | `OP_SHA256` in Tapscript; needs a key-less output (BIP-360 P2MR, draft) **and** `OP_CAT` (BIP-347) or `OP_CHECKSIGFROMSTACK` (BIP-348), none active | leaf script executed in CI (`npm run btc`); hypertree design with UTXO-carried state and the proof that nothing weaker works today in [`BITCOIN.md`](BITCOIN.md) |
 
 Standard mainnet address derivation for 23 chains (importable into Phantom, Keplr, Petra, etc.) is implemented in `wallet/src/aegis/derive.ts`. Those are ordinary ed25519 / secp256k1 addresses from the same seed; they are not post-quantum. The post-quantum account on a chain is the CCHS verifier listed above, at the stage listed above. See [`ADAPTERS.md`](ADAPTERS.md).
 
@@ -90,7 +90,7 @@ cd deploy && npm i && node deploy.mjs --compile-only
 
 # Wallet, then the checks CI runs: pinned vectors, index discipline, full life cycle in an EVM with costs
 cd wallet && npm i && npm run build
-npm run vectors && npm run index-discipline && npm run evm-flow
+npm run vectors && npm run index-discipline && npm run evm-flow && npm run btc
 
 # Bounded model checks (verifier and client), each with its seeded bugs
 node model/cchs-state.mjs && node model/cchs-client.mjs
@@ -112,6 +112,7 @@ The factory is published through the deterministic-deployment proxy (`0x4e59b448
 - Signatures are 2.5 KB and ~169 K gas end to end on the cached path; this is the amortized floor for a hash-based signature on an EVM, about 7x an ECDSA transfer. Small or frequent payments belong on the hybrid account (ECDSA daily, CCHS recovery).
 - One-time keys depend on the client never signing two messages under one leaf. The verifier enforces one landed signature per index; the client enforces the rest with a write-ahead record of the highest signed index per epoch (CCHS.spec.md §4.3). A device whose record is missing or restored from a backup must rotate to the next epoch (same mnemonic, deterministic keys) before signing again; the wallet enforces this and offers the rotation. Multi-device signing requires partitioning the index space and is not coordinated by the protocol. Across chains the question does not arise: each chain has its own key tree, so no leaf exists on two chains (an earlier design shared one tree across EVM chains for a common address; that would have let leaf 0 sign two different digests, and was changed).
 - `CCHS-C-20` (Solana) truncates SHA-256 to 24 bytes and uses w = 256. Under the SPHINCS+ multi-target argument it sits at the AES-192 yardstick (2^192 / 2^96); counting the ≈ 2^33 published chain values conservatively it is 2^159 / 2^80, between AES-128 and AES-192. Both numbers are in CCHS.spec.md §5.5 with the reasoning; the written reduction for (n = 24, w = 256) is an open item. S-20 / K-20 (n = 32, w = 16) clear AES-192 under either accounting.
+- Bitcoin: the wallet's Bitcoin address is a plain P2WPKH address and is not post-quantum. No script under current consensus can bind a hash-only authorisation to its transaction; [`BITCOIN.md`](BITCOIN.md) gives the argument (three observations about Script and the sighash) and the account design that becomes possible with a key-less output type plus `OP_CAT` or `OP_CHECKSIGFROMSTACK`. The leaf script is built and executed in CI; the covenant part is specified, not implemented.
 - Chain status: EVM contracts are built, tested against client-produced signatures and deployable by anyone; the factory has no mainnet deployment yet. Non-EVM adapters are at the stages listed in ADAPTERS.md; none is live on a mainnet.
 
 ## License

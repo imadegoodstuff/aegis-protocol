@@ -12,8 +12,14 @@
 //
 // What it cannot do yet, and says so in the output: bind the signed digits to
 // the spending transaction. That needs OP_CAT (BIP-347) or
-// OP_CHECKSIGFROMSTACK; `binding` is the insertion point for that fragment.
-// Do not fund an output built with `binding: 'none'` on a network with value.
+// OP_CHECKSIGFROMSTACK (BIP-348); `binding` is the insertion point for that
+// fragment. Independently of binding, the output built here is P2TR, whose
+// key path a discrete-log adversary can take whatever the internal key is; a
+// key-less output type (BIP-360 P2MR) is required as well. See BITCOIN.md.
+// Do not fund an output built by this file on a network with value.
+//
+// `wallet/scripts/check-btc.mts` executes the leaf script in an interpreter
+// for the opcodes it uses and pins the sizes quoted in the documents.
 
 import { sha256 } from '@noble/hashes/sha256';
 import { schnorr, secp256k1 } from '@noble/curves/secp256k1';

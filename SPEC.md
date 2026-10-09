@@ -52,7 +52,7 @@ All CCHS secret material (every WOTS+ chain of every leaf of every tree) is deri
 | NEAR | `hex(ed25519_pk)` (implicit account) |
 | Aptos | `sha3_256(ed25519_pk ‖ 0x00)` |
 | Sui | `blake2b_256(0x00 ‖ ed25519_pk)` |
-| Bitcoin | BIP-84 P2WPKH `bc1q…` (BIP-86 P2TR for the CCHS Tapscript design) |
+| Bitcoin | BIP-84 P2WPKH `bc1q…`, not post-quantum; the hash-only account needs a key-less output type and an introspection opcode (`BITCOIN.md`) |
 | Starknet | `pedersen(classHash, pedersen(pqCommitment, salt))` |
 
 Implementation: `wallet/src/aegis/derive.ts` (23 chains).

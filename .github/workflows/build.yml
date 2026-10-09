@@ -77,6 +77,8 @@ jobs:
         run: npm run index-discipline
       - name: full account life cycle in an EVM (create, sign, skip, rotate, withdraw) with costs
         run: npm run evm-flow
+      - name: Bitcoin Tapscript leaf executed in a BIP-342 opcode interpreter, sizes pinned
+        run: npm run btc
 
   cosmwasm:
     name: CosmWasm (Rust wasm32)
