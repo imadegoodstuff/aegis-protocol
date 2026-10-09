@@ -464,8 +464,17 @@ a keygen-time choice.
   statement about consensus, not about effort.
 - Has the hash-only account precomputed: `key(label "bitcoin")`, the WOTS+
   trees and their roots exist at the same time as the EVM roots, so
-  migration is one transaction once §4's conjunction holds; the account
-  itself is the §5 lineage, running on signet.
+  migration is one transaction once §4's conjunction holds.
+- Runs the §5 account on signet from the browser (`wallet/src/components/
+  BitcoinPanel.tsx`, `wallet/src/aegis/btcAccount.ts`): the lineage is read
+  back from a public explorer and decoded spend by spend into the current
+  state, every UTXO at the current address is spent in one transaction with
+  one WOTS+ leaf per input, the fee is fixed before signing, and the leaf
+  index is recorded before signing. Spends reach the network through a
+  relay in front of a Bitcoin Inquisition node (`bitcoin/relay/`), because
+  nodes without the opcodes do not relay them; the raw transaction can also
+  be copied out. The panel labels the network as signet and the mainnet
+  address as not post-quantum.
 
 Operational reduction of short exposure (direct-to-miner submission, fee
 choice) is outside the wallet: it requires trusting a miner not to be the

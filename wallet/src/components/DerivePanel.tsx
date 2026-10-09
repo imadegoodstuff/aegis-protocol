@@ -5,6 +5,7 @@ import CopyBtn from "./CopyBtn";
 import PqSignDemo from "./PqSignDemo";
 import SwapPanel  from "./SwapPanel";
 import ProtectPanel from "./ProtectPanel";
+import BitcoinPanel from "./BitcoinPanel";
 
 // BIP-39 test vector for 32 zero bytes of entropy: 24 words, 256 bits. A 12-word
 // phrase is accepted by the derivation demo but refused by the CCHS panel (§5.6 P4).
@@ -80,6 +81,7 @@ export default function DerivePanel() {
       )}
 
       {result && <ProtectPanel mnemonic={mnemonic} />}
+      {result && <BitcoinPanel mnemonic={mnemonic} />}
       {result && <SwapPanel  mnemonic={mnemonic} />}
       {result && <PqSignDemo mnemonic={mnemonic} />}
 
@@ -135,7 +137,7 @@ export default function DerivePanel() {
               <KV label="NEAR  ·  implicit account (ed25519)"               val={result.nearImplicit} />
               <KV label="Aptos  ·  import to Petra / Pontem"                val={result.aptosAddress} />
               <KV label="Sui  ·  import to Sui Wallet / Suiet"              val={result.suiAddress} />
-              <KV label="Bitcoin  ·  BIP-84 P2WPKH, import to Sparrow"      val={result.btcSegwit} />
+              <KV label="Bitcoin mainnet  ·  BIP-84 P2WPKH, import to Sparrow (not post-quantum; the hash-only account runs on signet, above)" val={result.btcSegwit} />
               <KV label="TON  ·  ed25519 pubkey (preview; import secret to Tonkeeper)" val={result.tonPreview} />
             </div>
           </div>

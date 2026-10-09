@@ -4,6 +4,7 @@ export type ChainStatus = "mainnet" | "preview" | "research";
 export type PqStatus =
   | "contract"   // verifier complete and tested; factory not yet published on this chain
   | "source"     // verifier source exists against shared test vectors; not deployed
+  | "signet"     // verifier live on a test network whose consensus has what it needs; mainnet lacks it
   | "blocked"    // blocked on an external dependency (opcode, protocol feature)
   | "none";
 
@@ -37,5 +38,5 @@ export const CHAINS: Chain[] = [
   { name: "Sui",       family: "Move",     status: "mainnet", pq: "source",   set: "S-20", wallet: "Sui Wallet / Suiet" },
   { name: "Starknet",  family: "Starknet", status: "preview", pq: "source",   set: "S-20", wallet: "Argent X / Braavos" },
   { name: "TON",       family: "Other",    status: "preview", pq: "source",   set: "S-20", wallet: "Tonkeeper" },
-  { name: "Bitcoin",   family: "Bitcoin",  status: "mainnet", pq: "blocked",  set: "—",    wallet: "Sparrow / Electrum" },
+  { name: "Bitcoin",   family: "Bitcoin",  status: "mainnet", pq: "signet",   set: "—",    wallet: "Sparrow / Electrum" },
 ];

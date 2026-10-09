@@ -48,7 +48,7 @@ const NON_EVM = [
   { name: "Aptos / Sui", set: "S-20", status: "Move modules in aptos/ (resource account, zeroed auth key, no signer in execute) and sui/ (any Coin<T> vault); immutable publication documented; fixture + end-to-end tests in CI; not published" },
   { name: "Starknet", set: "S-20", status: "Cairo account in cairo/, built and tested in CI; not declared" },
   { name: "TON", set: "S-20", status: "FunC account in ton/, sandbox-tested; not deployed" },
-  { name: "Bitcoin", set: "WOTS+ tapleaf", status: "no construction under current consensus binds a hash-based witness to a transaction (CCHS.spec.md 7.1); needs OP_CAT (BIP-347). Address derived here is BIP-84 P2WPKH, single-use, not labelled post-quantum" },
+  { name: "Bitcoin", set: "CCHS-UTXO (WOTS+ tapleaves)", status: "live on Bitcoin Inquisition signet, where OP_CAT and OP_CHECKSIGFROMSTACK are active: see the Bitcoin panel below. Mainnet has neither opcode, so no construction there binds a hash-based witness to a transaction (BITCOIN.md §3); the mainnet address is BIP-84 P2WPKH, single-use, not labelled post-quantum" },
 ];
 
 function parseTokens(s: string): Address[] {

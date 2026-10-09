@@ -34,8 +34,32 @@ every call (`BITCOIN.md` §5.2).
 | `wallet/src/aegis/btcCchs.ts` | hashing, key trees, the three leaf scripts, witnesses, state machine, reference verifier |
 | `wallet/src/aegis/btcTx.ts` | transaction serialization, BIP-341 script-path sighash, bech32m, binding signature |
 | `wallet/scripts/check-btc.mts` | executes the leaves in a Tapscript interpreter (BIP-342 + `OP_CAT` + `OP_CHECKSIGFROMSTACK`), pins sizes — `npm run btc` |
-| `wallet/scripts/btc-flow.mts` | runs a lineage `execFirst → exec → exec → recover → execFirst` against a node — `npm run btc-flow` |
+| `wallet/scripts/btc-flow.mts` | runs a lineage `execFirst → exec → exec → recover → execFirst` against a node — `npm run btc-flow`; `BTC_RESUME` continues an existing lineage |
+| `wallet/src/aegis/btcAccount.ts` | browser account: lineage read back from a public explorer, spend construction, signed-index discipline, pending-spend memory |
+| `wallet/src/components/BitcoinPanel.tsx` | the wallet panel: address, balance, send, recover, lineage, relay setting |
+| `relay/` | broadcast relay in front of a Bitcoin Inquisition signet node (`server.mjs`, `Dockerfile`, `fly.toml`) |
 | `wallet/src/aegis/btcTapscript.ts` | the earlier flat variant (one hard-coded key per leaf, no binding), kept for the size it is quoted at |
+
+## Why a relay
+
+A spend uses `OP_CAT` and `OP_CHECKSIGFROMSTACK`. To a node without them these
+are `OP_SUCCESS` opcodes, and Bitcoin Core's policy refuses to relay a
+transaction that executes one, so public broadcast APIs reject the spend
+while every Inquisition node accepts it. The relay exposes three routes
+(`GET /info`, `POST /tx`, `GET /tx/:txid`) over an Inquisition node's RPC,
+holds no keys and no state, and can be run by anyone; the wallet accepts any
+relay URL and also offers the raw transaction for `bitcoin-cli
+sendrawtransaction`. Reads (UTXOs, confirmations, the lineage) use
+mempool.space's signet API, which indexes the transactions once mined.
+
+```
+cd bitcoin/relay
+docker build -t aegis-btc-relay .
+docker run -v btcdata:/data -p 8080:8080 aegis-btc-relay   # syncs signet first (hours)
+curl localhost:8080/info
+```
+
+Set `VITE_BTC_SIGNET_RELAY` at wallet build time to make it the default.
 
 ## Running a lineage
 

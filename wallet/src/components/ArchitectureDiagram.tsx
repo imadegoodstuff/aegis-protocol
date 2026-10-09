@@ -2,8 +2,8 @@ import { useEffect, useState } from "react";
 
 type AdapterId = "evm" | "tron" | "svm" | "cosmos" | "near" | "aptos" | "sui" | "cairo" | "ton" | "bitcoin";
 
-/** pq = CCHS verifier state. "contract" = complete + tested, factory not published; "source" = code against vectors; "blocked" = external dependency. */
-type Pq = "contract" | "source" | "blocked";
+/** pq = CCHS verifier state. "contract" = complete + tested, factory not published; "source" = code against vectors; "signet" = live on a test network with the needed consensus rules, mainnet without them; "blocked" = external dependency. */
+type Pq = "contract" | "source" | "signet" | "blocked";
 
 type Adapter = {
   id: AdapterId; name: string; family: string; set: string;
@@ -58,16 +58,17 @@ const ADAPTERS: Adapter[] = [
     address: "hash(StateInit) — preview shows the key",
     hash: "HASHEXT_SHA256", storage: "dict", path: "ton/contracts/",
     blurb: "FunC contract with the verifier in cell-based form. Real addresses need the StateInit computation. Not deployed." },
-  { id: "bitcoin", name: "Bitcoin", family: "Tapscript", set: "WOTS+ tapleaf",
-    addrStatus: "mainnet", pq: "blocked",
-    address: "bc1q… (BIP-84) today; P2TR tree address from the builder",
-    hash: "OP_SHA256", storage: "none (UTXO lineage)", path: "wallet/src/aegis/btcTapscript.ts",
-    blurb: "The builder emits a Taproot tree of 2^h WOTS+ leaves and valid spend witnesses, checked against BIP-341 vectors. Without OP_CAT or OP_CHECKSIGFROMSTACK a script cannot bind the signed digits to the transaction, so there is no hash-only Bitcoin spend today." },
+  { id: "bitcoin", name: "Bitcoin", family: "Tapscript", set: "CCHS-UTXO (WOTS+)",
+    addrStatus: "mainnet", pq: "signet",
+    address: "P2TR per state (NUMS key), changes every spend; bc1q… (BIP-84) on mainnet",
+    hash: "OP_SHA256 + OP_CAT + OP_CHECKSIGFROMSTACK", storage: "the UTXO itself: state hard-coded in three leaves", path: "wallet/src/aegis/btcCchs.ts",
+    blurb: "Each UTXO commits to (root, recRoot, pkSeed, epoch, t, R_t, nextIdx); its exec / execFirst / recover leaves verify a WOTS+ signature over the transaction's own sighash against the cached subtree root, enforce the index rule, and bind the message with OP_CHECKSIG + OP_CHECKSIGFROMSTACK on a public key everybody knows. Live on Bitcoin Inquisition signet (3 300 vB per cached spend, 6 336 vB first in subtree, 3 207 vB recovery; txids in BITCOIN.md §5.6) and run on an Inquisition regtest node in CI. Mainnet has neither opcode, and a P2TR output keeps a key path; the covenant form waits for BIP-360 P2MR." },
 ];
 
 const PQ_TEXT: Record<Pq, { label: string; cls: string }> = {
   contract: { label: "pq: contract", cls: "live" },
   source:   { label: "pq: source",   cls: "soon" },
+  signet:   { label: "pq: signet",   cls: "soon" },
   blocked:  { label: "pq: blocked",  cls: "wait" },
 };
 

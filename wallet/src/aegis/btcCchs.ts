@@ -191,12 +191,27 @@ export interface BtcPublic { root: Uint8Array; recRoot: Uint8Array; seed: Uint8A
 export function bottomTree(key: CchsKey, t: number): Tree { return wotsTree(key, LAYER_BOTTOM, t, HB); }
 
 export function keygenB(key: CchsKey, HT = DEFAULT_HT): { pub: BtcPublic; trees: BtcTrees } {
+  const r = publicKeyB(key, HT);
+  for (let t = 0; t < 1 << HT; t++) bottomOf(key, r.trees, t);
+  return r;
+}
+
+/**
+ * The public key alone: top tree (2^HT WOTS+ keys, their leaves sign the bottom roots
+ * later) and recovery tree. No bottom subtree is built; `bottomOf` adds them on demand.
+ * This is what a wallet needs to show the address: ~2^HT + 2^HR WOTS+ keys instead of 2^(HT+HB).
+ */
+export function publicKeyB(key: CchsKey, HT = DEFAULT_HT): { pub: BtcPublic; trees: BtcTrees } {
   const seed = pkSeed(key);
-  const bottom: Tree[] = [];
-  for (let t = 0; t < 1 << HT; t++) bottom.push(bottomTree(key, t));
-  const top = wotsTree(key, LAYER_TOP, 0, HT);   // its leaf t signs R_t = bottom[t].root
+  const top = wotsTree(key, LAYER_TOP, 0, HT);
   const rec = wotsTree(key, LAYER_REC, 0, HR);
-  return { pub: { root: top.root, recRoot: rec.root, seed: seed.slice() }, trees: { HT, bottom, top, rec } };
+  return { pub: { root: top.root, recRoot: rec.root, seed: seed.slice() }, trees: { HT, bottom: [], top, rec } };
+}
+
+/** Bottom subtree t of an epoch, built once and cached in `trees.bottom`. */
+export function bottomOf(key: CchsKey, trees: BtcTrees, t: number): Tree {
+  if (t < 0 || t >= 1 << trees.HT) throw new Error('subtree index');
+  return trees.bottom[t] ??= bottomTree(key, t);
 }
 
 // ---------------------------------------------------------- script builder
@@ -538,6 +553,36 @@ export function afterExecFirst(st: BtcState, tNew: number, leaf: number, R: Uint
 /** Successor state after `recover`: the next epoch's public key, nothing cached. */
 export function afterRecover(st: BtcState, next: BtcPublic): BtcState {
   return initialState(next, st.epoch + 1, st.HT);
+}
+
+/** What a spending transaction's witness says about the transition from state `st`. */
+export interface DecodedSpend { leaf: LeafName; idx?: number; tNew?: number; R?: Uint8Array }
+
+const bitsToInt = (items: Uint8Array[]): number => items.reduce((acc, b, k) => acc | ((b.length === 0 ? 0 : b[0] & 1) << k), 0);
+
+/**
+ * Identify the leaf a witness spent and the successor data it carried, by matching
+ * the leaf script against the three leaves of `st`. Used to rebuild the lineage state
+ * from the chain: a reader with the public key follows outpoint → spend → outpoint.
+ * Returns null if the witness is not a spend of this state (another input, another account).
+ */
+export function decodeSpend(st: BtcState, witness: Uint8Array[]): DecodedSpend | null {
+  if (witness.length < 3) return null;
+  const script = witness[witness.length - 2];
+  const out = accountOutput(st);
+  const items = witness.slice(0, -2);
+  for (const name of ['exec', 'execFirst', 'recover'] as LeafName[]) {
+    const leaf = out.leaves[name];
+    if (!leaf || !eq(leaf, script)) continue;
+    if (name === 'exec') return { leaf: name, idx: bitsToInt(items.slice(-HB)) };
+    if (name === 'execFirst') {
+      const c = items.slice(-st.HT), b = items.slice(-st.HT - HB, -st.HT);
+      const R = concatBytes(...items.slice(3, 35).map(x => (x.length ? x : Uint8Array.of(0))));
+      return { leaf: name, idx: bitsToInt(b), tNew: bitsToInt(c), R };
+    }
+    return { leaf: name };
+  }
+  return null;
 }
 
 // -------------------------------------------------------- reference check

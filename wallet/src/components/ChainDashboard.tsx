@@ -3,6 +3,7 @@ import { CHAINS, type PqStatus } from "../data/chains";
 const PQ_LABEL: Record<PqStatus, { text: string; cls: string }> = {
   contract: { text: "verifier ready · factory unpublished",   cls: "soon" },
   source:   { text: "verifier source · not deployed",         cls: "" },
+  signet:   { text: "live on signet · mainnet needs OP_CAT", cls: "soon" },
   blocked:  { text: "needs OP_CAT",                           cls: "" },
   none:     { text: "—",                                      cls: "" },
 };
