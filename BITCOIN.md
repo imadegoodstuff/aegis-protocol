@@ -407,10 +407,17 @@ output to the faucet's return address in every spend:
 | `exec` | [`06d82ae3468d7801…`](https://mempool.space/signet/tx/06d82ae3468d7801649e833b9fe31e8ed5f8d8d903946f273aabb3bb1a4e3f23) | 3 300 | 13 200 | 3 634 | 9 718 | 12 698 | epoch 0, t 0, nextIdx 3 |
 | `recover` | [`7400ea6e21b47bf2…`](https://mempool.space/signet/tx/7400ea6e21b47bf271866d527b6a93f97463cabbd50a51fa49c0b48ebc412ab6) | 3 207 | 12 828 | 3 529 | 9 454 | 12 326 | epoch 1, t ∅, nextIdx 0 |
 | `execFirst` | [`765cb6b4c7f78bb3…`](https://mempool.space/signet/tx/765cb6b4c7f78bb35f8716c1137271c322e7406c46d6fbb89c235f7e3a57d0a5) | 6 334 | 25 336 | 6 976 | 19 350 | 24 832 | epoch 1, t 0, nextIdx 1 |
+| `exec` | [`4963ebf78a6b540a…`](https://mempool.space/signet/tx/4963ebf78a6b540a457722e9aa30f5df4a327a4c4d63cf31a9e88522b8ac8586) | 3 269 | 13 074 | 14 070 | 9 718 | 12 696 | epoch 1, t 0, nextIdx 2 |
 
-Funding output: [`tb1p0e85juwrcgztj52ytssg652tw8xx4yvmfhr8nnmdu539a2l5wmkq8wezc3`](https://mempool.space/signet/address/tb1p0e85juwrcgztj52ytssg652tw8xx4yvmfhr8nnmdu539a2l5wmkq8wezc3). Every
-transaction has one input (the account UTXO) and two outputs (successor,
-payment); the successor of each row is the input of the next.
+Funding output: [`tb1p0e85juwrcgztj52ytssg652tw8xx4yvmfhr8nnmdu539a2l5wmkq8wezc3`](https://mempool.space/signet/address/tb1p0e85juwrcgztj52ytssg652tw8xx4yvmfhr8nnmdu539a2l5wmkq8wezc3). The
+first five transactions have one input (the account UTXO) and two outputs
+(successor, payment); the successor of each row is the input of the next.
+All six confirmed in block 325 621. The signet block producer was skipping
+1.1 sat/vB at the time, so the sixth spend (no payment output, 4.3 sat/vB)
+was added as a child to lift the package to 1.5 sat/vB; it is an ordinary
+`exec` spend of the lineage, resumed from the master key alone
+(`BTC_RESUME`), and shows that a lineage can be continued by any holder of
+the key without state other than the current UTXO.
 
 Leaf scripts are a function of the state only; the witness varies by a few
 bytes with the digits (a digit of 0 is an empty push). For comparison the
