@@ -198,9 +198,9 @@ export default function App() {
 
           <div className="stats fade d3 parallax-slow">
             <div className="stat">
-              <div className="stat-k">execution gas · cached</div>
-              <div className="stat-v num">116<span className="stat-unit">K</span></div>
-              <div className="stat-s">CCHS-K-20 · measured · SPHINCS+ C13 ≈ 190 K</div>
+              <div className="stat-k">gas · cached path · whole transaction</div>
+              <div className="stat-v num">169<span className="stat-unit">K</span></div>
+              <div className="stat-s">CCHS-K-20 · measured in an EVM · 116 K of it is execution</div>
             </div>
             <div className="stat">
               <div className="stat-k">signature</div>
@@ -210,12 +210,12 @@ export default function App() {
             <div className="stat">
               <div className="stat-k">signatures per key</div>
               <div className="stat-v num">2<sup>20</sup></div>
-              <div className="stat-s">+ 256 recoveries · one integer of client state</div>
+              <div className="stat-s">per chain · + 256 recoveries · one integer of client state</div>
             </div>
             <div className="stat">
               <div className="stat-k">keygen · browser</div>
               <div className="stat-v num">≈1<span className="stat-unit">s</span></div>
-              <div className="stat-s">both sets · worker pool · WASM hash cores</div>
+              <div className="stat-s">per chain tree · worker pool · WASM hash cores</div>
             </div>
           </div>
 
@@ -320,7 +320,7 @@ export default function App() {
                 <li><span className="mark">▶</span> Cache entries can only be written through a valid top-layer signature; recovery rotates the epoch and empties the cache</li>
                 <li><span className="mark">▶</span> Replay is impossible: chain ID, account, nonce and index are inside every digest</li>
                 <li><span className="mark">▶</span> No admin, proxy, upgrade, pause, fee, or treasury in the account contract</li>
-                <li><span className="mark">▶</span> The client keeps no state; the next index is read from the chain</li>
+                <li><span className="mark">▶</span> One-time keys are never shared: one tree per chain, one leaf per message, the chain enforces monotonic use and the client records the highest leaf it signed before signing (one integer per chain and epoch); a device without that record rotates keys before it signs again</li>
                 <li><span className="mark">▶</span> Interop verified: client signatures executed against the compiled contracts for both sets</li>
               </ul>
             </div>
@@ -331,7 +331,8 @@ export default function App() {
                 <li><span className="mark">▶</span> No external audit and no machine-checked proof of the reductions in §6 of the spec</li>
                 <li><span className="mark">▶</span> Non-EVM verifiers (Solana, CosmWasm, NEAR, Move, Cairo, TON) are source against test vectors, not deployments</li>
                 <li><span className="mark">▶</span> Bitcoin needs OP_CAT or OP_CHECKSIGFROMSTACK to bind a hash signature to a transaction; neither is active</li>
-                <li><span className="mark">▶</span> Keygen is ~1 s, not ~100 ms; that needs the chain loop inside WASM</li>
+                <li><span className="mark">▶</span> Keygen is ~1 s per chain (14 chains ≈ 8 s on a laptop), not ~100 ms; that needs the chain loop inside WASM</li>
+                <li><span className="mark">▶</span> Account addresses differ per chain by design (one key tree per chain); only the factory is at one address everywhere</li>
                 <li><span className="mark">▶</span> A lost mnemonic or a compromised device cannot be recovered by anyone</li>
                 <li><span className="mark">▶</span> If the hash function falls, everything built on it falls, including every other post-quantum scheme</li>
               </ul>

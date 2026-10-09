@@ -71,5 +71,33 @@ ok(new Set([toHex(master.master), toHex(c1.master), toHex(c8453.master), toHex(c
 ok(toHex(sk(c1, 0, 0n, 0, 0, 'K')) !== toHex(sk(c8453, 0, 0n, 0, 0, 'K')), 'WOTS+ secret values differ across chains');
 ok(toHex(epochKey(c1, 1).master) !== toHex(epochKey(c8453, 1).master), 'epoch keys of different chains differ');
 
+// End to end, the way the wallet signs: the same mnemonic, leaf 0 on chain 1 and
+// leaf 0 on chain 8453, each over its own chain's digest. Derivation, index
+// choice and the signature itself are exercised together; the two leaves must
+// be different one-time keys, and neither chain's root must accept the other's
+// signature.
+{
+  const treesA = new Map(), treesB = new Map();
+  const pubA = cchsK.keygen(c1, treesA), pubB = cchsK.keygen(c8453, treesB);
+  ok(toHex(pubA.root) !== toHex(pubB.root), 'chains 1 and 8453 have different roots (different accounts)');
+  const account = A;
+  const acct = Uint8Array.from(Buffer.from(account.slice(2), 'hex'));
+  const target = new Uint8Array(20).fill(0xab);
+  const dataHash = new Uint8Array(32);
+  const digest = (chainId: bigint) => cchsK.executeDigest({ chainId, account: acct, nonce: 0n, idx: 0n, target, value: 1n, dataHash });
+  const mA = digest(1n), mB = digest(8453n);
+  ok(toHex(mA) !== toHex(mB), 'the digests differ by chain id (replay protection)');
+  const idxA = nextSigningIndex(1, B, 0, 0n), idxB = nextSigningIndex(8453, B, 0, 0n);
+  ok(idxA === 0 && idxB === 0, 'both chains start at leaf 0: the index spaces are independent');
+  markIndexSigned(1, B, 0, idxA); markIndexSigned(8453, B, 0, idxB);
+  const sA = cchsK.sign(c1, idxA, mA, false, treesA), sB = cchsK.sign(c8453, idxB, mB, false, treesB);
+  const shared = sA.l0.wots.filter((x, i) => toHex(x) === toHex(sB.l0.wots[i])).length;
+  ok(shared === 0, `leaf 0 of chain 1 and leaf 0 of chain 8453 share no chain value (${shared} of ${sA.l0.wots.length} equal)`);
+  ok(toHex(sk(c1, 0, 0n, 0, 0, 'K')) !== toHex(sk(c8453, 0, 0n, 0, 0, 'K')), 'their WOTS+ secret keys differ: two one-time keys, one message each');
+  const accepts = (pub: { root: Uint8Array; recRoot: Uint8Array }, m: Uint8Array, s: any) => { try { cchsK.verify(pub, 0, m, s); return true; } catch { return false; } };
+  ok(accepts(pubA, mA, sA) && accepts(pubB, mB, sB), 'each signature verifies under its own chain root');
+  ok(!accepts(pubA, mB, sB) && !accepts(pubB, mA, sA), 'neither root accepts the other chain\'s signature');
+}
+
 if (failures) { console.log(`${failures} check(s) failed`); process.exit(1); }
 console.log('index discipline checks passed');
