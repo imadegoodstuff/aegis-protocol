@@ -6,7 +6,7 @@ shared vectors in `evm/test/fixtures/cchs-c-20.json`; the Anchor program adds
 only the Solana digest, PDA layout and CPI dispatch. The `solana` job of
 `build.yml` builds the SBF program and replays the fixture life cycle through
 it in the BanksClient runtime, reporting compute units per instruction
-(`programs/aegis_account/tests/compute_units.rs`); see "Before deployment"
+(`cu-test/tests/compute_units.rs`); see "Before deployment"
 for what is still open.
 
 Spec: `../CCHS.spec.md`. Client reference: `../wallet/src/aegis/cchsCompact.ts`.
@@ -165,7 +165,7 @@ earlier implicit-index layout; every row below includes it.
 Whole transaction, one fee-payer signature, legacy message
 (`65 + 3 + 1 + 32·keys + 32 + 1 + Σ(1 + 1 + accounts + 2 + data)`), computed
 from the layouts above. Rows marked *measured* are the serialized sizes of
-the transactions `tests/compute_units.rs` sends (each carries one
+the transactions `cu-test/tests/compute_units.rs` sends (each carries one
 instruction and no compute-budget instruction):
 
 | Transaction | Keys | Bytes of 1 232 |
@@ -191,7 +191,7 @@ created once per account alongside `create`.
 
 ## Compute units (measured in CI)
 
-`programs/aegis_account/tests/compute_units.rs` runs the SBF build of the
+`cu-test/tests/compute_units.rs` runs the SBF build of the
 program in the BanksClient runtime (`solana-program-test`, the same
 instruction metering as a validator) and replays the fixture life cycle:
 `create`, `cache_subtree(0)`, `execute` at leaves 0, 1, 2 and 5,
@@ -250,7 +250,7 @@ the packet.
 
 * The positive life cycle (`create` → `cache_subtree(0)` → `execute` × 3 →
   skip to leaf 5 → `cache_subtree(1)` → leaf 1024 → `recover`) runs against
-  the SBF build in CI (`tests/compute_units.rs`). Still to add on the
+  the SBF build in CI (`cu-test/tests/compute_units.rs`). Still to add on the
   BanksClient side: the negative cases (tampered chain value, missing
   cache, cache conflict, index reuse, replay), currently covered host-side
   only (`src/lib.rs` tests, `cchs-core/tests/vectors_compact.rs`).
@@ -277,9 +277,7 @@ cd ../cchs-core && cargo test --features std
 
 # compute units per instruction on the built program (what CI runs)
 cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
-SBF_OUT_DIR=$PWD/target/deploy cargo test -p aegis_account --test compute_units -- --nocapture
-# same flow with the program compiled natively into the test (no .so, no metering)
-AEGIS_NATIVE_FALLBACK=1 cargo test -p aegis_account --test compute_units -- --nocapture
+SBF_OUT_DIR=$PWD/target/deploy cargo test --manifest-path cu-test/Cargo.toml --test compute_units -- --nocapture
 ```
 
 `tests/vectors_compact.rs` replays `cchs-c-20.json`: ops[0] bottom root

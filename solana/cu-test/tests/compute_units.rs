@@ -53,7 +53,7 @@ use solana_sdk::signature::Signer;
 use solana_sdk::transaction::Transaction;
 use solana_sdk::{system_instruction, system_program};
 
-const FIXTURE: &str = include_str!("../../../../evm/test/fixtures/cchs-c-20.json");
+const FIXTURE: &str = include_str!("../../../evm/test/fixtures/cchs-c-20.json");
 
 /// Per-transaction compute limit; every instruction must stay below it.
 const CU_LIMIT: u64 = 1_400_000;
@@ -215,7 +215,7 @@ fn locate_so() -> Option<PathBuf> {
             dirs.push(PathBuf::from(d));
         }
     }
-    dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/deploy"));
+    dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/deploy"));
     dirs.into_iter().map(|d| d.join("aegis_account.so")).find(|p| p.is_file())
 }
 

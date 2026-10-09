@@ -1,0 +1,32 @@
+[package]
+name = "aegis_account_cu"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Compute-unit measurement of the aegis_account program in the BanksClient runtime (tests/compute_units.rs)"
+
+# Its own root, outside the program workspace: the program is built for SBF by
+# the Agave platform tools, whose cargo must parse every manifest in the
+# program's lock file. Keeping solana-program-test and its tree here means the
+# program workspace never sees them.
+[workspace]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+aegis_account = { path = "../programs/aegis_account", features = ["no-entrypoint"] }
+cchs-core = { path = "../../cchs-core", default-features = false }
+anchor-lang = "0.31.1"
+serde_json = "1"
+# Same Agave line as the toolchain CI installs (v2.3.6), so the runtime loads
+# the ELF that `cargo build-sbf` produces.
+solana-program-test = "=2.3.6"
+solana-sdk = "2.3"
+bincode = "1"
+# Re-signs the fixture ops over the on-chain digest (HKDF-SHA256 key derivation
+# with the fixture's master seed, see the test header).
+sha2 = "0.10"
+hmac = "0.12.1"

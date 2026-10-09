@@ -105,6 +105,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install aptos CLI
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}  # the installer queries the GitHub API for the latest release
         run: |
           curl -fsSL "https://aptos.dev/scripts/install_cli.sh" | sh
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -190,7 +192,7 @@ jobs:
       - name: Compute units per instruction (measured on the SBF build)
         env:
           SBF_OUT_DIR: ${{ github.workspace }}/solana/target/deploy
-        run: cargo test -p aegis_account --test compute_units -- --nocapture
+        run: cargo test --manifest-path cu-test/Cargo.toml --test compute_units -- --nocapture
 
   tron:
     name: TRON (TVM build, opcode scan, predictor self-test)
