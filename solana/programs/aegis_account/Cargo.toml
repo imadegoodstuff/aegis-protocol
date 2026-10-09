@@ -2,6 +2,10 @@
 name = "aegis_account"
 version = "0.2.0"
 edition = "2021"
+# The rustc inside the Agave 2.3 platform tools. ../../Cargo.lock is committed
+# and holds every dependency at a version that toolchain can read; refresh it
+# with CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback (see the CI job).
+rust-version = "1.84.0"
 description = "Aegis CCHS-C-20 post-quantum smart account for Solana (SVM): single-packet hash-based signatures"
 
 [lib]

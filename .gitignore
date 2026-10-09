@@ -2,6 +2,10 @@
 target/
 Cargo.lock
 **/target/
+# The Solana program is built by the cargo inside the Agave platform tools
+# (1.84), which cannot parse edition-2024 manifests; its lock file is kept so
+# the SBF build does not drift onto crates that toolchain cannot read.
+!solana/Cargo.lock
 
 # foundry
 evm/out/

@@ -269,6 +269,16 @@ the packet.
 anchor build
 ```
 
+`Cargo.lock` in this directory is committed, unlike the rest of the
+repository: the cargo inside the Agave 2.3 platform tools is 1.84 and cannot
+parse edition-2024 manifests, so the lock holds every dependency at a version
+that toolchain can read (blake3 1.5, proc-macro-crate 3.2, zeroize 1.8.1,
+indexmap 2.10, unicode-segmentation 1.11). To refresh it, run
+`cargo generate-lockfile` with `CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback`
+and pin those five again; `cargo metadata` lists `rust_version` per package
+to confirm nothing above 1.84 remains. `cu-test/` is a separate package with
+its own, uncommitted lock: it runs on the host toolchain.
+
 ## Tests
 
 ```bash

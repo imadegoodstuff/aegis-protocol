@@ -177,7 +177,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: solana }
-      - run: cargo check -p aegis_account --features no-entrypoint
+      - run: cargo check -p aegis_account --features no-entrypoint --locked
       # Pinned to the Agave line of the solana-program-test runtime used by the
       # compute-unit test (programs/aegis_account/Cargo.toml), so the ELF the
       # platform tools emit is one that runtime can load.
@@ -185,15 +185,15 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.6/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      # Lock files are not committed. The cargo inside Agave 2.3 is 1.84 and
-      # cannot parse edition-2024 manifests, which blake3 >= 1.8 pulls in
-      # (digest 0.11, cpufeatures 0.3); solana-program only needs blake3 ^1.5.
+      # solana/Cargo.lock is committed (the only lock file in the repository):
+      # the cargo inside Agave 2.3 is 1.84 and cannot parse edition-2024
+      # manifests, so the lock holds every crate at a version that toolchain
+      # can read (blake3 1.5, proc-macro-crate 3.2, zeroize 1.8.1, indexmap
+      # 2.10, unicode-segmentation 1.11). To refresh it: generate-lockfile with
+      # CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback, then pin those five.
       # The host-side cu-test resolves on its own with the stable toolchain.
       - name: Build the program (SBF)
-        run: |
-          cargo generate-lockfile
-          cargo update -p blake3 --precise 1.5.5
-          cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
+        run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml -- --locked
       - run: ls -l target/deploy/aegis_account.so
       # Replays cchs-c-20.json through the built .so in the BanksClient runtime
       # (create, cache_subtree, execute x5 incl. the skip ops, recover), prints
