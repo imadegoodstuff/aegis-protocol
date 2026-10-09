@@ -33,11 +33,13 @@ jobs:
             if node model/cchs-state.mjs --mutant=$m; then echo "mutant $m not caught"; exit 1; fi
           done
       - run: node model/cchs-client.mjs
+      - run: node model/cchs-client.mjs --chains=2
       - name: known client-rule violations must be caught
         run: |
           for m in record-after-sign restore-then-wait no-partition no-record recovery-random-roots; do
             if node model/cchs-client.mjs --mutant=$m; then echo "mutant $m not caught"; exit 1; fi
           done
+          if node model/cchs-client.mjs --chains=2 --mutant=shared-tree; then echo "mutant shared-tree not caught"; exit 1; fi
 
   core:
     name: Core (Rust)
@@ -178,6 +180,14 @@ jobs:
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
       - run: ls -l target/deploy/aegis_account.so
+      # Replays cchs-c-20.json through the built .so in the BanksClient runtime
+      # (create, cache_subtree, execute x5 incl. the skip ops, recover), prints
+      # the compute units and bytes per instruction as a markdown table (also
+      # appended to the job summary) and fails above 1.4 M CU per instruction.
+      - name: Compute units per instruction (measured on the SBF build)
+        env:
+          SBF_OUT_DIR: ${{ github.workspace }}/solana/target/deploy
+        run: cargo test -p aegis_account --test compute_units -- --nocapture
 
   tron:
     name: TRON (TVM build, opcode scan, predictor self-test)

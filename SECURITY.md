@@ -5,7 +5,7 @@ Aegis has **not** been audited. Nothing in this repository is deployed on a main
 ## 1. Claims
 
 1. **Unforgeability.** Without the master secret, producing a signature that an Aegis account accepts for a message of the attacker's choosing requires a (second) preimage or collision on the underlying hash at the cost given in `CCHS.spec.md` §5.5 (S-20 / K-20: AES-192 yardstick or better under either accounting; C-20: see the two-level label there).
-2. **One-time-key discipline.** No WOTS+ leaf of any epoch ever signs two different messages, under crashes, dropped or reordered transactions, backup restores and several devices, provided the client follows `CCHS.spec.md` §4.3 and the verifier §5.
+2. **One-time-key discipline.** No WOTS+ leaf of any epoch ever signs two different messages, under crashes, dropped or reordered transactions, backup restores, several devices and several chains, provided the client follows `CCHS.spec.md` §3 (one key tree per chain) and §4.3, and the verifier §5.
 3. **Replay resistance.** A valid signature is bound to `(chainId, account, epoch, idx, target, value, data)`; it is accepted at most once by one account on one chain.
 4. **Cache soundness.** A cached bottom-subtree root is only ever accepted for the `(epoch, treeIdx)` it was proven for, and the proof bound it to the root current at that time.
 5. **Recovery.** The holder of the master can move the account to a new root (same master, next epoch; or a fresh master) using a one-time key that is never used for spending, and the previous root is dead afterwards.
@@ -24,7 +24,7 @@ Not claimed: anonymity, resistance to a compromised client device while it holds
 | Property | Check | Where | In CI |
 |---|---|---|---|
 | Verifier logic (claims 2–4 on the chain side) | bounded model check, 4 seeded bugs caught | `model/cchs-state.mjs` | yes |
-| Client rules (claim 2 on the device side) | bounded model check, 5 seeded rule violations caught | `model/cchs-client.mjs` | yes |
+| Client rules (claim 2 on the device side) | bounded model check, 6 seeded rule violations caught (incl. one tree shared between two chains) | `model/cchs-client.mjs` | yes |
 | Wallet implements the client rules | unit tests over a storage shim | `wallet/scripts/check-index-discipline.mts` | yes |
 | Contract behaviour per set | Foundry, 20 tests × 3 sets incl. index reuse, backward index after skip, stale root, wrong chain | `evm/test/AegisCCHS.t.sol` | yes |
 | Full life cycle with costs | create → first → cached → skip → rotation → old root rejected → withdraw, in an EVM | `wallet/scripts/evm-flow.mts` | yes |

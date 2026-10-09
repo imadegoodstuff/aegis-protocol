@@ -25,6 +25,9 @@ This document defines the Aegis account model, key and address derivation, and t
 BIP-39 mnemonic (24 words, 256-bit entropy)
   └─ PBKDF2-HMAC-SHA512(mnemonic, "mnemonic" ‖ passphrase, 2048) → 64-byte seed
        ├─ HKDF-SHA256(seed, "aegis/cchs/master/v1", 32)       → 32-byte CCHS master
+       │    └─ HKDF-SHA256(master, "aegis/cchs/chain/v1" ‖ tag, 32) → CCHS key of one chain
+       │         tag = 0x00 ‖ chainId (u64 BE) for EVM chains, 0x01 ‖ utf8(label) otherwise
+       │         (epoch e ≥ 1 after recoveries: HKDF-SHA256(key, "aegis/cchs/epoch/v1" ‖ e, 32))
        ├─ HKDF-SHA512(seed, "aegis/sphincs+/192s/v1", 72)     → SLH-DSA-SHAKE-192s seed
        ├─ HKDF-SHA512(seed, "aegis/ecdsa/fallback/v1", 32)    → secp256k1 key (EVM, Cosmos, …)
        └─ HKDF-SHA512(seed, "aegis/ed25519/v1", 32)           → ed25519 key (Solana, Aptos, Sui, NEAR, TON)
@@ -32,7 +35,7 @@ BIP-39 mnemonic (24 words, 256-bit entropy)
 
 (HKDF salt is empty in every case. Labels and hash functions match `wallet/src/aegis/derive.ts` and `cchsAccount.ts`.)
 
-All CCHS secret material (every WOTS+ chain of every leaf of every tree) is derived lazily from the 32-byte master as specified in `CCHS.spec.md` §3; the same master feeds every parameter set under a distinct secret-key label per set (`cchs/sk` for `CCHS-S-20`, `cchs/sk/k` for `CCHS-K-20`, `cchs/sk/c` for `CCHS-C-20`) and the Bitcoin WOTS+ tree (S-20 label, layer byte `0xb0`), so no secret value is hashed under two different functions. The client stores nothing else. `evm/test/fixtures/cchs-derivation.json` pins this derivation end to end for one mnemonic.
+All CCHS secret material (every WOTS+ chain of every leaf of every tree) is derived lazily from the 32-byte master as specified in `CCHS.spec.md` §3: one key per chain, so that no one-time leaf exists on two chains (the chain id in the digest prevents replay, not reuse), and within a chain the same key feeds every parameter set under a distinct secret-key label per set (`cchs/sk` for `CCHS-S-20`, `cchs/sk/k` for `CCHS-K-20`, `cchs/sk/c` for `CCHS-C-20`) and the Bitcoin WOTS+ tree (key of label `bitcoin`, S-20 label, layer byte `0xb0`), so no secret value is hashed under two different functions. The client stores nothing else. `evm/test/fixtures/cchs-derivation.json` pins this derivation end to end for one mnemonic.
 
 ---
 
@@ -83,7 +86,7 @@ mapping(uint256 => bytes32) cachedRoot;   // key = (epoch << 64) | bottomTreeIdx
 
 Two contracts share this interface via `AegisCCHSBase`: `AegisCCHS` (`CCHS-S-20`, SHA-256) and `AegisCCHSK` (`CCHS-K-20`, keccak256, EVM default). Both: w = 16, 67 chains, two layers of height 10, 2^20 signatures, 256 recoveries.
 
-`AegisCCHSFactory.deploy(root, recRoot, sha256Variant)` creates either with CREATE2, `salt = keccak256(root ‖ recRoot ‖ variant)`; `predict(...)` returns the address before deployment. Identical factory bytecode at the same address on every EVM chain gives identical account addresses.
+`AegisCCHSFactory.deploy(root, recRoot, sha256Variant)` creates either with CREATE2, `salt = keccak256(root ‖ recRoot ‖ variant)`; `predict(...)` returns the address before deployment. The factory is at the same address on every EVM chain; the roots are per chain (CCHS.spec.md §3 derives one key tree per chain, because a one-time leaf must never sign on two chains), so the account address is per chain too, and still predictable offline.
 
 No proxy, no `selfdestruct`, no setters, no owner.
 

@@ -11,7 +11,7 @@ const store = new Map<string, string>();
   clear: () => store.clear(),
 };
 
-const { nextSigningIndex, markIndexSigned, highestSignedIndex, recordMissing, highestRecoverySigned, markRecoverySigned, epochKey } = await import('../src/aegis/cchsAccount.ts');
+const { nextSigningIndex, markIndexSigned, highestSignedIndex, recordMissing, highestRecoverySigned, markRecoverySigned, epochKey, chainKey, evmChainTag, labelChainTag } = await import('../src/aegis/cchsAccount.ts');
 const { toHex, cchsK, sk } = await import('../src/aegis/cchs.ts');
 
 let failures = 0;
@@ -60,6 +60,16 @@ ok(toHex(e1.master) !== toHex(master.master) && toHex(e1.master) !== toHex(e2.ma
 ok(toHex(sk(master, 0, 0n, 0, 0, 'K')) !== toHex(sk(e1, 0, 0n, 0, 0, 'K')), 'WOTS+ secret values differ across epochs');
 console.log(`epoch 1 master for 0x07..07: ${toHex(e1.master)}`);
 console.log(`epoch 1 K-20 root for 0x07..07: ${toHex(cchsK.keygen(e1).root)}`);
+
+// per-chain keys: one tree per chain, so a leaf of chain A is never a leaf of chain B
+const t1 = evmChainTag(1), t8453 = evmChainTag(8453), tTon = labelChainTag('ton');
+ok(toHex(t1) === '0x000000000000000001' && toHex(t8453) === '0x000000000000002105', 'EVM chain tag is 0x00 || chainId u64 BE');
+ok(toHex(tTon) === '0x01746f6e', 'label chain tag is 0x01 || utf8(label)');
+const c1 = chainKey(master, t1), c1b = chainKey(master, t1), c8453 = chainKey(master, t8453), cTon = chainKey(master, tTon);
+ok(toHex(c1.master) === toHex(c1b.master), 'chain key derivation is deterministic');
+ok(new Set([toHex(master.master), toHex(c1.master), toHex(c8453.master), toHex(cTon.master)]).size === 4, 'master and chain keys are pairwise distinct');
+ok(toHex(sk(c1, 0, 0n, 0, 0, 'K')) !== toHex(sk(c8453, 0, 0n, 0, 0, 'K')), 'WOTS+ secret values differ across chains');
+ok(toHex(epochKey(c1, 1).master) !== toHex(epochKey(c8453, 1).master), 'epoch keys of different chains differ');
 
 if (failures) { console.log(`${failures} check(s) failed`); process.exit(1); }
 console.log('index discipline checks passed');

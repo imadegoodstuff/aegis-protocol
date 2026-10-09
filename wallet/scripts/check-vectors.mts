@@ -1,6 +1,6 @@
 // Replays the shared test vectors against the TypeScript client.
 //
-//   cchs-derivation.json  mnemonic -> seed -> master -> sk(0,0,0,0) -> roots -> EVM account (S-20, K-20)
+//   cchs-derivation.json  mnemonic -> seed -> master -> chain key -> sk(0,0,0,0) -> roots -> EVM account (S-20, K-20)
 //   cchs-s-20.json        roots, bottom roots, every op digest and signature, recovery
 //   cchs-k-20.json        same for K-20
 //
@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { keccak256 } from 'viem';
 import * as cchs from '../src/aegis/cchs.ts';
-import { cchsMaster, predictAccount } from '../src/aegis/cchsAccount.ts';
+import { cchsMaster, chainKey, evmChainTag, labelChainTag, predictAccount } from '../src/aegis/cchsAccount.ts';
 
 const fixtures = fileURLToPath(new URL('../../evm/test/fixtures/', import.meta.url));
 const load = (name: string) => JSON.parse(readFileSync(fixtures + name, 'utf8'));
@@ -27,19 +27,31 @@ const check = (what: string, got: string, want: string) => {
 // 1. derivation
 {
   const d = load('cchs-derivation.json');
-  const key = cchsMaster(d.mnemonic, d.passphrase);
-  check('derivation master', cchs.toHex(key.master), d.master);
-  for (const v of ['S', 'K'] as const) {
-    const set = d.sets[v === 'S' ? 'CCHS-S-20' : 'CCHS-K-20'];
-    const c = cchs.forVariant(v);
-    const cache = new Map<string, cchs.Tree>();
-    const pub = c.keygen(key, cache);
-    check(`${v}-20 sk(0,0,0,0)`, cchs.toHex(cchs.sk(key, 0, 0n, 0, 0, v)), set.sk_0_0_0_0);
-    check(`${v}-20 root`, cchs.toHex(pub.root), set.root);
-    check(`${v}-20 recRoot`, cchs.toHex(pub.recRoot), set.recRoot);
-    check(`${v}-20 bottomRoot0`, cchs.toHex(c.buildTree(key, 0, 0n, cchs.H).root), set.bottomRoot0);
-    check(`${v}-20 EVM account`, predictAccount(set.root, set.recRoot, v), set.evmAccount);
+  const master = cchsMaster(d.mnemonic, d.passphrase);
+  check('derivation master', cchs.toHex(master.master), d.master);
+  for (const ch of d.chains) {
+    const tag = ch.kind === 'evm' ? evmChainTag(ch.chainId) : labelChainTag(ch.label);
+    const name = ch.kind === 'evm' ? `chain ${ch.chainId}` : `chain "${ch.label}"`;
+    check(`${name} tag`, cchs.toHex(tag), ch.tag);
+    const key = chainKey(master, tag);
+    check(`${name} key`, cchs.toHex(key.master), ch.chainKey);
+    for (const v of ['S', 'K'] as const) {
+      const set = ch.sets[v === 'S' ? 'CCHS-S-20' : 'CCHS-K-20'];
+      if (!set) continue;
+      const c = cchs.forVariant(v);
+      const cache = new Map<string, cchs.Tree>();
+      const pub = c.keygen(key, cache);
+      check(`${name} ${v}-20 sk(0,0,0,0)`, cchs.toHex(cchs.sk(key, 0, 0n, 0, 0, v)), set.sk_0_0_0_0);
+      check(`${name} ${v}-20 root`, cchs.toHex(pub.root), set.root);
+      check(`${name} ${v}-20 recRoot`, cchs.toHex(pub.recRoot), set.recRoot);
+      check(`${name} ${v}-20 bottomRoot0`, cchs.toHex(c.buildTree(key, 0, 0n, cchs.H).root), set.bottomRoot0);
+      if (set.evmAccount) check(`${name} ${v}-20 EVM account`, predictAccount(set.root, set.recRoot, v), set.evmAccount);
+    }
   }
+  // Trees of different chains are different trees: the first secret value already differs.
+  const a = chainKey(master, evmChainTag(1)), b = chainKey(master, evmChainTag(8453));
+  const same = cchs.toHex(cchs.sk(a, 0, 0n, 0, 0, 'K')) === cchs.toHex(cchs.sk(b, 0, 0n, 0, 0, 'K'));
+  check('chains 1 and 8453 share no leaf secret', same ? 'shared' : 'distinct', 'distinct');
 }
 
 // 2. signature vectors

@@ -1,7 +1,9 @@
 // Bitcoin: flat Taproot tree of WOTS+ leaves (CCHS.spec.md §7.1a).
 //
 // What this file does today:
-//   - derives 2^h one-time WOTS+ keys (w = 16, 67 chains) from the CCHS master,
+//   - derives 2^h one-time WOTS+ keys (w = 16, 67 chains) from the CCHS key of
+//     the Bitcoin chain (chainKey(master, labelChainTag('bitcoin')), never the
+//     bare master or another chain's key: a leaf exists on one chain only),
 //     chain function F(x) = SHA256(x) (Script has no tweakable hash),
 //   - emits one tapleaf script per key that verifies all 67 chains against the
 //     hard-coded public values and checks the Winternitz checksum arithmetically,

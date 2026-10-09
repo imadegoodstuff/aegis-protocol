@@ -1,29 +1,72 @@
 {
- "purpose": "Cross-implementation derivation vector. A client that derives a different master, root or address from this mnemonic is not compatible with the reference.",
+ "purpose": "Cross-implementation derivation vector. A client that derives a different master, chain key, root or address from this mnemonic is not compatible with the reference. One key tree per chain: a WOTS+ leaf of one chain is never a leaf of another.",
  "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
  "passphrase": "",
  "seed": "0x408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840",
  "masterInfo": "aegis/cchs/master/v1",
  "master": "0x4cfc1044ab28a593bd9509aa18e621d9e513504a11920e2957fc03e9b79421ed",
+ "chainInfo": "aegis/cchs/chain/v1",
+ "chainTag": {
+  "evm": "0x00 || chainId as u64 big-endian",
+  "other": "0x01 || utf8(label of the digest)"
+ },
+ "epochInfo": "aegis/cchs/epoch/v1",
  "skLabels": {
   "S": "cchs/sk",
   "K": "cchs/sk/k",
   "C": "cchs/sk/c"
  },
- "sets": {
-  "CCHS-S-20": {
-   "root": "0xd6ff6c2fadde70e623c3b4e6cc4f98a18cb9acbcee33be49d97c6cb1b735649c",
-   "recRoot": "0x0a56f9ba227f2bd9ac3de27ad57195e3ab41635bf9779be95608d1af5354a643",
-   "bottomRoot0": "0x82ebd84d2b11c49e1c8bf8904c1b1d5e456842b80a7c5ccc99d73d3053dbb127",
-   "sk_0_0_0_0": "0x8ef3d162035711af18df0a5f762693ca15035d3b8b94213ec805a9cd2273610b",
-   "evmAccount": "0x740A9294A5B120E42893Bd6Cf78aF266b2D422AA"
+ "chains": [
+  {
+   "kind": "evm",
+   "chainId": 1,
+   "tag": "0x000000000000000001",
+   "chainKey": "0xb84dd2f7c7b64ae1d8cc6b8d40333a2cd8de138c58cb7f3f139dddd2f1740a1b",
+   "sets": {
+    "CCHS-K-20": {
+     "root": "0x31c20ae56f8091971f380dc986c0546b4c1fca6b907e62692a314c95612b0987",
+     "recRoot": "0xedc01010d75141af8b6209f39ead6dbc531fc6697c6f6fd93331f2e09e24bc17",
+     "bottomRoot0": "0xabfd6303fdcb3c81dd105a4419a78741acf2f5d60f2232c61611c72d17c399d2",
+     "sk_0_0_0_0": "0x33c703aa685bd02b1f5bf090412a0ebb92d03a41ea50b349e06d096b700c4055",
+     "evmAccount": "0x3C8f31906317A986aeE5cbBAa989BbC684900630"
+    },
+    "CCHS-S-20": {
+     "root": "0xa4d83ab36b3e15a032b216b51c6d257de527a387dfdd7668c0158eade201f9c5",
+     "recRoot": "0x7a5fab91c3d8769736c3d34dc1d263be3f7428828e84795dcbe6680432970323",
+     "bottomRoot0": "0xe4e416fd35150d57cc6278b53c74716191ca40f41f12126fc7d28603616c7fc3",
+     "sk_0_0_0_0": "0x1c695c7ccc77ed792d686dc306657b99ee7980f6c6209a7da34d4e986065f973",
+     "evmAccount": "0x7E8F3eC9aa3e75D6BE349E2409F20aCFD8d382f9"
+    }
+   }
   },
-  "CCHS-K-20": {
-   "root": "0x37b2bec29a3d8165741f8c98fa282e523fa20252b15d6a87b809c735e82f544f",
-   "recRoot": "0x1f9f2f82dadc04d769e0cd1a950c94219c3387d48285795cdd35d82741af499c",
-   "bottomRoot0": "0x2f1e74d3e00cb381e95ae3f3dcd3980fc3fe294ad64884bb8aa275a17b88cc44",
-   "sk_0_0_0_0": "0xd0ade5ad2396c75e1043b1e7de1124c5d85df54975baef2430c1b890f0a80441",
-   "evmAccount": "0x769aA2af747392CB2eF29095B962aE161C7D8a99"
+  {
+   "kind": "evm",
+   "chainId": 8453,
+   "tag": "0x000000000000002105",
+   "chainKey": "0xf0500a60deb321b0a22acc79552d67b3b3267dfb206eabfb4d76359165f3bfae",
+   "sets": {
+    "CCHS-K-20": {
+     "root": "0x7fb8a6d3c3729a356c5ff0c7d994dc2979f09e92690b2a1bc01e791d7357dfa2",
+     "recRoot": "0xd85a63f6b89c71787f5d51fb54a6ab62591ca010f1680dc6f944283c3146b458",
+     "bottomRoot0": "0x553d073f49716b824dbeb4f7f550b3c734096d0c1a94de7c286cb329ada4bc10",
+     "sk_0_0_0_0": "0xbe23441ce26726879a56ae14ca7816412ee395f7a3aba7e1372d817374b48f89",
+     "evmAccount": "0x928f3b10fC0DCb43f8A748AD9cbc3A4E93F409B9"
+    }
+   }
+  },
+  {
+   "kind": "label",
+   "label": "ton",
+   "tag": "0x01746f6e",
+   "chainKey": "0xb57bd7b60cacb986f1454754db5bfbb776d9570f4fab296ea7fa2652e4ff5e1c",
+   "sets": {
+    "CCHS-S-20": {
+     "root": "0x715e76e5547fbdf9241854af469dd6d55a858f053780a989e942aef30d3b0fc8",
+     "recRoot": "0x6256dfdfb83cc9081e8e0dad8c74ea625c8e75642e448b8ed161eb06e3fc5393",
+     "bottomRoot0": "0x151b45e7cc92f34ab3b41aa9177f71d74566de6ba15bf1874fe7cc4b611325e7",
+     "sk_0_0_0_0": "0x06f4be240a105c2379d93097da0b1ace79fa65ee2ba9c05c3c412adde6fb63be"
+    }
+   }
   }
- }
+ ]
 }

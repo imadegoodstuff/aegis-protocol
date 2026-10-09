@@ -17,7 +17,7 @@ import { Common, Hardfork, Chain } from '@ethereumjs/common';
 import { Address, Account, hexToBytes, bytesToHex } from '@ethereumjs/util';
 import { encodeFunctionData, decodeFunctionResult, keccak256, type Hex } from 'viem';
 import * as cchs from '../src/aegis/cchs.ts';
-import { epochKey, predictAccount } from '../src/aegis/cchsAccount.ts';
+import { chainKey, epochKey, evmChainTag, predictAccount } from '../src/aegis/cchsAccount.ts';
 import artifacts from '../src/aegis/cchsArtifacts.json' with { type: 'json' };
 
 const common = new Common({ chain: Chain.Mainnet, hardfork: Hardfork.Cancun });
@@ -55,7 +55,8 @@ for (const variant of ['S', 'K'] as const) {
   const set = variant === 'S' ? 'S-20' : 'K-20';
   const c = cchs.forVariant(variant);
   const abi = artifacts.accountAbi;
-  const master: cchs.CchsKey = { master: new Uint8Array(32).fill(0x42) };
+  // The tree of this chain (chainId 1 in the VM): master -> chain key, as the wallet does.
+  const master = chainKey({ master: new Uint8Array(32).fill(0x42) }, evmChainTag(1));
   const cache = new Map<string, cchs.Tree>();
   const pub = c.keygen(master, cache);
   const root = cchs.toHex(pub.root) as Hex, recRoot = cchs.toHex(pub.recRoot) as Hex;
@@ -114,7 +115,7 @@ for (const variant of ['S', 'K'] as const) {
   if ((await spend({ record: false, tamper: (s) => { s.l0.wots[5][0] ^= 1; } })).ok) fail(`${set} TAMPERED CHAIN VALUE ACCEPTED`);
   if ((await spend({ record: false, tamper: (s) => { s.l0.auth[2][0] ^= 1; } })).ok) fail(`${set} TAMPERED AUTH PATH ACCEPTED`);
 
-  // 6. rotation: recovery to epoch 1 with keys derived from the same master
+  // 6. rotation: recovery to epoch 1 with keys derived from the same chain key
   const recNonce = Number(await view('recNonce'));
   const next = epochKey(master, 1);
   const nextCache = new Map<string, cchs.Tree>();

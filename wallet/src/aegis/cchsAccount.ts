@@ -1,11 +1,21 @@
-// One identity, every chain.
+// One mnemonic, one independent key tree per chain.
 //
-//   mnemonic ─BIP-39─▶ seed ─HKDF-SHA256("aegis/cchs/master/v1")─▶ 32-byte CCHS master
-//   master ─▶ CCHS-K-20 (root, recRoot)   → EVM account address (same on every EVM chain)
-//   master ─▶ CCHS-S-20 (root, recRoot)   → every non-EVM verifier
+//   mnemonic ─BIP-39─▶ seed ─HKDF-SHA256("aegis/cchs/master/v1")─▶ 32-byte master
+//   master   ─HKDF-SHA256("aegis/cchs/chain/v1" ‖ tag)─▶ 32-byte chain key
+//              tag = 0x00 ‖ chainId (u64 BE)   for EVM chains
+//                    0x01 ‖ utf8(label)        for other chains (the label of the digest)
+//   chain key ─▶ CCHS-K-20 (root, recRoot)  → the EVM account address on that chain
+//   chain key ─▶ CCHS-S-20 / C-20           → the verifier of that chain
 //
-// The EVM address is a pure function of the K-20 roots and the factory init
-// code, so it is known before anything is deployed on any chain.
+// A WOTS+ leaf signs one message. The chain id inside the digest stops a
+// signature from being replayed on another chain, but it would not stop the
+// *same leaf* from signing a second, different digest there if both chains
+// used one tree: leaf 0 on chain A and leaf 0 on chain B would then be two
+// messages under one key. Deriving a separate tree per chain removes that by
+// construction, with no coordination between chains or devices. The price is
+// that the account address differs per chain; it is still a pure function of
+// the mnemonic, the chain id and the factory init code, so every address is
+// known before anything is deployed anywhere.
 
 import { mnemonicToSeedSync } from '@scure/bip39';
 import { hkdf } from '@noble/hashes/hkdf';
@@ -17,10 +27,31 @@ import { CchsPool } from './cchsPool';
 import artifacts from './cchsArtifacts.json';
 
 const MASTER_INFO = new TextEncoder().encode('aegis/cchs/master/v1');
+const CHAIN_INFO = new TextEncoder().encode('aegis/cchs/chain/v1');
 
 export function cchsMaster(mnemonic: string, passphrase = ''): CchsKey {
   const seed = mnemonicToSeedSync(mnemonic.trim(), passphrase);
   return { master: hkdf(sha256, seed, undefined, MASTER_INFO, 32) };
+}
+
+/** Chain tag of an EVM chain: 0x00 ‖ chainId as 8-byte big-endian. */
+export function evmChainTag(chainId: number | bigint): Uint8Array {
+  const tag = new Uint8Array(9);
+  new DataView(tag.buffer).setBigUint64(1, BigInt(chainId));
+  return tag;
+}
+/** Chain tag of a non-EVM chain: 0x01 ‖ utf8(label), label as used in that chain's digest ("solana", "ton", …). */
+export function labelChainTag(label: string): Uint8Array {
+  const l = new TextEncoder().encode(label);
+  const tag = new Uint8Array(1 + l.length);
+  tag[0] = 1; tag.set(l, 1);
+  return tag;
+}
+/** Key tree of one chain: HKDF-SHA256(master, info = "aegis/cchs/chain/v1" ‖ tag, 32). */
+export function chainKey(master: CchsKey, tag: Uint8Array): CchsKey {
+  const info = new Uint8Array(CHAIN_INFO.length + tag.length);
+  info.set(CHAIN_INFO, 0); info.set(tag, CHAIN_INFO.length);
+  return { master: hkdf(sha256, master.master, undefined, info, 32) };
 }
 
 export const FACTORY_ADDRESS = artifacts.factory.address as Address;
@@ -105,43 +136,45 @@ export function markRecoverySigned(chainId: number, account: Address, recNonce: 
 
 const EPOCH_INFO = new TextEncoder().encode('aegis/cchs/epoch/v1');
 /**
- * Signing key for `epoch`. Epoch 0 is the master itself (so roots, addresses
- * and every published vector are unchanged); epoch e > 0 is
- * HKDF-SHA256(master, info = "aegis/cchs/epoch/v1" ‖ e as 8-byte BE, 32).
+ * Signing key of `epoch` on one chain. Epoch 0 is the chain key itself; epoch
+ * e > 0 is HKDF-SHA256(chainKey, info = "aegis/cchs/epoch/v1" ‖ e as 8-byte BE, 32).
  * Distinct per epoch, so a WOTS+ secret value is never reused across epochs.
  */
-export function epochKey(master: CchsKey, epoch: number): CchsKey {
-  if (epoch === 0) return master;
+export function epochKey(chain: CchsKey, epoch: number): CchsKey {
+  if (epoch === 0) return chain;
   const info = new Uint8Array(EPOCH_INFO.length + 8);
   info.set(EPOCH_INFO, 0);
   new DataView(info.buffer).setBigUint64(EPOCH_INFO.length, BigInt(epoch));
-  return { master: hkdf(sha256, master.master, undefined, info, 32) };
+  return { master: hkdf(sha256, chain.master, undefined, info, 32) };
+}
+
+/** The K-20 tree of one EVM chain at epoch 0 and the account address it fixes there. */
+export interface ChainIdentity {
+  chainId: number;
+  key: CchsKey;
+  root: Hex;
+  recRoot: Hex;
+  address: Address;
+  /** Trees built so far for this chain's epoch-0 key, as used by `sign`. */
+  trees: Map<string, Tree>;
+  tookMs: number;
 }
 
 export interface CchsIdentity {
   master: CchsKey;
-  k: { root: Hex; recRoot: Hex; address: Address };
-  s: { root: Hex; recRoot: Hex };
-  /** Trees needed for the first signature on each set; keys as used by `sign`. */
-  trees: { K: Map<string, Tree>; S: Map<string, Tree> };
-  tookMs: number;
+  /** One entry per EVM chain derived so far. */
+  evm: Map<number, ChainIdentity>;
 }
 
-/** Full identity via the worker pool. ~1.5 s on a 6-core machine for both sets. */
-export async function deriveCchsIdentity(mnemonic: string, pool: CchsPool, passphrase = ''): Promise<CchsIdentity> {
-  const master = cchsMaster(mnemonic, passphrase);
-  const trees = { K: new Map<string, Tree>(), S: new Map<string, Tree>() };
+/**
+ * K-20 tree of one EVM chain via the worker pool: top tree and recovery tree
+ * (the first bottom subtree is built when the first signature needs it).
+ */
+export async function deriveChainIdentity(master: CchsKey, chainId: number, pool: CchsPool): Promise<ChainIdentity> {
+  const key = chainKey(master, evmChainTag(chainId));
+  const trees = new Map<string, Tree>();
   const t0 = performance.now();
-  const [k, s] = await Promise.all([
-    pool.keygen(master, 'K', trees.K),
-    pool.keygen(master, 'S', trees.S, { firstSubtree: false }),
-  ]);
-  const kRoot = toHex(k.root), kRec = toHex(k.recRoot);
-  return {
-    master,
-    k: { root: kRoot, recRoot: kRec, address: predictAccount(kRoot, kRec, 'K') },
-    s: { root: toHex(s.root), recRoot: toHex(s.recRoot) },
-    trees,
-    tookMs: performance.now() - t0,
-  };
+  const pub = await pool.keygen(key, 'K', trees, { firstSubtree: false });
+  const root = toHex(pub.root) as Hex, recRoot = toHex(pub.recRoot) as Hex;
+  return { chainId, key, root, recRoot, address: predictAccount(root, recRoot, 'K'), trees, tookMs: performance.now() - t0 };
 }

@@ -97,8 +97,13 @@ master ← 32 random bytes, or from a BIP-39 mnemonic exactly as SPEC.md §2:
          seed   = PBKDF2-HMAC-SHA512(mnemonic, "mnemonic" ‖ passphrase, 2048)   # BIP-39, 64 B
          master = HKDF-SHA256(seed, salt = ∅, info = "aegis/cchs/master/v1", 32)
 
+key(chain) = HKDF-SHA256(master, salt = ∅, info = "aegis/cchs/chain/v1" ‖ tag(chain), 32)   # one tree per chain
+    tag(EVM chain)   = 0x00 ‖ chainId as 8 bytes BE
+    tag(other chain) = 0x01 ‖ utf8(label)       # the label of that chain's digest: "solana", "ton", …
+
 label(set) = "cchs/sk" (S-20) | "cchs/sk/k" (K-20) | "cchs/sk/c" (C-20, §5.5)
-sk(layer, treeIdx, leafIdx, chainIdx) = HKDF-SHA256(master, salt = ∅, label(set) ‖ layer ‖ treeIdx ‖ leafIdx ‖ chainIdx, 32)
+sk(layer, treeIdx, leafIdx, chainIdx) = HKDF-SHA256(key, salt = ∅, label(set) ‖ layer ‖ treeIdx ‖ leafIdx ‖ chainIdx, 32)
+    # key = key(chain) at epoch 0, key_e(chain) after e recoveries (§8)
     # layer: 1 byte, treeIdx: 8 bytes BE, leafIdx: 4 bytes BE, chainIdx: 1 byte
 
 WOTS_pk(layer, t, j):
@@ -118,9 +123,11 @@ root = TreeRoot(d-1, 0)     # top tree only; ~2^h × 1005 hashes
 
 Account on-chain: `root` (immutable), `nextIdx = 0`, `nonce = 0`, `cachedRoot = {}`.
 
-All secret material is derived lazily from `master`. Client stores 32 bytes.
+All secret material is derived lazily from `master`. Client stores 32 bytes (plus the index record of §4.3).
 
-There is one derivation path, and it is the one above; an implementation that derives `master` any other way produces a different account. Each parameter set has its own secret-key label, so no WOTS+ secret value is ever exposed through two different one-way functions (S-20 hashes with SHA-256, K-20 with keccak256). `evm/test/fixtures/cchs-derivation.json` fixes the whole chain for one mnemonic (`abandon` ×23 `art`, empty passphrase): seed, master, `sk(0,0,0,0)`, `root`, `recRoot`, `bottomRoot0` and the predicted EVM account for S-20 and K-20. A client is compatible with the reference if and only if it reproduces that file.
+**One tree per chain.** The digest of §4 contains the chain id, which stops a signature from being *replayed* on another chain. It does not stop the same leaf from being *used* on another chain: if two chains shared one tree, leaf 0 on chain A and leaf 0 on chain B would sign two different digests under one WOTS+ key, which is exactly the reuse a one-time signature forbids, and no on-chain `nextIdx` can prevent it because each chain sees only its own. Deriving `key(chain)` per chain makes leaves of different chains different leaves by construction; nothing has to be coordinated between chains, devices or records. The consequence is that the account address differs per chain: it is still a pure function of the mnemonic, the chain id and the factory init code, and is known before anything is deployed. The CREATE2 *factory* is at the same address on every EVM chain; the *accounts* it creates are not.
+
+There is one derivation path, and it is the one above; an implementation that derives `master` or `key(chain)` any other way produces a different account. Each parameter set has its own secret-key label, so no WOTS+ secret value is ever exposed through two different one-way functions (S-20 hashes with SHA-256, K-20 with keccak256). `evm/test/fixtures/cchs-derivation.json` fixes the whole chain for one mnemonic (`abandon` ×23 `art`, empty passphrase): seed, master, then for chain id 1, chain id 8453 and the label `ton` the tag, the chain key, `sk(0,0,0,0)`, `root`, `recRoot`, `bottomRoot0` and (EVM) the predicted account. A client is compatible with the reference if and only if it reproduces that file. The signature vectors `cchs-s-20.json` / `cchs-k-20.json` / `cchs-c-20.json` start from a given 32-byte key, which plays the role of `key(chain)`.
 
 ---
 
@@ -187,7 +194,8 @@ A WOTS+ key signs one message. Two signatures under the same leaf on different m
 4. **Several devices.** Devices sharing a master each keep their own `signedMax`; they are safe only if they never sign the same leaf. The reference wallet is single-signer. A multi-device deployment partitions the index space (device *d* uses subtrees ≡ *d* mod *n*, which rule 1 permits) or routes signing through one device.
 5. **Lost or rolled-back record.** A device whose record is missing or may be older than the signatures it produced (new install with the account already in use, storage cleared, restore from a backup) must not sign under the current epoch at all. It cannot know which leaves the lost record covered, and a transaction it signed earlier may still be sitting in a mempool with a leaf above `nextIdx`; "wait until the pool drains, then take `nextIdx` as the lower bound" is not sufficient (the model in §6 produces the counterexample: sign at leaf 0, drop, restore, pool empty, sign a different message at leaf 0). The complete rule is to leave the index space: perform a recovery (§8) to the next epoch, whose keys are a different derivation, and start a fresh record there. The reference wallet refuses to sign when `nextIdx > 0` and no record exists for `(chain, account, epoch)`, and offers the rotation instead. The record is written per epoch.
 6. **Recovery messages are deterministic.** The roots of epoch `e + 1` are a pure function of the master and `e + 1` (§8), so the recovery message at `(epoch, recNonce)` is fixed; a dropped rotation that is signed again is the same message under the same recovery leaf, not a second one. The recovery leaf is nevertheless recorded before signing, like any other leaf. A recovery to a *fresh* master (the compromise case) is a different message and must therefore never be attempted at a `recNonce` for which a deterministic rotation has already been signed; the wallet records both under one counter.
-7. **Capacity.** Abandoned leaves cost capacity, not security: 2^20 leaves at one operation per minute last about two years even if every other leaf is abandoned. Recovery (§8) opens a fresh index space under a new root.
+7. **Several chains.** Each chain has its own tree (`key(chain)`, §3). A client must never build a tree for chain B from the key of chain A, however convenient a shared address would be; the chain id in the digest does not make that safe. The model (§6) shows the violation in six states for a client that shares one tree between two chains.
+8. **Capacity.** Abandoned leaves cost capacity, not security: 2^20 leaves at one operation per minute last about two years even if every other leaf is abandoned. Recovery (§8) opens a fresh index space under a new root.
 
 Rule 1 also settles two races: a transaction prepared with a top layer still succeeds if someone else registered the subtree in the meantime (`executeFirst` ignores a redundant proof), and a cached-path transaction prepared before a recovery fails cleanly (new epoch, empty cache) rather than being replayable.
 
@@ -266,7 +274,7 @@ The top-layer message is the bottom subtree root `R_0`, which contains no chain 
 
 ### 5.4 Factory and same-address deployment
 
-`evm/src/AegisCCHSFactory.sol` deploys either set with CREATE2, `salt = keccak256(root ‖ recRoot ‖ variant)`. With metadata-free bytecode and the factory itself placed by the same deployer at the same nonce on every EVM chain, `(root, recRoot, variant)` maps to one address on all of them. `deploy()` is permissionless and idempotent; `predict()` is pure in the chain ID.
+`evm/src/AegisCCHSFactory.sol` deploys either set with CREATE2, `salt = keccak256(root ‖ recRoot ‖ variant)`. With metadata-free bytecode and the factory itself at the same address on every EVM chain, `(root, recRoot, variant)` maps to one address on all of them; since the roots are derived per chain (§3), each chain's account has its own address. `deploy()` is permissionless and idempotent; `predict()` is pure in the chain ID.
 
 ### 5.5 Split cache fill and the single-packet set (CCHS-C-20)
 
@@ -350,7 +358,7 @@ Sketch. Both entry points require `idx ≥ nextIdx` and set `nextIdx = idx + 1` 
 
 **State machine.** The account's authorization state is `(root, recRoot, epoch, nextIdx, nonce, recNonce, cachedRoot)`. `model/cchs-state.mjs` explores every reachable state of an abstracted model (`h = 1`, two subtrees, one recovery, up to six owner signatures; the hash is replaced by "the recomputed root is right exactly when the inputs are the ones signed") under an adversary that may submit any signature it has seen at any index, target or entry point, in any order, and may forge freely with the bottom keys of any subtree that is entirely behind `nextIdx`. C3, C4, C5 and non-forgeability are checked on every one of ~10⁷ submissions, and four deliberately broken verifiers (no index check, cache key without epoch, index not in the digest, top layer not bound to `R_0`) are each caught. It runs in CI. It is a bounded model check of the transition logic, not a proof about the hash function.
 
-**Client model.** `model/cchs-client.mjs` checks the other half: the rules of §4.3 under the events the chain cannot see. Two devices share a master; each keeps a persistent `signedMax` and may back it up and later restore the older copy; signed transactions enter a pool from which they land (verifier rules) or are dropped in any order; recovery to a new epoch is available; every signature ever produced is remembered. The invariant is ONE-MESSAGE: no `(epoch, leaf)` ever signs two different messages. It holds on every reachable state (≈ 1.7 × 10⁵ states, 6.4 × 10⁵ transitions at the model's bounds), and each of five weakened clients is caught with a concrete trace: recording the index after signing (crash in between), restoring a backup and merely waiting for the pool to drain instead of rotating, two devices without partition, no record at all, and recovery with non-deterministic new roots. `wallet/scripts/check-index-discipline.mts` tests the wallet's implementation of the same rules, and `wallet/scripts/evm-flow.mts` runs the full life cycle including a rotation against the shipped contracts.
+**Client model.** `model/cchs-client.mjs` checks the other half: the rules of §4.3 under the events the chain cannot see. Two devices share a master; each keeps a persistent `signedMax` and may back it up and later restore the older copy; signed transactions enter a pool from which they land (verifier rules) or are dropped in any order; recovery to a new epoch is available; every signature ever produced is remembered. The invariant is ONE-MESSAGE: no `(epoch, leaf)` ever signs two different messages. It holds on every reachable state (≈ 1.7 × 10⁵ states, 6.4 × 10⁵ transitions at the model's bounds), and each of five weakened clients is caught with a concrete trace: recording the index after signing (crash in between), restoring a backup and merely waiting for the pool to drain instead of rotating, two devices without partition, no record at all, and recovery with non-deterministic new roots. A second configuration (`--chains=2`) runs two chains with independent on-chain state from one mnemonic; the reference client (one tree per chain, §3) holds, and the mutant `shared-tree`, which signs on both chains from one tree, violates ONE-MESSAGE after two signatures: leaf 0 signs the digest of chain 0 and then the digest of chain 1. `wallet/scripts/check-index-discipline.mts` tests the wallet's implementation of the same rules, and `wallet/scripts/evm-flow.mts` runs the full life cycle including a rotation against the shipped contracts.
 
 ### 6.3 Not covered
 
@@ -416,14 +424,14 @@ recover(newRoot, newRecRoot, sig_rec, auth_rec):
 
 **Where the new roots come from.** Two cases.
 
-- *Rotation* (lost client record, §4.3 rule 5; precaution; moving to a fresh index space): the keys of epoch `e` are derived from the same master,
+- *Rotation* (lost client record, §4.3 rule 5; precaution; moving to a fresh index space): the keys of epoch `e` are derived from the same chain key,
 
   ```
-  master_0 = master
-  master_e = HKDF-SHA256(master, salt = ∅, info = "aegis/cchs/epoch/v1" ‖ e as 8-byte BE, 32)    (e ≥ 1)
+  key_0(chain) = key(chain)                                                                    (§3)
+  key_e(chain) = HKDF-SHA256(key(chain), salt = ∅, info = "aegis/cchs/epoch/v1" ‖ e as 8-byte BE, 32)    (e ≥ 1)
   ```
 
-  and every tree of epoch `e` (top, bottom subtrees, recovery) is built from `master_e` with the per-set labels of §3. Epoch 0 is the master itself, so roots, addresses and all published vectors are unchanged. `newRoot, newRecRoot` for the rotation at epoch `e` are the roots of `master_{e+1}`; the recovery signature is made with the recovery tree of `master_e` at leaf `recNonce`. The message is therefore a pure function of `(chainId, account, recNonce, e)`. A device needs only the mnemonic and the on-chain `epoch` to derive the current keys; it checks the derived roots against the on-chain `root`/`recRoot` before signing with them.
+  and every tree of epoch `e` (top, bottom subtrees, recovery) is built from `key_e(chain)` with the per-set labels of §3. Epoch 0 is the chain key itself. `newRoot, newRecRoot` for the rotation at epoch `e` are the roots of `key_{e+1}`; the recovery signature is made with the recovery tree of `key_e` at leaf `recNonce`. The message is therefore a pure function of `(chainId, account, recNonce, e)`. A device needs only the mnemonic, the chain and the on-chain `epoch` to derive the current keys; it checks the derived roots against the on-chain `root`/`recRoot` before signing with them.
 - *Compromise* (the master itself may be exposed): the user supplies a new mnemonic, and `newRoot, newRecRoot` are the epoch-0 roots of the new master. The old master's recovery tree signs this once; the new master then runs its own epoch sequence. This path is not deterministic and is subject to §4.3 rule 6.
 
 In both cases the pre-recovery `root` is dead: its signatures are rejected by the epoch-keyed cache and the changed root (C3), as `wallet/scripts/evm-flow.mts` checks after each rotation.

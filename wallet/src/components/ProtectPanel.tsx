@@ -1,7 +1,7 @@
 // Protect: one hash-only identity, one click per chain, any asset.
 //
 // 1. Keys for both CCHS sets are generated in the worker pool from the mnemonic.
-// 2. The EVM account address is predicted offline (same on every EVM chain).
+// 2. One key tree per EVM chain; each account address is predicted offline.
 // 3. Each chain row reads live state over public RPC: factory present?
 //    account deployed? native balance, balances of the ERC-20s you listed.
 // 4. "Protect" switches the injected wallet to that chain and sends one
@@ -21,7 +21,7 @@ import {
 } from "../aegis/wallet";
 import { isValidMnemonic } from "../aegis/derive";
 import { CchsPool } from "../aegis/cchsPool";
-import { deriveCchsIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, recordMissing, epochKey, highestRecoverySigned, markRecoverySigned, type CchsIdentity } from "../aegis/cchsAccount";
+import { cchsMaster, deriveChainIdentity, type ChainIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, recordMissing, epochKey, highestRecoverySigned, markRecoverySigned, type CchsIdentity } from "../aegis/cchsAccount";
 import { cchsK, H, toAbiLayerSig, signatureBytes, toHex, type CchsKey, type Tree } from "../aegis/cchs";
 import CopyBtn from "./CopyBtn";
 
@@ -87,7 +87,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
     return () => poolRef.current?.terminate();
   }, []);
 
-  // Derive identity (debounced) whenever the mnemonic changes.
+  // Derive the identity (debounced) whenever the mnemonic changes: the master,
+  // then one key tree per EVM chain, published as each one completes.
   useEffect(() => {
     if (!valid) { setId(null); return; }
     let cancelled = false;
@@ -95,8 +96,17 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
     const t = setTimeout(async () => {
       try {
         const pool = poolRef.current!;
-        const res = await deriveCchsIdentity(mnemonic, pool);
-        if (!cancelled) { setId(res); setGenMs(res.tookMs); }
+        const master = cchsMaster(mnemonic);
+        const evm = new Map<number, ChainIdentity>();
+        setId({ master, evm });
+        const t0 = performance.now();
+        for (const chain of PROTECT_CHAINS) {
+          const ci = await deriveChainIdentity(master, chain.id, pool);
+          if (cancelled) return;
+          evm.set(chain.id, ci);
+          setId({ master, evm: new Map(evm) });
+          setGenMs(performance.now() - t0);
+        }
       } catch (e) {
         if (!cancelled) setGenErr((e as Error).message);
       }
@@ -104,13 +114,19 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
     return () => { cancelled = true; clearTimeout(t); };
   }, [mnemonic, valid]);
 
-  // Read chain state for every EVM chain once the address is known.
+  // Read chain state for every EVM chain whose address is known. Each
+  // (chain, address, inputs) combination is read once per refresh.
+  const fetched = useRef(new Set<string>());
   useEffect(() => {
-    if (!id) { setStates({}); return; }
+    if (!id) { setStates({}); fetched.current.clear(); return; }
     let cancelled = false;
-    const addr = id.k.address;
     const eoa = wallet?.account;
     for (const chain of PROTECT_CHAINS) {
+      const addr = id.evm.get(chain.id)?.address;
+      if (!addr) continue;
+      const sig = `${chain.id}:${addr}:${refresh}:${eoa ?? ''}:${tokens.join(',')}`;
+      if (fetched.current.has(sig)) continue;
+      fetched.current.add(sig);
       (async () => {
         const pub = makePublicClient(chain);
         try {
@@ -133,7 +149,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
               toks[t] = { symbol, decimals, account: accountBal, eoa: eoaBal, allowance };
             } catch { /* not an ERC-20 on this chain */ }
           }));
-          if (cancelled) return;
+          if (cancelled) { fetched.current.delete(sig); return; }
           setStates((s) => ({ ...s, [chain.id]: {
             factory: fc && fc !== "0x" ? "present" : "absent",
             proxy: px && px !== "0x" ? "present" : "absent",
@@ -142,7 +158,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
             tokens: toks,
           } }));
         } catch (e) {
-          if (cancelled) return;
+          if (cancelled) { fetched.current.delete(sig); return; }
           const err = e as { shortMessage?: string; message: string };
           setStates((s) => ({ ...s, [chain.id]: { factory: "unknown", proxy: "unknown", account: "unknown", balance: null, tokens: {}, error: err.shortMessage ?? err.message } }));
         }
@@ -164,11 +180,19 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
     return w;
   }
 
+  /** Key tree and address of one chain; throws until that chain has been derived. */
+  function chainIdentity(chainId: number): ChainIdentity {
+    const ci = id?.evm.get(chainId);
+    if (!ci) throw new Error("keys for this chain are still being derived");
+    return ci;
+  }
+
   async function protect(chain: Chain) {
     if (!id) return;
     const set = (a: RowAction) => setActions((s) => ({ ...s, [chain.id]: a }));
     const st = states[chain.id];
     try {
+      const ci = chainIdentity(chain.id);
       set({ phase: "switching" });
       const w = await connect(chain);
       const wc = makeWalletClient(chain, w.account);
@@ -182,14 +206,14 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         for (const t of movable) {
           const ts = st.tokens[t];
           set({ phase: "confirm", step: `move ${formatUnits(ts.eoa, ts.decimals)} ${ts.symbol}` });
-          const h = await wc.writeContract({ address: t, abi: erc20Abi, functionName: "transfer", args: [id.k.address, ts.eoa], chain, account: w.account });
+          const h = await wc.writeContract({ address: t, abi: erc20Abi, functionName: "transfer", args: [ci.address, ts.eoa], chain, account: w.account });
           set({ phase: "pending", tx: h, step: `move ${ts.symbol}` });
           await pub.waitForTransactionReceipt({ hash: h });
         }
         if (value === 0n && movable.length === 0) { set({ phase: "done" }); setRefresh((n) => n + 1); return; }
         if (value > 0n) {
           set({ phase: "confirm", step: `move ${amount} ${chain.nativeCurrency.symbol}` });
-          tx = await wc.sendTransaction({ to: id.k.address, value, chain, account: w.account });
+          tx = await wc.sendTransaction({ to: ci.address, value, chain, account: w.account });
           set({ phase: "pending", tx });
           await pub.waitForTransactionReceipt({ hash: tx });
           set({ phase: "done", tx });
@@ -221,8 +245,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       }
       set({ phase: "confirm", step: movable.length ? `create account · move ${movable.length} token${movable.length > 1 ? "s" : ""}${value > 0n ? ` + ${amount} ${chain.nativeCurrency.symbol}` : ""}` : "create account" });
       tx = movable.length
-        ? await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deployAndMove", args: [id.k.root, id.k.recRoot, false, movable], value, chain, account: w.account })
-        : await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deploy", args: [id.k.root, id.k.recRoot, false], value, chain, account: w.account });
+        ? await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deployAndMove", args: [ci.root, ci.recRoot, false, movable], value, chain, account: w.account })
+        : await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deploy", args: [ci.root, ci.recRoot, false], value, chain, account: w.account });
       set({ phase: "pending", tx });
       await pub.waitForTransactionReceipt({ hash: tx });
       set({ phase: "done", tx });
@@ -233,22 +257,23 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   }
 
   /** Spend from the hash-only account: CCHS-signed `execute`, relayed by the injected wallet. */
-  // Keys and trees per epoch. Epoch 0 is the identity derived at load; later
-  // epochs are derived on demand from the master and checked against the roots
-  // the chain holds before any signature is made with them.
-  const epochTrees = useRef<Map<number, { key: CchsKey; trees: Map<string, Tree>; root: Hex; recRoot: Hex }>>(new Map());
-  async function epochKeys(epoch: number, onchainRoot: Hex, onchainRecRoot: Hex) {
-    if (!id) throw new Error("no identity");
-    let e = epochTrees.current.get(epoch);
+  // Keys and trees per (chain, epoch). Epoch 0 is the chain's tree derived at
+  // load; later epochs are derived on demand from the chain key and checked
+  // against the roots the chain holds before any signature is made with them.
+  const epochTrees = useRef<Map<string, { key: CchsKey; trees: Map<string, Tree>; root: Hex; recRoot: Hex }>>(new Map());
+  async function epochKeys(chainId: number, epoch: number, onchainRoot: Hex, onchainRecRoot: Hex) {
+    const ci = chainIdentity(chainId);
+    const k = `${chainId}/${epoch}`;
+    let e = epochTrees.current.get(k);
     if (!e) {
-      if (epoch === 0) e = { key: id.master, trees: id.trees.K, root: id.k.root, recRoot: id.k.recRoot };
+      if (epoch === 0) e = { key: ci.key, trees: ci.trees, root: ci.root, recRoot: ci.recRoot };
       else {
-        const key = epochKey(id.master, epoch);
+        const key = epochKey(ci.key, epoch);
         const trees = new Map<string, Tree>();
         const pub = await poolRef.current!.keygen(key, "K", trees);
         e = { key, trees, root: toHex(pub.root) as Hex, recRoot: toHex(pub.recRoot) as Hex };
       }
-      epochTrees.current.set(epoch, e);
+      epochTrees.current.set(k, e);
     }
     if (e.root.toLowerCase() !== onchainRoot.toLowerCase() || e.recRoot.toLowerCase() !== onchainRecRoot.toLowerCase()) {
       throw new Error(`the chain holds roots for epoch ${epoch} that this mnemonic does not derive; the account was recovered with a different key`);
@@ -267,7 +292,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
     const chain = PROTECT_CHAINS.find((c) => c.id === spendChain)!;
     try {
       const pub = makePublicClient(chain);
-      const account = id.k.address;
+      const ci = chainIdentity(chain.id);
+      const account = ci.address;
       setSpend({ phase: "rotating", msg: "reading account…" });
       const [epochBig, recNonce, onchainRoot, onchainRecRoot] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "epoch" }) as Promise<bigint>,
@@ -280,11 +306,11 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         throw new Error("a rotation signed by this device for this recovery leaf is still pending; wait for it to land or be dropped");
       }
       setSpend({ phase: "rotating", msg: `deriving keys for epoch ${epoch} and ${epoch + 1}…` });
-      const cur = await epochKeys(epoch, onchainRoot, onchainRecRoot);
-      const next = epochKey(id.master, epoch + 1);
+      const cur = await epochKeys(chain.id, epoch, onchainRoot, onchainRecRoot);
+      const next = epochKey(ci.key, epoch + 1);
       const nextTrees = new Map<string, Tree>();
       const nextPub = await poolRef.current!.keygen(next, "K", nextTrees);
-      epochTrees.current.set(epoch + 1, { key: next, trees: nextTrees, root: toHex(nextPub.root) as Hex, recRoot: toHex(nextPub.recRoot) as Hex });
+      epochTrees.current.set(`${chain.id}/${epoch + 1}`, { key: next, trees: nextTrees, root: toHex(nextPub.root) as Hex, recRoot: toHex(nextPub.recRoot) as Hex });
       const m = cchsK.recoveryDigest({ chainId: BigInt(chain.id), account: hexToBytes(account), recNonce, newRoot: nextPub.root, newRecRoot: nextPub.recRoot });
       setSpend({ phase: "rotating", msg: "signing with the recovery tree…" });
       markRecoverySigned(chain.id, account, Number(recNonce));
@@ -315,7 +341,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       if (!isAddress(spendTo)) throw new Error("recipient is not an address");
       setSpend({ phase: "reading" });
       const pub = makePublicClient(chain);
-      const account = id.k.address;
+      const ci = chainIdentity(chain.id);
+      const account = ci.address;
 
       // 1. Build the call.
       let target: Address, value = 0n, data: Hex = "0x";
@@ -341,7 +368,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         setSpend({ phase: "rotate", epoch, nextIdx: Number(nextIdx) });
         return;
       }
-      const { key, trees } = await epochKeys(epoch, onchainRoot, onchainRecRoot);
+      const { key, trees } = await epochKeys(chain.id, epoch, onchainRoot, onchainRecRoot);
       const idx = nextSigningIndex(chain.id, account, epoch, nextIdx);
       const [needsTop, onchainDigest] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "needsTopLayerAt", args: [BigInt(idx)] }) as Promise<boolean>,
@@ -400,13 +427,14 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
     <div className="card swap-panel protect-panel">
       <div className="swap-head">
         <div className="section-eyebrow">Protect · hash-only account · any asset</div>
-        <h3>One key. Same address on every EVM chain. One click each.</h3>
+        <h3>One mnemonic. An independent key tree and account on every EVM chain. One click each.</h3>
         <p>
-          Your mnemonic derives a CCHS master key. The <code>CCHS-K-20</code> roots fix your account address through a
-          CREATE2 factory that lives at the same address on every EVM chain, so the address below is yours before anything
-          is deployed. <strong>Protect</strong> creates the account and moves the native coin and any ERC-20s you list into
-          it in one transaction; NFTs can be sent to it with a normal safe transfer. <strong>Spend</strong> moves anything
-          back out with a hash-based signature; the browser wallet only relays and pays gas.
+          Your mnemonic derives a CCHS master key, and from it a separate <code>CCHS-K-20</code> tree for each chain
+          (a WOTS+ leaf signs one message, so no tree is ever shared between chains). Each tree's roots fix an account
+          address on that chain through a CREATE2 factory that lives at the same address everywhere, so every address
+          below is yours before anything is deployed. <strong>Protect</strong> creates the account and moves the native
+          coin and any ERC-20s you list into it in one transaction; NFTs can be sent to it with a normal safe transfer.{" "}
+          <strong>Spend</strong> moves anything back out with a hash-based signature; the browser wallet only relays and pays gas.
         </p>
       </div>
 
@@ -419,16 +447,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         <>
           <div className="swap-grid">
             <div className="swap-cell">
-              <div className="k">Post-quantum account (all EVM chains)</div>
-              <div className="v mono addr">{id.k.address} <CopyBtn value={id.k.address} /></div>
-            </div>
-            <div className="swap-cell">
-              <div className="k">K-20 root · recovery root</div>
-              <div className="v mono">{shortAddr(id.k.root)} · {shortAddr(id.k.recRoot)}</div>
-            </div>
-            <div className="swap-cell">
-              <div className="k">S-20 root (non-EVM chains)</div>
-              <div className="v mono">{shortAddr(id.s.root)} · {shortAddr(id.s.recRoot)}</div>
+              <div className="k">Key trees derived</div>
+              <div className="v">{id.evm.size} of {PROTECT_CHAINS.length} EVM chains{id.evm.size < PROTECT_CHAINS.length ? " · deriving…" : ""}</div>
             </div>
             <div className="swap-cell">
               <div className="k">Keygen</div>
@@ -462,25 +482,28 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
           <div className="protect-rows">
             {PROTECT_CHAINS.map((chain) => {
               const st = states[chain.id];
+              const ci = id.evm.get(chain.id);
               const act = actions[chain.id] ?? { phase: "idle" };
               const sym = chain.nativeCurrency.symbol;
               const held = st ? Object.values(st.tokens).filter((t) => t.account > 0n).map((t) => `${formatUnits(t.account, t.decimals)} ${t.symbol}`) : [];
               const movable = st ? Object.values(st.tokens).filter((t) => t.eoa > 0n).map((t) => `${formatUnits(t.eoa, t.decimals)} ${t.symbol}`) : [];
               let status: string;
-              if (!st) status = "reading…";
+              if (!ci) status = "deriving key tree…";
+              else if (!st) status = "reading…";
               else if (st.error) status = `rpc: ${st.error}`;
               else if (st.account === "deployed") status = `protected · ${formatEther(st.balance ?? 0n)} ${sym}${held.length ? " · " + held.join(" · ") : ""}`;
               else if (st.factory === "absent") status = st.proxy === "present" ? "factory not published here yet · your first Protect publishes it (one extra transaction)" : "no deterministic-deployment proxy on this chain";
               else status = st.balance && st.balance > 0n ? `address holds ${formatEther(st.balance)} ${sym}, account not deployed` : "ready";
               if (movable.length && st && !st.error) status += ` · wallet has ${movable.join(", ")}`;
               const busy = act.phase === "pending" || act.phase === "switching" || act.phase === "confirm";
-              const canProtect = walletPresent && st && !st.error && (st.factory === "present" || st.proxy === "present") && !busy;
+              const canProtect = walletPresent && ci && st && !st.error && (st.factory === "present" || st.proxy === "present") && !busy;
               const label = act.phase === "switching" ? "switching…" : act.phase === "confirm" ? "confirm in wallet…" : act.phase === "pending" ? "pending…"
                 : st?.account === "deployed" ? ((amount && Number(amount) > 0) || movable.length ? "Move in" : "Protected") : st?.factory === "absent" ? "Publish + Protect" : "Protect";
               return (
                 <div className="protect-row" key={chain.id}>
                   <div className="protect-chain">
                     <span className="protect-name">{chain.name}</span>
+                    {ci && <span className="protect-tx mono">{ci.address} <CopyBtn value={ci.address} /></span>}
                     <span className="protect-status">{status}</span>
                     {busy && act.step && <span className="protect-status">{act.step}</span>}
                     {act.phase === "error" && <span className="protect-err">{act.msg}</span>}
@@ -562,8 +585,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
 
           {!walletPresent && (
             <div className="swap-note warn">
-              Protect needs an injected EVM wallet (MetaMask, Rabby, Trust) to pay for the deployment. The address above is
-              already yours; anyone can fund it now and deploy later.
+              Protect needs an injected EVM wallet (MetaMask, Rabby, Trust) to pay for the deployment. The addresses above are
+              already yours; anyone can fund them now and deploy later.
             </div>
           )}
         </>

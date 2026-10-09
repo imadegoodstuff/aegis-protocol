@@ -177,7 +177,7 @@ export default function App() {
                 CCHS turns a smart contract's memory into part of the signature. The verifier checks
                 the upper tree layer once per subtree, caches the result on chain, and the next 1 023
                 signatures carry only the bottom layer: 2.5 KB, ~169 K gas end to end, no elliptic curves, no lattices,
-                no trusted setup. One master key, the same account address on every EVM chain.
+                no trusted setup. One mnemonic, an independent key tree and account on every EVM chain.
               </p>
               <div className="hero-ctas fade d3">
                 <a className="btn btn-primary" href="#protect">Protect an account →</a>
@@ -232,10 +232,11 @@ export default function App() {
               <div className="section-eyebrow">Protect · one identity · every chain</div>
               <h2 className="section-title">Derive. Predict. Protect.</h2>
               <p className="section-sub">
-                A BIP-39 phrase derives the CCHS master. The keccak set fixes one account address on every
-                EVM chain through a factory that lives at the same address everywhere; the SHA-256 set serves
-                every other chain. The address exists before any transaction. Protecting a chain is one click
-                and one transaction: create the account and move ETH in.
+                A BIP-39 phrase derives the CCHS master, and from it one key tree per chain: a one-time
+                leaf never signs on two chains. The keccak set fixes each EVM account address through a
+                factory that lives at the same address everywhere; the SHA-256 set serves every other
+                chain. Every address exists before any transaction. Protecting a chain is one click and
+                one transaction: create the account and move ETH in.
               </p>
             </div>
           </div>
