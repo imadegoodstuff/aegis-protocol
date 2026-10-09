@@ -27,10 +27,16 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 22 }
       - run: node model/cchs-state.mjs
-      - name: known bugs must be caught
+      - name: known verifier bugs must be caught
         run: |
           for m in no-index-check cache-without-epoch idx-not-in-digest top-layer-not-bound; do
             if node model/cchs-state.mjs --mutant=$m; then echo "mutant $m not caught"; exit 1; fi
+          done
+      - run: node model/cchs-client.mjs
+      - name: known client-rule violations must be caught
+        run: |
+          for m in record-after-sign restore-then-wait no-partition no-record recovery-random-roots; do
+            if node model/cchs-client.mjs --mutant=$m; then echo "mutant $m not caught"; exit 1; fi
           done
 
   core:
@@ -65,6 +71,10 @@ jobs:
       - run: npm run build
       - name: derivation and signature vectors
         run: npm run vectors
+      - name: client index discipline
+        run: npm run index-discipline
+      - name: full account life cycle in an EVM (create, sign, skip, rotate, withdraw) with costs
+        run: npm run evm-flow
 
   cosmwasm:
     name: CosmWasm (Rust wasm32)

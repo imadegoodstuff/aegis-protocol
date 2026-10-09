@@ -21,8 +21,8 @@ import {
 } from "../aegis/wallet";
 import { isValidMnemonic } from "../aegis/derive";
 import { CchsPool } from "../aegis/cchsPool";
-import { deriveCchsIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, type CchsIdentity } from "../aegis/cchsAccount";
-import { cchsK, H, toAbiLayerSig, signatureBytes } from "../aegis/cchs";
+import { deriveCchsIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, recordMissing, epochKey, highestRecoverySigned, markRecoverySigned, type CchsIdentity } from "../aegis/cchsAccount";
+import { cchsK, H, toAbiLayerSig, signatureBytes, toHex, type CchsKey, type Tree } from "../aegis/cchs";
 import CopyBtn from "./CopyBtn";
 
 type TokenState = { symbol: string; decimals: number; eoa: bigint; account: bigint; allowance: bigint };
@@ -38,7 +38,7 @@ type ChainState = {
 
 type RowAction = { phase: "idle" | "switching" | "confirm" | "pending" | "done" | "error"; tx?: Hex; msg?: string; step?: string };
 
-type SpendState = { phase: "idle" | "reading" | "signing" | "confirm" | "pending" | "done" | "error"; msg?: string; tx?: Hex; bytes?: number; layers?: number };
+type SpendState = { phase: "idle" | "reading" | "signing" | "confirm" | "pending" | "done" | "error" | "rotate" | "rotating" | "rotated"; msg?: string; tx?: Hex; bytes?: number; layers?: number; epoch?: number; nextIdx?: number };
 
 const NON_EVM = [
   { name: "Solana", set: "C-20", status: "single-packet program in solana/: cache_subtree once per 1 024 operations, then one 864 B signature per execute (v0 tx with lookup table, 1 082 B); fixture-tested, not deployed" },
@@ -233,6 +233,80 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   }
 
   /** Spend from the hash-only account: CCHS-signed `execute`, relayed by the injected wallet. */
+  // Keys and trees per epoch. Epoch 0 is the identity derived at load; later
+  // epochs are derived on demand from the master and checked against the roots
+  // the chain holds before any signature is made with them.
+  const epochTrees = useRef<Map<number, { key: CchsKey; trees: Map<string, Tree>; root: Hex; recRoot: Hex }>>(new Map());
+  async function epochKeys(epoch: number, onchainRoot: Hex, onchainRecRoot: Hex) {
+    if (!id) throw new Error("no identity");
+    let e = epochTrees.current.get(epoch);
+    if (!e) {
+      if (epoch === 0) e = { key: id.master, trees: id.trees.K, root: id.k.root, recRoot: id.k.recRoot };
+      else {
+        const key = epochKey(id.master, epoch);
+        const trees = new Map<string, Tree>();
+        const pub = await poolRef.current!.keygen(key, "K", trees);
+        e = { key, trees, root: toHex(pub.root) as Hex, recRoot: toHex(pub.recRoot) as Hex };
+      }
+      epochTrees.current.set(epoch, e);
+    }
+    if (e.root.toLowerCase() !== onchainRoot.toLowerCase() || e.recRoot.toLowerCase() !== onchainRecRoot.toLowerCase()) {
+      throw new Error(`the chain holds roots for epoch ${epoch} that this mnemonic does not derive; the account was recovered with a different key`);
+    }
+    return e;
+  }
+
+  /**
+   * Recovery as key rotation: epoch e -> e + 1 with keys derived from the same
+   * master. The message is a pure function of (chain, account, recNonce, epoch),
+   * so re-signing a dropped rotation yields the same message under the same
+   * recovery leaf; the leaf is still recorded before signing.
+   */
+  async function doRotate() {
+    if (!id || spendChain === "") return;
+    const chain = PROTECT_CHAINS.find((c) => c.id === spendChain)!;
+    try {
+      const pub = makePublicClient(chain);
+      const account = id.k.address;
+      setSpend({ phase: "rotating", msg: "reading account…" });
+      const [epochBig, recNonce, onchainRoot, onchainRecRoot] = await Promise.all([
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "epoch" }) as Promise<bigint>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recNonce" }) as Promise<bigint>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "root" }) as Promise<Hex>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recRoot" }) as Promise<Hex>,
+      ]);
+      const epoch = Number(epochBig);
+      if (Number(recNonce) <= highestRecoverySigned(chain.id, account)) {
+        throw new Error("a rotation signed by this device for this recovery leaf is still pending; wait for it to land or be dropped");
+      }
+      setSpend({ phase: "rotating", msg: `deriving keys for epoch ${epoch} and ${epoch + 1}…` });
+      const cur = await epochKeys(epoch, onchainRoot, onchainRecRoot);
+      const next = epochKey(id.master, epoch + 1);
+      const nextTrees = new Map<string, Tree>();
+      const nextPub = await poolRef.current!.keygen(next, "K", nextTrees);
+      epochTrees.current.set(epoch + 1, { key: next, trees: nextTrees, root: toHex(nextPub.root) as Hex, recRoot: toHex(nextPub.recRoot) as Hex });
+      const m = cchsK.recoveryDigest({ chainId: BigInt(chain.id), account: hexToBytes(account), recNonce, newRoot: nextPub.root, newRecRoot: nextPub.recRoot });
+      setSpend({ phase: "rotating", msg: "signing with the recovery tree…" });
+      markRecoverySigned(chain.id, account, Number(recNonce));
+      const sig = cchsK.signRecovery(cur.key, Number(recNonce), m, cur.trees);
+      const w = await connect(chain);
+      const wc = makeWalletClient(chain, w.account);
+      setSpend({ phase: "rotating", msg: "confirm relay in wallet…" });
+      const tx = await wc.writeContract({
+        address: account, abi: ACCOUNT_ABI, functionName: "recover",
+        args: [toHex(nextPub.root) as Hex, toHex(nextPub.recRoot) as Hex, sig.wots.map((x) => toHex(x) as Hex), sig.auth.map((x) => toHex(x) as Hex)],
+        chain, account: w.account,
+      });
+      setSpend({ phase: "rotating", msg: "pending…", tx });
+      await pub.waitForTransactionReceipt({ hash: tx });
+      markIndexSigned(chain.id, account, epoch + 1, -1); // fresh record for the new epoch
+      setSpend({ phase: "rotated", epoch: epoch + 1, tx });
+      setRefresh((n) => n + 1);
+    } catch (e) {
+      setSpend({ phase: "error", msg: (e as { shortMessage?: string }).shortMessage ?? (e as Error).message });
+    }
+  }
+
   async function doSpend() {
     if (!id || spendChain === "") return;
     const chain = PROTECT_CHAINS.find((c) => c.id === spendChain)!;
@@ -255,11 +329,20 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       }
 
       // 2. Choose the leaf: never below the chain's nextIdx, never one this device signed before.
-      const [nextIdx, nonce] = await Promise.all([
+      const [nextIdx, nonce, epochBig, onchainRoot, onchainRecRoot] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nextIdx" }) as Promise<bigint>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nonce" }) as Promise<bigint>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "epoch" }) as Promise<bigint>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "root" }) as Promise<Hex>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recRoot" }) as Promise<Hex>,
       ]);
-      const idx = nextSigningIndex(chain.id, account, nextIdx);
+      const epoch = Number(epochBig);
+      if (recordMissing(chain.id, account, epoch, nextIdx)) {
+        setSpend({ phase: "rotate", epoch, nextIdx: Number(nextIdx) });
+        return;
+      }
+      const { key, trees } = await epochKeys(epoch, onchainRoot, onchainRecRoot);
+      const idx = nextSigningIndex(chain.id, account, epoch, nextIdx);
       const [needsTop, onchainDigest] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "needsTopLayerAt", args: [BigInt(idx)] }) as Promise<boolean>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "digestAt", args: [BigInt(idx), target, value, data] }) as Promise<Hex>,
@@ -278,11 +361,11 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       setSpend({ phase: "signing" });
       const treeIdx = BigInt(idx >> H);
       const ck = `0/${treeIdx}`;
-      if (!id.trees.K.has(ck)) id.trees.K.set(ck, await poolRef.current!.tree(id.master, "K", 0, treeIdx, H));
-      markIndexSigned(chain.id, account, idx);
-      const sig = cchsK.sign(id.master, idx, m, !needsTop, id.trees.K);
-      // Local verification before anything leaves the device.
-      cchsK.verify({ root: hexToBytes(id.k.root), recRoot: hexToBytes(id.k.recRoot) }, idx, m, sig, needsTop ? undefined : id.trees.K.get(ck)!.root);
+      if (!trees.has(ck)) trees.set(ck, await poolRef.current!.tree(key, "K", 0, treeIdx, H));
+      markIndexSigned(chain.id, account, epoch, idx);
+      const sig = cchsK.sign(key, idx, m, !needsTop, trees);
+      // Local verification against the roots the chain holds, before anything leaves the device.
+      cchsK.verify({ root: hexToBytes(onchainRoot), recRoot: hexToBytes(onchainRecRoot) }, idx, m, sig, needsTop ? undefined : trees.get(ck)!.root);
 
       // 5. Relay through the injected wallet (it pays gas; it holds no authority over the account).
       setSpend({ phase: "confirm", bytes: signatureBytes(sig), layers: sig.l1 ? 2 : 1 });
@@ -447,6 +530,17 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                   {spend.phase === "error" && <span className="protect-err">{spend.msg}</span>}
                   {spend.phase === "done" && <span className="protect-status ok">executed</span>}
                 </div>
+                {(spend.phase === "rotate" || spend.phase === "rotating" || spend.phase === "rotated") && (
+                  <div className="spend-actions">
+                    <span className="protect-err">
+                      {spend.phase === "rotate" && <>This device has no signing record for this account (epoch {spend.epoch}, {spend.nextIdx} leaves used). It cannot know which leaves an earlier copy signed, so it will not sign in this epoch. Rotate the keys first: one recovery transaction opens a fresh index space (epoch {spend.epoch! + 1}, keys derived from the same mnemonic).</>}
+                      {spend.phase === "rotating" && (spend.msg ?? "rotating…")}
+                      {spend.phase === "rotated" && <>keys rotated to epoch {spend.epoch}; you can sign now</>}
+                    </span>
+                    {spend.phase === "rotate" && <button className="btn btn-sm" disabled={!walletPresent} onClick={doRotate}>Rotate keys (recovery)</button>}
+                    {spend.tx && <span className="protect-tx mono">{shortAddr(spend.tx)}</span>}
+                  </div>
+                )}
               </>
             )}
           </div>

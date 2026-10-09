@@ -7,7 +7,9 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0 --port 8080",
     "start": "serve -s dist -l tcp://0.0.0.0:8080",
-    "vectors": "tsx scripts/check-vectors.mts"
+    "vectors": "tsx scripts/check-vectors.mts",
+    "evm-flow": "tsx scripts/evm-flow.mts",
+    "index-discipline": "tsx scripts/check-index-discipline.mts"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",
@@ -21,6 +23,9 @@
     "viem": "^2.21.0"
   },
   "devDependencies": {
+    "@ethereumjs/common": "^4.4.0",
+    "@ethereumjs/util": "^9.1.0",
+    "@ethereumjs/vm": "^8.1.1",
     "@types/react": "^19.1.2",
     "@types/react-dom": "^19.1.2",
     "@vitejs/plugin-react": "^4.4.1",

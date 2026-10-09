@@ -210,7 +210,7 @@ export default function App() {
             <div className="stat">
               <div className="stat-k">signatures per key</div>
               <div className="stat-v num">2<sup>20</sup></div>
-              <div className="stat-s">+ 256 recoveries · no client state</div>
+              <div className="stat-s">+ 256 recoveries · one integer of client state</div>
             </div>
             <div className="stat">
               <div className="stat-k">keygen · browser</div>

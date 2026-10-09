@@ -88,8 +88,12 @@ cd evm && forge build && forge test
 # Solidity without Foundry (solc-js)
 cd deploy && npm i && node deploy.mjs --compile-only
 
-# Wallet
+# Wallet, then the checks CI runs: pinned vectors, index discipline, full life cycle in an EVM with costs
 cd wallet && npm i && npm run build
+npm run vectors && npm run index-discipline && npm run evm-flow
+
+# Bounded model checks (verifier and client), each with its seeded bugs
+node model/cchs-state.mjs && node model/cchs-client.mjs
 
 # CCHS factory: build the deterministic artifact, check or publish it per chain
 cd deploy && node deploy-cchs.mjs --build
@@ -104,10 +108,10 @@ The factory is published through the deterministic-deployment proxy (`0x4e59b448
 - The underlying primitives (WOTS+, Merkle trees, hypertrees) date from 1979–2015 and are extensively studied. The CCHS contribution is the verifier-side caching architecture and the trade-off point it reaches; it is not a new primitive.
 - Keygen is ~2.3 M hashes (top tree, recovery tree, first subtree). Single-threaded JS: ~3 s. The wallet splits leaves across a Web Worker pool with WASM hash cores (`wallet/src/aegis/cchsPool.ts`): ~0.7 s on a 6-core laptop, byte-identical output. Getting under 100 ms requires running the WOTS+ chain loop inside WASM rather than calling a WASM hash per step; that is the planned use of the Rust `cchs-core` crate compiled to wasm32.
 - Chain consensus security is outside the protocol's scope.
-- No external audit and no machine-checked proof. The security argument is a reduction sketch (CCHS.spec.md §6) plus a bounded model check of the account state machine (`model/cchs-state.mjs`, ~10^7 adversarial submissions, four seeded bugs caught) plus Foundry and cross-language fixture tests. That is evidence, not proof.
+- No external audit and no machine-checked proof. The security argument is a reduction sketch (CCHS.spec.md §6) plus bounded model checks of the verifier (`model/cchs-state.mjs`, four seeded bugs caught) and of the client's one-time-key rules under crashes, dropped transactions, backup restores and two devices (`model/cchs-client.mjs`, five seeded rule violations caught), plus Foundry, a full life-cycle run in an EVM (`wallet/scripts/evm-flow.mts`) and cross-language fixture tests. That is evidence, not proof. SECURITY.md lists the claims, the threat model and the audit scope we propose.
 - Signatures are 2.5 KB and ~169 K gas end to end on the cached path; this is the amortized floor for a hash-based signature on an EVM, about 7x an ECDSA transfer. Small or frequent payments belong on the hybrid account (ECDSA daily, CCHS recovery).
-- One-time keys depend on the client never signing two messages under one leaf. The verifier enforces one landed signature per index; the client enforces the rest with a write-ahead record of the highest signed index (CCHS.spec.md §4.3). Multi-device signing requires partitioning the index space and is not coordinated by the protocol.
-- `CCHS-C-20` (Solana) truncates SHA-256 to 24 bytes and uses w = 256. Generic preimage cost is 2^192 classical / 2^96 Grover, the AES-192 yardstick; a scheme-level bound with explicit constants for that parameter set has not been written (CCHS.spec.md §5.5, §11). S-20 / K-20 use n = 32, w = 16.
+- One-time keys depend on the client never signing two messages under one leaf. The verifier enforces one landed signature per index; the client enforces the rest with a write-ahead record of the highest signed index per epoch (CCHS.spec.md §4.3). A device whose record is missing or restored from a backup must rotate to the next epoch (same mnemonic, deterministic keys) before signing again; the wallet enforces this and offers the rotation. Multi-device signing requires partitioning the index space and is not coordinated by the protocol.
+- `CCHS-C-20` (Solana) truncates SHA-256 to 24 bytes and uses w = 256. Under the SPHINCS+ multi-target argument it sits at the AES-192 yardstick (2^192 / 2^96); counting the ≈ 2^33 published chain values conservatively it is 2^159 / 2^80, between AES-128 and AES-192. Both numbers are in CCHS.spec.md §5.5 with the reasoning; the written reduction for (n = 24, w = 256) is an open item. S-20 / K-20 (n = 32, w = 16) clear AES-192 under either accounting.
 - Chain status: EVM contracts are built, tested against client-produced signatures and deployable by anyone; the factory has no mainnet deployment yet. Non-EVM adapters are at the stages listed in ADAPTERS.md; none is live on a mainnet.
 
 ## License
