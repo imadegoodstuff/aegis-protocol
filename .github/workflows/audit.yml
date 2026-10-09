@@ -1,0 +1,36 @@
+name: audit
+
+# Static analysis of the EVM contracts with tools that are not in the build
+# matrix. Run by hand; the report is uploaded as an artifact and the findings
+# are read and recorded in SECURITY.md §3.1. None of this is an audit.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  aderyn:
+    name: Aderyn 0.6.8 (Cyfrin, Rust AST analyzer)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: evm } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with: { version: stable }
+      - run: forge install OpenZeppelin/openzeppelin-contracts foundry-rs/forge-std --no-commit || true
+      - name: Install Aderyn (pinned release, checksum verified)
+        run: |
+          curl -sSL -o aderyn.tar.xz https://github.com/Cyfrin/aderyn/releases/download/aderyn-v0.6.8/aderyn-x86_64-unknown-linux-gnu.tar.xz
+          echo "ffd6ca658962e211a3ac821c646f69c8e14bf1b1001cbfe091bcd4535a691e46  aderyn.tar.xz" | sha256sum -c
+          tar -xJf aderyn.tar.xz
+          echo "$PWD/aderyn-x86_64-unknown-linux-gnu" >> "$GITHUB_PATH"
+      - run: aderyn --version
+      - name: Analyze evm/src (tests and scripts excluded)
+        run: aderyn . --src src/ -o aderyn-report.md
+      - name: Summary
+        run: |
+          { echo '## Aderyn report'; cat aderyn-report.md; } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aderyn-report-${{ github.sha }}
+          path: evm/aderyn-report.md
+          if-no-files-found: error
