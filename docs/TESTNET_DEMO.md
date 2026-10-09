@@ -1,12 +1,16 @@
-# Testnet multi-chain determinism demo
+# Testnet multi-chain determinism demo (hybrid `AegisAccountV2` line)
 
 ## Goal
 
-Prove that `AegisAccountFactory` and `SphincsC13Verifier` land at the **same**
-address on every EVM chain, given only a shared deployer EOA at nonce 0.
+Prove that `AegisAccountFactory` and `SphincsC13Verifier` of the hybrid V2
+account land at the **same** address on every EVM chain, given only a shared
+deployer EOA at nonce 0. This concerns the V2 contracts only; hash-only
+`AegisCCHS` accounts have a per-chain address by design (`CCHS.spec.md` §3,
+§5.4), and their factory is published through the deterministic-deployment
+proxy without a deployer key (`README.md`).
 
-This is the "one seed, every chain" claim, independently verifiable from a
-block explorer in 60 seconds.
+The claim here is "same infrastructure address on every chain", independently
+verifiable from a block explorer in 60 seconds.
 
 ## Chains used for the demo
 

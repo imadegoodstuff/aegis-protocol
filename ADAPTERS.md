@@ -2,7 +2,7 @@
 
 Aegis separates a chain-agnostic core (seed → CCHS master, SLH-DSA seed, secp256k1 and ed25519 keys; standard address derivation for 23 chains) from per-chain adapters that implement the account contract in the chain's native language.
 
-The CCHS verifier (`CCHS.spec.md` §5) requires only SHA-256, byte concatenation, integer shifts, and 32-byte storage. Every adapter implements the same byte-level algorithm; a signature produced by the client is valid input to every chain's verifier (the chain ID is bound inside the digest, so it is not replayable across chains).
+The CCHS verifier (`CCHS.spec.md` §5) requires only SHA-256, byte concatenation, integer shifts, and 32-byte storage. Every adapter implements the same byte-level algorithm, verified against the same fixture vectors. Keys are per chain (`CCHS.spec.md` §3): the client derives a separate tree for each chain, so a signature belongs to exactly one chain's account, and the chain ID bound inside the digest makes it non-replayable as well.
 
 ## Matrix
 

@@ -46,7 +46,7 @@ There is no trusted setup, committee, admin key, treasury, upgrade path, or gove
 
 ## Chains
 
-The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storage. With `CCHS-S-20` the same key and the same top-layer proof are valid on every chain (the chain ID is bound inside each operation digest, so operations are not replayable; the subtree registration is portable by design, see `CCHS.spec.md` §5.3).
+The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storage, so the same verification algorithm runs on every chain below. Keys are not shared between chains: one mnemonic yields an independent key tree, root and account per chain (`CCHS.spec.md` §3), because a one-time leaf must never sign on two chains; the chain ID inside each digest additionally makes operations non-replayable. Subtree registration (`cache_subtree`) is permissionless but chain-specific (§5.3).
 
 | Chain | Hash primitive | Status |
 |---|---|---|

@@ -47,8 +47,8 @@ relies on is filled by its own instruction:
    (`cchsCompact.ts`), and sends both. The program verifies the top-layer
    WOTS+ signature on `r0` at top leaf `tree_idx` against `account.root` and
    stores `r0` in the cache PDA. Anyone can pay for this transaction; the
-   proof authenticates itself, and the same `l1` registers the same subtree
-   on every chain running C-20 with the same root (`CCHS.spec.md` §5.3).
+   proof authenticates itself (it is bound to this account's `root`, which
+   belongs to this chain's tree only; `CCHS.spec.md` §3, §5.3).
 2. `execute(idx, l0_wots, l0_auth, ix_data)` — every signature. The client
    reads `next_idx` and `nonce` from the `CchsAccount`, picks a leaf
    `idx >= next_idx` (normally `next_idx` itself), builds the digest, signs

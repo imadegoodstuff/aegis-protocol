@@ -266,11 +266,11 @@ Execution gas includes the outgoing `call` (9 K for value transfer, 25 K if it c
 
 SPHINCS+ C13 on-chain verification is ~190 K compute + 3 688 B calldata (~59 K) + 21 K ≈ 270 K per signature and needs a separate 14.6 KB verifier contract. K-20 is ~1/3 cheaper than that on every signature, S-20 is at parity; both use about 1/3 the code and no external contract.
 
-**Which set to deploy.** `CCHS-K-20` is the EVM default: signatures are bound to a chain ID, so an EVM account never shares a signature with Bitcoin Script, and the keccak opcode is the cheaper primitive. `CCHS-S-20` is the cross-chain canonical set and the one every non-EVM port implements. Both are deployed by the same factory (§5.4).
+**Which set to deploy.** `CCHS-K-20` is the EVM default: signatures are bound to a chain ID, so an EVM account never shares a signature with Bitcoin Script, and the keccak opcode is the cheaper primitive. `CCHS-S-20` is the canonical set and the one every non-EVM port implements (each chain still has its own tree, §3). Both are deployed by the same factory (§5.4).
 
-### 5.3 Cross-chain cache portability
+### 5.3 Cache registration is permissionless, not cross-chain
 
-The top-layer message is the bottom subtree root `R_0`, which contains no chain identifier. The same top-layer signature `(sig_1, auth_1)` therefore registers subtree `t_0` on every chain running the same parameter set with the same `root`. Registering the correct root is harmless wherever it is replayed. Consequence: the first-in-subtree premium is paid once per subtree globally, not once per chain. A user with accounts on *n* chains who warms subtree *t* on one chain can ship the same `l1` to the others as a sponsored transaction. Bottom-layer signatures remain chain-bound through the digest.
+The top-layer message is the bottom subtree root `R_0`, which contains no chain identifier, and the registration `(sig_1, auth_1)` is valid for any account whose `root` is the tree's root. Registering the correct root is harmless wherever it is replayed, so anyone may submit it (a relayer, a sponsor, the user from another device) and the write is idempotent. It is *not* portable between chains: since each chain has its own tree (§3), no two chains share a `root`, and a top-layer signature produced for chain A registers nothing on chain B. The first-in-subtree premium is therefore paid once per subtree *per chain*. An earlier revision of this section described the same `l1` as valid on every chain of a parameter set; that was true of the shared-tree design and was withdrawn together with it, because sharing a tree also shares its one-time leaves (§3, §4.3 rule 7).
 
 ### 5.4 Factory and same-address deployment
 
@@ -291,7 +291,7 @@ execute(target, data, sig_0, auth_0):          # one layer, always
     ... as §5 with the cached branch only
 ```
 
-Soundness is unchanged: `cache_subtree` writes only what a valid top-layer signature on `R_0` authorizes (C3), and `execute` accepts only what full verification would accept (C4). Anyone may submit `cache_subtree`; it is idempotent and, by §5.3, the same payload is valid on every chain of the same set. Liveness is also unchanged: the owner can always warm the next subtree before it is needed.
+Soundness is unchanged: `cache_subtree` writes only what a valid top-layer signature on `R_0` authorizes (C3), and `execute` accepts only what full verification would accept (C4). Anyone may submit `cache_subtree`; it is idempotent and, by §5.3, needs no authorization beyond the top-layer signature itself (it is valid only for the chain whose tree produced it). Liveness is also unchanged: the owner can always warm the next subtree before it is needed.
 
 This split matters on chains with a hard transaction-size ceiling. Solana packets are 1 232 bytes; one S-20 layer is 2 464 bytes. For such chains the spec defines a third parameter set whose single layer fits a packet:
 
@@ -373,7 +373,7 @@ Sketch. Both entry points require `idx ≥ nextIdx` and set `nextIdx = idx + 1` 
 
 ## 7. Cross-chain deployment
 
-The verification algorithm uses only SHA-256, byte concatenation, integer shifts, 32-byte storage, and one `call`. A signature produced by the client is byte-identical on every chain (the chain ID is bound inside `M`, so it is not *replayable* across chains, but the *verifier code* is portable).
+The verification algorithm uses only SHA-256, byte concatenation, integer shifts, 32-byte storage, and one `call`. The *verifier code* is portable: the same algorithm runs on every chain. The *keys* are not shared: each chain has its own tree (`key(chain)`, §3), so signatures, roots and cached subtree roots are specific to one chain, and the chain id bound inside `M` additionally stops a signature from being replayed elsewhere.
 
 | Chain | Hash primitive | Storage for `cachedRoot` | Note |
 |---|---|---|---|
@@ -449,7 +449,7 @@ Hybrid deployments (`AegisAccountV3`) may keep ECDSA as the daily path and use C
 | `CCHS-C-20` | SHA-256/24, w = 256 | 2 | 10 | 2^20 | 864 B | packet-limited chains (Solana); cache fill is its own transaction (§5.5) |
 | `CCHS-S-30` | SHA-256 | 3 | 10 | 2^30 | 2.5 KB | institutional; not yet implemented |
 
-Key derivation (HKDF-SHA256 from the 32-byte master) uses a distinct label per set (`cchs/sk`, `cchs/sk/k`, `cchs/sk/c`; §3), so one master yields independent secret values and independent trees per set, and no secret value is ever hashed under two different functions.
+Key derivation (HKDF-SHA256 from the 32-byte `key(chain)`, itself derived per chain from the master; §3) uses a distinct label per set (`cchs/sk`, `cchs/sk/k`, `cchs/sk/c`; §3), so one master yields independent secret values and independent trees per set, and no secret value is ever hashed under two different functions.
 
 ---
 
