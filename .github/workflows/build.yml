@@ -63,6 +63,8 @@ jobs:
         with: { node-version: '22' }
       - run: npm ci || npm install
       - run: npm run build
+      - name: derivation and signature vectors
+        run: npm run vectors
 
   cosmwasm:
     name: CosmWasm (Rust wasm32)

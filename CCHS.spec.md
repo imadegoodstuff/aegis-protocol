@@ -16,11 +16,11 @@ Result, at 2^20 signature capacity:
 | Flat XMSS (h=20) | ~10^9 hashes | 2.8 KB | stateful | SHA-256 |
 | XMSS^MT (d=2, h=10) | ~10^6 hashes | 4.9 KB | stateful | SHA-256 |
 | SPHINCS+-128s | ~10^6 hashes | 7.8 KB | stateless | SHA-256 |
-| **CCHS (d=2, h=10)** | **~10^6 hashes** | **2.5 KB** | **stateless (chain-held)** | SHA-256 |
+| **CCHS (d=2, h=10)** | **~10^6 hashes** | **2.5 KB** | **index on chain + write-ahead record** | SHA-256 |
 
 (~10^6 SHA-256 ≈ 5 s in pure JS, ~50–250 ms in WASM/native; ~10^9 is impractical on a phone.)
 
-CCHS obtains the keygen cost of a hypertree, the signature size of a flat tree, and a stateless client, simultaneously. Previously these were a three-way trade-off.
+CCHS obtains the keygen cost of a hypertree and the signature size of a flat tree while moving the one-time-key index to the chain. Previously these were a three-way trade-off. It is not a stateless scheme in the SPHINCS+ sense: the verifier holds the index and enforces one landed signature per leaf, and the client still keeps a small write-ahead record so that a signature which never landed is not repeated (§4.3). What the client no longer needs is the tree state of XMSS: the record is a single integer per account and losing it costs capacity, not security, provided the device waits for in-flight transactions to settle before signing again.
 
 Only cryptographic assumption: SHA-256 second-preimage / preimage resistance. Grover bound 2^128.
 
@@ -36,7 +36,7 @@ Only cryptographic assumption: SHA-256 second-preimage / preimage resistance. Gr
 | Merkle tree authentication paths | Merkle 1979 |
 | Hypertree: upper OTS keys sign lower tree roots | XMSS^MT, RFC 8391; SPHINCS+ |
 | Address-tweaked hash chains (multi-target resistance) | SPHINCS+ ADRS |
-| On-chain sequential index for client statelessness | Shelter.cash (flat WOTS) |
+| On-chain index for one-time keys | Shelter.cash (flat WOTS) |
 
 ### 1.2 What is new
 
@@ -93,9 +93,13 @@ T_node(ADRS, l, r)= H(ADRS ‖ l ‖ r)             # Merkle internal node
 ## 3. Key generation
 
 ```
-master ← 32 random bytes (or PBKDF2-HMAC-SHA512(mnemonic, "aegis-cchs-v1")[0:32])
+master ← 32 random bytes, or from a BIP-39 mnemonic exactly as SPEC.md §2:
+         seed   = PBKDF2-HMAC-SHA512(mnemonic, "mnemonic" ‖ passphrase, 2048)   # BIP-39, 64 B
+         master = HKDF-SHA256(seed, salt = ∅, info = "aegis/cchs/master/v1", 32)
 
-sk(layer, treeIdx, leafIdx, chainIdx) = HKDF-SHA256(master, "cchs/sk" ‖ layer ‖ treeIdx ‖ leafIdx ‖ chainIdx, 32)
+label(set) = "cchs/sk" (S-20) | "cchs/sk/k" (K-20) | "cchs/sk/c" (C-20, §5.5)
+sk(layer, treeIdx, leafIdx, chainIdx) = HKDF-SHA256(master, salt = ∅, label(set) ‖ layer ‖ treeIdx ‖ leafIdx ‖ chainIdx, 32)
+    # layer: 1 byte, treeIdx: 8 bytes BE, leafIdx: 4 bytes BE, chainIdx: 1 byte
 
 WOTS_pk(layer, t, j):
     for c in 0..66:
@@ -115,6 +119,8 @@ root = TreeRoot(d-1, 0)     # top tree only; ~2^h × 1005 hashes
 Account on-chain: `root` (immutable), `nextIdx = 0`, `nonce = 0`, `cachedRoot = {}`.
 
 All secret material is derived lazily from `master`. Client stores 32 bytes.
+
+There is one derivation path, and it is the one above; an implementation that derives `master` any other way produces a different account. Each parameter set has its own secret-key label, so no WOTS+ secret value is ever exposed through two different one-way functions (S-20 hashes with SHA-256, K-20 with keccak256). `evm/test/fixtures/cchs-derivation.json` fixes the whole chain for one mnemonic (`abandon` ×23 `art`, empty passphrase): seed, master, `sk(0,0,0,0)`, `root`, `recRoot`, `bottomRoot0` and the predicted EVM account for S-20 and K-20. A client is compatible with the reference if and only if it reproduces that file.
 
 ---
 
@@ -242,7 +248,7 @@ Measured on `evm/src/AegisCCHS.sol` (S-20, SHA-256 precompile from assembly) and
 | Account deploy via factory | — | ~1 457 K | — | ~1 435 K | — |
 | Runtime code | | 6 756 B | | 6 644 B | |
 
-Calldata is about a quarter of the cached-path total and is irreducible for a hash-based signature (2 464 B of chain values and path). EIP-7623 (Pectra) prices calldata at a floor of 10 gas per token when execution is small; execution exceeds the floor on every path here, so the floor never binds. Against ECDSA (65 B, ≈ 24 K for a plain transfer) a cached K-20 operation costs about 7× in gas and 40× in bytes. The design optimizes the amortized cost of a hash-based signature; it does not remove that gap, and for high-frequency or very small payments an ECDSA daily path with CCHS as the recovery root (§8, hybrid) is the right configuration.
+Execution gas moves by about ±10 % with the digits of the particular digest (the verifier walks `w − 1 − digit` steps per chain), so the figures are for the fixture's messages, not bounds. Calldata is about a quarter of the cached-path total and is irreducible for a hash-based signature (2 464 B of chain values and path). EIP-7623 (Pectra) prices calldata at a floor of 10 gas per token when execution is small; execution exceeds the floor on every path here, so the floor never binds. Against ECDSA (65 B, ≈ 24 K for a plain transfer) a cached K-20 operation costs about 7× in gas and 40× in bytes. The design optimizes the amortized cost of a hash-based signature; it does not remove that gap, and for high-frequency or very small payments an ECDSA daily path with CCHS as the recovery root (§8, hybrid) is the right configuration.
 
 The account also implements the ERC-721 and ERC-1155 receiver callbacks and ERC-165, so any asset can be sent to it with a safe transfer; those four pure functions account for ~0.9 KB of the runtime. (Without them: 5 296 B / 5 184 B, S-20 cached ~232 K, K-20 cached ~118 K. With optimizer 200 runs and no viaIR the code is 3 831 B / 3 666 B and K-20 cached execution is ~128 K; the deployed build trades code size for ~10 K gas per signature.)
 
@@ -281,7 +287,9 @@ This split matters on chains with a hard transaction-size ceiling. Solana packet
 
 | | S-20 / K-20 | **C-20** |
 |---|---|---|
-| hash output `n` | 32 B | 24 B (SHA-256 truncated; 192-bit preimage security, NIST level 3) |
+| hash output `n` | 32 B | 24 B (SHA-256 truncated) |
+| generic preimage cost, classical / Grover | 2^256 / 2^128 | 2^192 / 2^96 |
+| NIST category by the AES yardstick | 5 | 3 (AES-192: 2^192 / 2^96) |
 | Winternitz `w` | 16 | 256 |
 | chains | 64 + 3 = 67 | 24 + 2 = 26 |
 | one layer | 2 464 B | **864 B** |
@@ -289,6 +297,8 @@ This split matters on chains with a hard transaction-size ceiling. Solana packet
 | keygen hashes (top + recovery + first subtree, single thread) | ≈ 2.3 M | ≈ 15 M |
 
 Measured (`wallet/src/aegis/cchsCompact.ts`, Node 24): keygen top + recovery 15.6 s and first subtree 12.7 s single-threaded in pure JS, 5.4 s for all three on the eight-worker WASM pool; sign 6.5 ms cached / 12.2 ms with top layer; local verify 6.5 ms / 14.5 ms; a legacy Solana `execute` transaction on the cached path (one signer, seven account keys, 12-byte inner instruction) is 1 223 B of 1 232, 1 190 B when the recipient is the payer; because C-20 verification exceeds the 200 K default compute budget the transaction also needs `SetComputeUnitLimit`, which fits only as a v0 message with an address lookup table: 1 082 B, leaving 150 B for inner-instruction data; the `cache_subtree` transaction is 1 174 B (1 214 B with the compute-budget instruction). Compute units are estimated from the syscall cost model (≈ 376 K average, ≈ 722 K worst for the hashes alone; `solana/README.md`), not measured on a cluster. Bit flip, foreign digest, index replay, wrong cached root, and tampered top-layer path were all rejected; recovery accepted once and rejected on replay. Key derivation is domain-separated (`cchs/sk/c`), so a master seed yields independent C-20 keys. The checksum for `w = 256` is `Σ(255 − m_i) ≤ 6 120`, two base-256 digits.
+
+Security of C-20, stated carefully. The numbers above are generic single-target preimage costs of the truncated hash; they are not a security claim for the whole signature scheme. Two things reduce the margin: the multi-target setting (2^20 leaves × 26 chains × 256 chain positions ≈ 2^33 published chain values per epoch, which ADRS tweaking turns into independent targets but does not make free in the quantum random-oracle model) and the large Winternitz parameter, whose known tight bounds (Hülsing 2013, and the SPHINCS+ submission's analysis) lose more bits at `w = 256` than at `w = 16`. A reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` has not been written and is listed in §11. Until it is, C-20 should be read as "about the classical/quantum cost of AES-192 against generic attacks, with a scheme-level tightness loss still to be quantified", not as "192-bit post-quantum security". S-20 and K-20 (`n = 32`, `w = 16`) sit at the parameters SPHINCS+-256 analyses already cover.
 
 What C-20 trades: ~6× more verifier compute per layer and ~6× more keygen work for a 2.85× smaller signature. On a chain that meters compute rather than bytes (EVM) it is the wrong trade; on a chain that caps bytes per transaction (Solana) it is the only one that gives a single-transaction hot path without a staging buffer.
 
@@ -399,7 +409,7 @@ Hybrid deployments (`AegisAccountV3`) may keep ECDSA as the daily path and use C
 | `CCHS-C-20` | SHA-256/24, w = 256 | 2 | 10 | 2^20 | 864 B | packet-limited chains (Solana); cache fill is its own transaction (§5.5) |
 | `CCHS-S-30` | SHA-256 | 3 | 10 | 2^30 | 2.5 KB | institutional; not yet implemented |
 
-Key derivation (HKDF-SHA256 from the 32-byte master) is identical for S-20 and K-20 and domain-separated for C-20 (`cchs/sk/c`); the tweakable hash differs per set, so one master yields distinct, independent trees per set.
+Key derivation (HKDF-SHA256 from the 32-byte master) uses a distinct label per set (`cchs/sk`, `cchs/sk/k`, `cchs/sk/c`; §3), so one master yields independent secret values and independent trees per set, and no secret value is ever hashed under two different functions.
 
 ---
 
@@ -413,6 +423,7 @@ Key derivation (HKDF-SHA256 from the 32-byte master) is identical for S-20 and K
 - `evm/test/fixtures/cchs-s-20.json`, `cchs-k-20.json` — test vectors (master `0x07…07`, chainId 1, account `0x…cc45`): roots, bottom roots 0 and 1, three sequential operations (first-in-subtree with top layer, two cached), a `skip` sequence (index 5 cached, then index 1024 with top layer), one recovery. The S-20 file is the ground truth for every non-EVM port in §7.
 - `wallet/src/aegis/cchs.ts` — TypeScript client, S-20 and K-20 (`cchsS`, `cchsK`, `forVariant`): keygen, sign, local verify, digest construction, ABI helpers, range-based leaf generation for parallel keygen.
 - `wallet/src/aegis/cchsCompact.ts` — `CCHS-C-20` client (`cchsC`): keygen, sign, `topLayer` for the split cache fill, `bottomRootOf` / `verifyTopLayer` mirroring the two on-chain operations, recovery, digests with chain tags. `evm/test/fixtures/cchs-c-20.json` is its vector file (master `0x07…07`, tag `solana`).
+- `evm/test/fixtures/cchs-derivation.json` — mnemonic → seed → master → `sk(0,0,0,0)`, roots and predicted EVM account for S-20 and K-20 (§3). Replayed by `wallet` tests.
 
 **Interop verified** (2026-10-08): for both sets, signatures produced by `cchs.ts` were executed against the compiled contracts in an EVM (`@ethereumjs/vm`, Cancun), with accounts created through the factory (predicted address = deployed address, idempotent). First-in-subtree, cached, front-run to a different target, tampered chain value, recovery rotation, post-rotation rejection of the old key, skipping leaves within a subtree, jumping to a fresh subtree with the top layer and continuing on its cached path, and rejection of index reuse, backward index and cross-subtree jump without top layer all behaved as specified. Client digests matched `digestAt()` byte-for-byte; the gas and calldata figures in §5.2 come from this run.
 
@@ -424,4 +435,6 @@ Key derivation (HKDF-SHA256 from the 32-byte master) is identical for S-20 and K
 2. **Cache eviction.** `cachedRoot` grows by one slot per 1024 signatures. Negligible, but a recovery epoch counter is used so old entries are logically cleared without gas-costly deletion.
 3. **Formal verification.** Reduce §6 sketches to a machine-checked proof.
 4. **Bitcoin.** Nothing binds a hash-based witness to a transaction under current consensus (§7.1); the open problem is the opcode, not the scheme. Once it exists, option (a) forgoes caching and (b) recovers it through UTXO lineage.
-5. **C-20 keygen cost.** ~15 M hashes: 28 s single-threaded in JS, 5.4 s on the eight-worker WASM pool (`CchsPool.keygen(key, 'C')`). Still an order of magnitude above S-20; a native (Rust/WASM) tree builder would close most of it.
+5. **C-20 concrete security.** A reduction with explicit constants for `n = 24`, `w = 256`, 2^20 leaves in the multi-target quantum setting (§5.5). Until it exists the set is labelled by the generic AES-192 yardstick only.
+6. **Compute units on Solana.** Measured on a local validator rather than estimated from the syscall cost model.
+7. **C-20 keygen cost.** ~15 M hashes: 28 s single-threaded in JS, 5.4 s on the eight-worker WASM pool (`CchsPool.keygen(key, 'C')`). Still an order of magnitude above S-20; a native (Rust/WASM) tree builder would close most of it.

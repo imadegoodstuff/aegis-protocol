@@ -32,7 +32,7 @@ BIP-39 mnemonic (24 words, 256-bit entropy)
 
 (HKDF salt is empty in every case. Labels and hash functions match `wallet/src/aegis/derive.ts` and `cchsAccount.ts`.)
 
-All CCHS secret material (every WOTS+ chain of every leaf of every tree) is derived lazily from the 32-byte master as specified in `CCHS.spec.md` §3; the same master feeds both parameter sets (`CCHS-K-20` for EVM, `CCHS-S-20` elsewhere) and the Bitcoin WOTS+ tree (layer byte `0xb0`). The client stores nothing else.
+All CCHS secret material (every WOTS+ chain of every leaf of every tree) is derived lazily from the 32-byte master as specified in `CCHS.spec.md` §3; the same master feeds every parameter set under a distinct secret-key label per set (`cchs/sk` for `CCHS-S-20`, `cchs/sk/k` for `CCHS-K-20`, `cchs/sk/c` for `CCHS-C-20`) and the Bitcoin WOTS+ tree (S-20 label, layer byte `0xb0`), so no secret value is hashed under two different functions. The client stores nothing else. `evm/test/fixtures/cchs-derivation.json` pins this derivation end to end for one mnemonic.
 
 ---
 

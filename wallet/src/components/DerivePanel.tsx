@@ -96,7 +96,7 @@ export default function DerivePanel() {
           <div className="derive-section">
             <div className="derive-section-head">
               <span className="section-eyebrow" style={{ color: "var(--accent)" }}>EVM — same address on 30+ chains</span>
-              <span className="chip chip-accent">ECDSA fallback owner address</span>
+              <span className="chip chip-accent">secp256k1 (ECDSA) · not post-quantum · hybrid owner / fallback only</span>
             </div>
             <div className="addr-strip">
               <span className="addr-value">{result.evmAddress}</span>
@@ -117,9 +117,9 @@ export default function DerivePanel() {
           <div className="derive-section">
             <div className="derive-section-head">
               <span className="section-eyebrow" style={{ color: "var(--accent-2)" }}>
-                Non-EVM — real mainnet addresses, importable to native wallets
+                Non-EVM — standard ed25519 / secp256k1 addresses, importable to native wallets
               </span>
-              <span className="chip chip-accent">standard scheme · same seed</span>
+              <span className="chip chip-accent">not post-quantum · same seed · the hash-only account is under Protect</span>
             </div>
             <div className="kv">
               <KV label="Solana  ·  import to Phantom / Backpack"           val={result.solanaAddress} />

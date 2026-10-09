@@ -1,0 +1,29 @@
+{
+ "purpose": "Cross-implementation derivation vector. A client that derives a different master, root or address from this mnemonic is not compatible with the reference.",
+ "mnemonic": "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art",
+ "passphrase": "",
+ "seed": "0x408b285c123836004f4b8842c89324c1f01382450c0d439af345ba7fc49acf705489c6fc77dbd4e3dc1dd8cc6bc9f043db8ada1e243c4a0eafb290d399480840",
+ "masterInfo": "aegis/cchs/master/v1",
+ "master": "0x4cfc1044ab28a593bd9509aa18e621d9e513504a11920e2957fc03e9b79421ed",
+ "skLabels": {
+  "S": "cchs/sk",
+  "K": "cchs/sk/k",
+  "C": "cchs/sk/c"
+ },
+ "sets": {
+  "CCHS-S-20": {
+   "root": "0xd6ff6c2fadde70e623c3b4e6cc4f98a18cb9acbcee33be49d97c6cb1b735649c",
+   "recRoot": "0x0a56f9ba227f2bd9ac3de27ad57195e3ab41635bf9779be95608d1af5354a643",
+   "bottomRoot0": "0x82ebd84d2b11c49e1c8bf8904c1b1d5e456842b80a7c5ccc99d73d3053dbb127",
+   "sk_0_0_0_0": "0x8ef3d162035711af18df0a5f762693ca15035d3b8b94213ec805a9cd2273610b",
+   "evmAccount": "0x740A9294A5B120E42893Bd6Cf78aF266b2D422AA"
+  },
+  "CCHS-K-20": {
+   "root": "0x37b2bec29a3d8165741f8c98fa282e523fa20252b15d6a87b809c735e82f544f",
+   "recRoot": "0x1f9f2f82dadc04d769e0cd1a950c94219c3387d48285795cdd35d82741af499c",
+   "bottomRoot0": "0x2f1e74d3e00cb381e95ae3f3dcd3980fc3fe294ad64884bb8aa275a17b88cc44",
+   "sk_0_0_0_0": "0xd0ade5ad2396c75e1043b1e7de1124c5d85df54975baef2430c1b890f0a80441",
+   "evmAccount": "0x769aA2af747392CB2eF29095B962aE161C7D8a99"
+  }
+ }
+}

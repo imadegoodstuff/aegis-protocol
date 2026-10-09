@@ -17,7 +17,7 @@ Hash-based hypertree signatures (XMSS^MT, SPHINCS+) carry the full authenticatio
 | Flat XMSS (h=20) | ~10^9 hashes | 2.8 KB | stateful | SHA-256 |
 | XMSS^MT (d=2, h=10) | ~10^6 hashes | 4.9 KB | stateful | SHA-256 |
 | SPHINCS+-128s | ~10^6 hashes | 7.8 KB | stateless | SHA-256 |
-| **CCHS (d=2, h=10)** | **~10^6 hashes** | **2.5 KB** | **stateless (chain-held)** | SHA-256 |
+| **CCHS (d=2, h=10)** | **~10^6 hashes** | **2.5 KB** | **index on chain + write-ahead record** | SHA-256 |
 
 Single transaction, no commit-reveal, no finality wait. Two parameter sets share one account contract: `CCHS-K-20` (keccak256, EVM default) and `CCHS-S-20` (SHA-256, canonical for every other chain). Measured in an EVM, whole transaction (intrinsic + calldata + execution): K-20 ~169 K gas on the cached path (2 628 B calldata) and ~353 K for the first signature in a subtree; S-20 ~270 K / ~557 K. That is about 7× an ECDSA transfer; the cached path is the amortized floor for a hash-based signature, not a way around it. Runtime code 6.6 KB, no external verifier contract. The account holds any asset (ETH, ERC-20, ERC-721, ERC-1155) and spends any of them through one `execute` call (`executeFirst` when the subtree is new). The signer chooses the leaf index (monotonic, bound into the digest), so a dropped transaction never leads to a second signature under the same one-time key. Accounts are created and funded in one transaction through a CREATE2 factory that lives at the same address on every EVM chain, so one key gives the same account address everywhere, and the address is known before anything is deployed. Signatures produced by the TypeScript client were executed against the compiled contracts; front-running, replay, tampering, cache poisoning, and post-recovery use of the old key are all rejected.
 
@@ -60,7 +60,7 @@ The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storag
 | Starknet | `core::sha256` | Cairo verifier, fixture-tested, not deployed |
 | Bitcoin | `OP_SHA256` + `OP_CAT` (BIP-347, not active) | tree/leaf-script builder in `wallet/src/aegis/btcTapscript.ts`; sighash binding needs OP_CAT, see `CCHS.spec.md` §7.1 |
 
-Standard mainnet address derivation for 23 chains (importable into Phantom, Keplr, Petra, etc.) is implemented in `wallet/src/aegis/derive.ts`. See [`ADAPTERS.md`](ADAPTERS.md).
+Standard mainnet address derivation for 23 chains (importable into Phantom, Keplr, Petra, etc.) is implemented in `wallet/src/aegis/derive.ts`. Those are ordinary ed25519 / secp256k1 addresses from the same seed; they are not post-quantum. The post-quantum account on a chain is the CCHS verifier listed above, at the stage listed above. See [`ADAPTERS.md`](ADAPTERS.md).
 
 ## Repository
 
@@ -107,6 +107,7 @@ The factory is published through the deterministic-deployment proxy (`0x4e59b448
 - No external audit and no machine-checked proof. The security argument is a reduction sketch (CCHS.spec.md §6) plus a bounded model check of the account state machine (`model/cchs-state.mjs`, ~10^7 adversarial submissions, four seeded bugs caught) plus Foundry and cross-language fixture tests. That is evidence, not proof.
 - Signatures are 2.5 KB and ~169 K gas end to end on the cached path; this is the amortized floor for a hash-based signature on an EVM, about 7x an ECDSA transfer. Small or frequent payments belong on the hybrid account (ECDSA daily, CCHS recovery).
 - One-time keys depend on the client never signing two messages under one leaf. The verifier enforces one landed signature per index; the client enforces the rest with a write-ahead record of the highest signed index (CCHS.spec.md §4.3). Multi-device signing requires partitioning the index space and is not coordinated by the protocol.
+- `CCHS-C-20` (Solana) truncates SHA-256 to 24 bytes and uses w = 256. Generic preimage cost is 2^192 classical / 2^96 Grover, the AES-192 yardstick; a scheme-level bound with explicit constants for that parameter set has not been written (CCHS.spec.md §5.5, §11). S-20 / K-20 use n = 32, w = 16.
 - Chain status: EVM contracts are built, tested against client-produced signatures and deployable by anyone; the factory has no mainnet deployment yet. Non-EVM adapters are at the stages listed in ADAPTERS.md; none is live on a mainnet.
 
 ## License

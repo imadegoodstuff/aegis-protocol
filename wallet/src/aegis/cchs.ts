@@ -8,8 +8,10 @@
  * Spec: ../../../CCHS.spec.md
  *
  * Everything is derived lazily from a 32-byte master seed; the client holds no
- * other state. Key derivation (HKDF-SHA256) is identical for both sets; only
- * the tweakable hash used in chains, leaves, nodes and digests differs.
+ * other state. Key derivation is HKDF-SHA256 for both sets under distinct
+ * labels (`cchs/sk` for S-20, `cchs/sk/k` for K-20), so the two sets never
+ * expose the same secret value through two different hash functions; the
+ * tweakable hash used in chains, leaves, nodes and digests differs per set.
  */
 import { sha256 } from '@noble/hashes/sha256';
 import { keccak_256 } from '@noble/hashes/sha3';
@@ -103,12 +105,25 @@ function expanderOf(master: Uint8Array): Hmac {
   }
   return h;
 }
-const SK_INFO_PREFIX = enc.encode('cchs/sk');
-const skInfo = new Uint8Array(SK_INFO_PREFIX.length + 1 + 8 + 4 + 1 + 1);
-skInfo.set(SK_INFO_PREFIX, 0);
-skInfo[skInfo.length - 1] = 0x01; // HKDF-Expand block counter
-export function sk(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number, chainIdx: number): Uint8Array {
-  const o = SK_INFO_PREFIX.length;
+/**
+ * Secret-key label per parameter set. Every set that hashes with a different
+ * function gets its own label, so no WOTS+ secret value is ever exposed through
+ * two different one-way functions: S-20 `cchs/sk`, K-20 `cchs/sk/k`, C-20
+ * `cchs/sk/c` (cchsCompact.ts). The Bitcoin tree (btcTapscript.ts) hashes with
+ * SHA-256 and shares the S-20 label under its own layer byte.
+ */
+const SK_INFO_PREFIX: Record<Variant, Uint8Array> = { S: enc.encode('cchs/sk'), K: enc.encode('cchs/sk/k') };
+const skInfoBuf: Record<Variant, Uint8Array> = { S: new Uint8Array(0), K: new Uint8Array(0) };
+for (const v of ['S', 'K'] as const) {
+  const b = new Uint8Array(SK_INFO_PREFIX[v].length + 1 + 8 + 4 + 1 + 1);
+  b.set(SK_INFO_PREFIX[v], 0);
+  b[b.length - 1] = 0x01; // HKDF-Expand block counter
+  skInfoBuf[v] = b;
+}
+/** HKDF-SHA256(master, label(variant) ‖ layer ‖ treeIdx ‖ leafIdx ‖ chainIdx, 32). */
+export function sk(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number, chainIdx: number, variant: Variant = 'S'): Uint8Array {
+  const skInfo = skInfoBuf[variant];
+  const o = SK_INFO_PREFIX[variant].length;
   skInfo[o] = layer;
   skInfo.set(u64be(treeIdx), o + 1);
   skInfo.set(u32be(leafIdx), o + 9);
@@ -142,7 +157,7 @@ export function makeCchs(hash: HashFn, variant: Variant) {
   function wotsChainEnds(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number): Uint8Array[] {
     const pks: Uint8Array[] = new Array(LEN);
     for (let c = 0; c < LEN; c++) {
-      pks[c] = chainSteps(layer, treeIdx, leafIdx, c, 0, W - 1, sk(key, layer, treeIdx, leafIdx, c));
+      pks[c] = chainSteps(layer, treeIdx, leafIdx, c, 0, W - 1, sk(key, layer, treeIdx, leafIdx, c, variant));
     }
     return pks;
   }
@@ -218,7 +233,7 @@ export function makeCchs(hash: HashFn, variant: Variant) {
     const d = digits(m);
     const out: Uint8Array[] = new Array(LEN);
     for (let c = 0; c < LEN; c++) {
-      out[c] = chainSteps(layer, treeIdx, leafIdx, c, 0, d[c], sk(key, layer, treeIdx, leafIdx, c));
+      out[c] = chainSteps(layer, treeIdx, leafIdx, c, 0, d[c], sk(key, layer, treeIdx, leafIdx, c, variant));
     }
     return out;
   }
