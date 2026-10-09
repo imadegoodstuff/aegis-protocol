@@ -328,7 +328,7 @@ export default function App() {
               <h3><span className="ic">!</span> Not yet, or not ours to promise</h3>
               <ul className="promise-list">
                 <li><span className="mark">▶</span> The factory is not published on any chain yet. There is no deployer: the first Protect on a chain publishes it through the deterministic proxy as one extra transaction paid by that user, and the panel shows the live state</li>
-                <li><span className="mark">▶</span> No external audit and no machine-checked proof of the reductions in §6 of the spec</li>
+                <li><span className="mark">▶</span> No external audit. The Lean proofs cover the verifier and client state machines, not the hash-level reductions in §6 of the spec</li>
                 <li><span className="mark">▶</span> Non-EVM verifiers (Solana, CosmWasm, NEAR, Move, Cairo, TON) are source against test vectors, not deployments</li>
                 <li><span className="mark">▶</span> Bitcoin needs a key-less output (BIP-360) and OP_CAT or OP_CHECKSIGFROMSTACK; none is active. Until then the Bitcoin address is ordinary P2WPKH and is not post-quantum (BITCOIN.md)</li>
                 <li><span className="mark">▶</span> Keygen is ~1 s per chain (14 chains ≈ 8 s on a laptop), not ~100 ms; that needs the chain loop inside WASM</li>

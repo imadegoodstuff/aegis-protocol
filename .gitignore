@@ -30,6 +30,9 @@ ton/*.cell
 # cairo
 cairo/target/
 
+# lean
+proofs/.lake/
+
 # wasm artifacts
 *.wasm
 

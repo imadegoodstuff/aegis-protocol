@@ -24,6 +24,8 @@ Not claimed: anonymity, resistance to a compromised client device while it holds
 
 | Property | Check | Where | In CI |
 |---|---|---|---|
+| Verifier transition logic (claims 2–4, 6), all parameters and reachable states, hash abstracted | Lean 4 proofs: cache genuine and write-once, acceptance only over the signed inputs in the current epoch, no `(epoch, idx)` accepted twice, lane independence; no `sorry`, standard axioms only | `proofs/Cchs/Verifier.lean` | yes |
+| Client ONE-MESSAGE with lanes (claim 2 on the device side), any number of devices, backup restores, recoveries | Lean 4 proof | `proofs/Cchs/Client.lean` | yes |
 | Verifier logic (claims 2–4 and lane independence on the chain side) | bounded model check, 6 seeded bugs caught (incl. a nonce shared across lanes) | `model/cchs-state.mjs` | yes |
 | Client rules (claim 2 on the device side) | bounded model check, 6 seeded rule violations caught (incl. one tree shared between two chains) | `model/cchs-client.mjs` | yes |
 | Wallet implements the client rules | unit tests over a storage shim | `wallet/scripts/check-index-discipline.mts` | yes |
@@ -33,12 +35,12 @@ Not claimed: anonymity, resistance to a compromised client device while it holds
 | Key derivation is pinned | mnemonic → master → roots → addresses vector | `evm/test/fixtures/cchs-derivation.json`, `wallet/scripts/check-vectors.mts` | yes |
 | Hash security numbers | hand analysis, two accountings | `CCHS.spec.md` §5.5 | n/a |
 
-Bounded model checks explore every state up to the stated bounds; they are not proofs. The hash-level analysis is a derivation from published bounds, not a machine-checked reduction.
+The Lean proofs cover the transition system only: the hash is an abstraction ("a signature over other inputs matches nothing") and the WOTS+ two-message exposure enters as a hypothesis, not a theorem. Bounded model checks explore every state up to the stated bounds and additionally exercise an explicit adversary and seeded bugs; they are not proofs. The hash-level analysis is a derivation from published bounds, not a machine-checked reduction.
 
 ## 4. Known gaps
 
 - No independent audit of any component.
-- No machine-checked proof; no written reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` (C-20).
+- No machine-checked proof of the cryptographic reductions (the Lean proofs stop at the hash); no written reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` (C-20).
 - No mainnet deployment; gas figures come from a local EVM and Solana compute units from the `solana-program-test` runtime in CI, not from a public cluster.
 - The wallet is a reference implementation: browser `localStorage` for the index record and the device lane, no hardware-key support; lane assignment between devices is a user action that the protocol cannot check.
 - Side channels in the client's hash chains (timing of WOTS+ chain lengths) are not addressed; the signer runs in a browser or a user's own process.

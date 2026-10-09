@@ -73,6 +73,7 @@ aegis/
 ├── wallet/               Vite + React client: CCHS client, 23-chain derivation, Web Worker crypto
 ├── deploy/               Node deployment (solc-js + viem), no Foundry required
 ├── model/                bounded model check of the CCHS state machine (runs in CI)
+├── proofs/               Lean 4 proofs of the verifier and client invariants (runs in CI)
 ├── core/                 Rust core (seed → keys)
 ├── solana/ cosmwasm/ aptos/ sui/ near/ ton/ cairo/ tron/ bitcoin/
 │                         chain adapters
@@ -95,6 +96,9 @@ npm run vectors && npm run index-discipline && npm run evm-flow && npm run btc
 # Bounded model checks (verifier and client), each with its seeded bugs
 node model/cchs-state.mjs && node model/cchs-client.mjs
 
+# Machine-checked invariants (Lean 4 via elan; no Mathlib, builds in seconds)
+cd proofs && lake build && lake env lean Check.lean
+
 # CCHS factory: build the deterministic artifact, check or publish it per chain
 cd deploy && node deploy-cchs.mjs --build
 node deploy-cchs.mjs --status
@@ -108,7 +112,7 @@ The factory is published through the deterministic-deployment proxy (`0x4e59b448
 - The underlying primitives (WOTS+, Merkle trees, hypertrees) date from 1979–2015 and are extensively studied. The CCHS contribution is the verifier-side caching architecture and the trade-off point it reaches; it is not a new primitive.
 - Keygen is ~2.3 M hashes (top tree, recovery tree, first subtree). Single-threaded JS: ~3 s. The wallet splits leaves across a Web Worker pool with WASM hash cores (`wallet/src/aegis/cchsPool.ts`): ~0.7 s on a 6-core laptop, byte-identical output. Getting under 100 ms requires running the WOTS+ chain loop inside WASM rather than calling a WASM hash per step; that is the planned use of the Rust `cchs-core` crate compiled to wasm32.
 - Chain consensus security is outside the protocol's scope.
-- No external audit and no machine-checked proof. The security argument is a reduction sketch (CCHS.spec.md §6) plus bounded model checks of the verifier (`model/cchs-state.mjs`, six seeded bugs caught, including a shared nonce across lanes) and of the client's one-time-key rules under crashes, dropped transactions, backup restores, two devices and two chains (`model/cchs-client.mjs`, six seeded rule violations caught), plus Foundry, a full life-cycle run in an EVM (`wallet/scripts/evm-flow.mts`) and cross-language fixture tests. That is evidence, not proof. SECURITY.md lists the claims, the threat model and the audit scope we propose.
+- No external audit, and the machine-checked part stops at the hash. The security argument is a reduction sketch (CCHS.spec.md §6) plus Lean 4 proofs of the transition logic (`proofs/`: cache genuineness, one acceptance per index, acceptance only over the signed inputs, lane independence, and the client's ONE-MESSAGE with lanes — for all parameters and all reachable states, with the hash abstracted as "a signature over other inputs matches nothing"), bounded model checks that additionally exercise the adversary and seeded bugs (`model/cchs-state.mjs`, six caught, including a shared nonce across lanes; `model/cchs-client.mjs`, six rule violations caught under crashes, dropped transactions, backup restores, two devices and two chains), Foundry, a full life-cycle run in an EVM (`wallet/scripts/evm-flow.mts`) and cross-language fixture tests. None of this proves anything about SHA-256, keccak or the WOTS+ reduction; those are assumptions stated in the spec. SECURITY.md lists the claims, the threat model and the audit scope we propose.
 - Signatures are 2.5 KB and ~173 K gas end to end on the cached path; this is the amortized floor for a hash-based signature on an EVM, about 7x an ECDSA transfer. Small or frequent payments belong on the hybrid account (ECDSA daily, CCHS recovery).
 - One-time keys depend on the client never signing two messages under one leaf. The verifier enforces one landed signature per index; the client enforces the rest with a write-ahead record of the highest signed index per epoch and lane (CCHS.spec.md §4.3). A device whose record is missing or restored from a backup must move to an unused lane or rotate to the next epoch (same mnemonic, deterministic keys) before signing again; the wallet enforces this and offers both. Several devices: the index space has 16 lanes with independent on-chain counters and nonces, one device per lane; devices then sign concurrently with no coordination (invariant LI in the spec), and the only client obligation is never to put two devices in one lane. Across chains the question does not arise: each chain has its own key tree, so no leaf exists on two chains (an earlier design shared one tree across EVM chains for a common address; that would have let leaf 0 sign two different digests, and was changed).
 - `CCHS-C-20` (Solana) truncates SHA-256 to 24 bytes and uses w = 256. Under the SPHINCS+ multi-target argument it sits at the AES-192 yardstick (2^192 / 2^96); counting the ≈ 2^33 published chain values conservatively it is 2^159 / 2^80, between AES-128 and AES-192. Both numbers are in CCHS.spec.md §5.5 with the reasoning; the written reduction for (n = 24, w = 256) is an open item. S-20 / K-20 (n = 32, w = 16) clear AES-192 under either accounting.

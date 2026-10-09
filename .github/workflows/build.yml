@@ -41,6 +41,24 @@ jobs:
           done
           if node model/cchs-client.mjs --chains=2 --mutant=shared-tree; then echo "mutant shared-tree not caught"; exit 1; fi
 
+  proofs:
+    name: CCHS invariants (Lean 4, machine-checked)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: proofs } }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install elan and the pinned toolchain
+        run: |
+          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+      - run: lake build
+      - name: no sorry, only the standard axioms
+        run: |
+          if grep -rn "sorry" Cchs Cchs.lean; then echo "sorry found"; exit 1; fi
+          lake env lean Check.lean | tee axioms.txt
+          test "$(grep -c "depends on axioms" axioms.txt)" -eq 9
+          if grep -vE "depends on axioms: \[(propext|Classical.choice|Quot.sound)(, (propext|Classical.choice|Quot.sound))*\]$" axioms.txt; then echo "unexpected axiom"; exit 1; fi
+
   core:
     name: Core (Rust)
     runs-on: ubuntu-latest
