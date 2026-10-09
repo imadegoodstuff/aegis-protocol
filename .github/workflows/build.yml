@@ -105,8 +105,7 @@ jobs:
           echo "$(dirname "$SUI_BIN")" >> "$GITHUB_PATH"
       - run: sui --version
       - run: sui move build
-      # the end-to-end tests build a real hypertree; the default unit-test gas limit is far too small
-      - run: sui move test --gas-limit 1000000000000
+      - run: sui move test
 
   cairo:
     name: Starknet (Cairo, Scarb 2.8.5)

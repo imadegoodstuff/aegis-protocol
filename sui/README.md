@@ -172,7 +172,7 @@ call or recompute it client-side from the layout above.
 
 ```bash
 sui move build
-sui move test --gas-limit 1000000000000   # the end-to-end tests build a real hypertree
+sui move test
 ```
 
 Tests (`#[test]` in the module):
@@ -189,10 +189,15 @@ Tests (`#[test]` in the module):
 - `test_first_use_without_top_layer_fails` — first use of a subtree without `l1` aborts with `EMissingTopLayer`.
 - `test_wrong_amount_fails` — a signature for one amount submitted with another aborts with `EBadTopRoot`.
 
-The end-to-end tests build a real WOTS+ hypertree in `#[test_only]` code
-(chain secrets derived from a tag; sibling nodes are the real neighbour leaf
-or tagged values), so they exercise signing and verification with the actual
-digest the module computes.
+- `test_precomputed_root_l0`, `test_precomputed_root_l0_real_sibling`, `test_precomputed_top_root`, `test_precomputed_rec_root` — re-derive the four tree roots the end-to-end tests start from.
+
+The end-to-end tests sign with a real WOTS+ hypertree built in `#[test_only]`
+code (chain secrets derived from a tag; sibling nodes are the real neighbour
+leaf or tagged values), so they exercise signing and verification with the
+actual digest the module computes. Tree roots are precomputed constants
+because every unit test runs under the Sui computation cap and building three
+full trees (67 chains x 15 steps per leaf) inside one test exceeds it; the
+four `test_precomputed_*` tests rebuild one root each.
 
 ## Framework APIs used
 

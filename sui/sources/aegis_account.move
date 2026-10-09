@@ -505,9 +505,9 @@ module aegis::aegis_account {
         let bob = @0xb0b;
         let mut ts = test_scenario::begin(creator);
 
-        let r0 = test_root(0, 0, 0, H, false);
-        let top_root = test_root(1, 0, 0, H, false);
-        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        let r0 = TEST_ROOT_L0;
+        let top_root = TEST_TOP_ROOT;
+        create(top_root, TEST_REC_ROOT, test_scenario::ctx(&mut ts));
 
         // A different sender funds and submits: no owner key exists.
         test_scenario::next_tx(&mut ts, @0xfee);
@@ -541,9 +541,9 @@ module aegis::aegis_account {
         let mut ts = test_scenario::begin(@0xa11ce);
 
         // Bottom tree 0 with real leaves 0 and 1 (shared root).
-        let r0 = test_root(0, 0, 0, H, true);
-        let top_root = test_root(1, 0, 0, H, false);
-        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        let r0 = TEST_ROOT_L0_REAL_SIBLING;
+        let top_root = TEST_TOP_ROOT;
+        create(top_root, TEST_REC_ROOT, test_scenario::ctx(&mut ts));
 
         test_scenario::next_tx(&mut ts, @0xfee);
         let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
@@ -585,9 +585,9 @@ module aegis::aegis_account {
     fun test_replayed_signature_fails() {
         let bob = @0xb0b;
         let mut ts = test_scenario::begin(@0xa11ce);
-        let r0 = test_root(0, 0, 0, H, false);
-        let top_root = test_root(1, 0, 0, H, false);
-        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        let r0 = TEST_ROOT_L0;
+        let top_root = TEST_TOP_ROOT;
+        create(top_root, TEST_REC_ROOT, test_scenario::ctx(&mut ts));
         test_scenario::next_tx(&mut ts, @0xfee);
         let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
         deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
@@ -608,8 +608,8 @@ module aegis::aegis_account {
     fun test_first_use_without_top_layer_fails() {
         let bob = @0xb0b;
         let mut ts = test_scenario::begin(@0xa11ce);
-        let top_root = test_root(1, 0, 0, H, false);
-        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        let top_root = TEST_TOP_ROOT;
+        create(top_root, TEST_REC_ROOT, test_scenario::ctx(&mut ts));
         test_scenario::next_tx(&mut ts, @0xfee);
         let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
         deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
@@ -624,9 +624,9 @@ module aegis::aegis_account {
     fun test_wrong_amount_fails() {
         let bob = @0xb0b;
         let mut ts = test_scenario::begin(@0xa11ce);
-        let r0 = test_root(0, 0, 0, H, false);
-        let top_root = test_root(1, 0, 0, H, false);
-        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        let r0 = TEST_ROOT_L0;
+        let top_root = TEST_TOP_ROOT;
+        create(top_root, TEST_REC_ROOT, test_scenario::ctx(&mut ts));
         test_scenario::next_tx(&mut ts, @0xfee);
         let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
         deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
@@ -642,6 +642,29 @@ module aegis::aegis_account {
     // sha2_256 of a tag; sibling nodes are either the real neighbour leaf
     // (level 0, `real_sibling`) or tagged pseudo-random values. Verification
     // only recomputes the root from leaf and path, so this is a valid tree.
+
+    // Roots of the test trees below, precomputed with the same builder so the
+    // end-to-end tests pay only for signing and verification. Each unit test
+    // runs under the Sui computation cap; building three full trees per test
+    // (67 chains x 15 steps per leaf) exceeds it. The four tests after the
+    // builder re-derive each constant and keep them honest.
+    #[test_only]
+    const TEST_ROOT_L0: vector<u8> = x"8102b1f0ea0521f39e5bac857837377b2a558f69d7a23bb1ed8b00cb269d1230";
+    #[test_only]
+    const TEST_ROOT_L0_REAL_SIBLING: vector<u8> = x"7458cfb7feb13b65393b4734e1fda45ae38944ee0671d69fff1e9226533ffb2d";
+    #[test_only]
+    const TEST_TOP_ROOT: vector<u8> = x"c8e96fff1a1a8ddcc6986dd90e29eb4db49797754a77639e286e30c972e743fe";
+    #[test_only]
+    const TEST_REC_ROOT: vector<u8> = x"e4a62032a86107a4a4fb6bc5da99e18964a44c3f4a1d52d434751d37d6b597fd";
+
+    #[test]
+    fun test_precomputed_root_l0() { assert!(test_root(0, 0, 0, H, false) == TEST_ROOT_L0, 0); }
+    #[test]
+    fun test_precomputed_root_l0_real_sibling() { assert!(test_root(0, 0, 1, H, true) == TEST_ROOT_L0_REAL_SIBLING, 0); }
+    #[test]
+    fun test_precomputed_top_root() { assert!(test_root(1, 0, 0, H, false) == TEST_TOP_ROOT, 0); }
+    #[test]
+    fun test_precomputed_rec_root() { assert!(test_root(LAYER_REC, 0, 0, REC_H, false) == TEST_REC_ROOT, 0); }
 
     #[test_only]
     fun test_sk(layer: u8, tree_idx: u64, leaf_idx: u64, c: u64): vector<u8> {
