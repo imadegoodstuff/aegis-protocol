@@ -172,7 +172,7 @@ call or recompute it client-side from the layout above.
 
 ```bash
 sui move build
-sui move test
+sui move test --gas-limit 100000000000
 ```
 
 Tests (`#[test]` in the module):

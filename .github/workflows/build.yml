@@ -105,7 +105,9 @@ jobs:
           echo "$(dirname "$SUI_BIN")" >> "$GITHUB_PATH"
       - run: sui --version
       - run: sui move build
-      - run: sui move test
+      # --gas-limit bounds instructions per test (default is tight for the end-to-end tests);
+      # the Sui computation cap still applies, which is why tree roots are precomputed
+      - run: sui move test --gas-limit 100000000000
 
   cairo:
     name: Starknet (Cairo, Scarb 2.8.5)
