@@ -265,7 +265,7 @@ the packet.
 ## Build
 
 ```bash
-# requires: rustup, solana-cli 1.18.17, anchor 0.30.1
+# requires: rustup, Agave (solana-cli) 2.3.6, anchor 0.31.1 (the versions CI builds and measures with)
 anchor build
 ```
 

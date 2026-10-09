@@ -35,11 +35,6 @@
 //! Compute-unit cost depends on the message only through the number of chain
 //! steps `Σ (255 − d_c)`; the table reports that number per instruction and a
 //! linear extrapolation to the 6 375-step worst case.
-//!
-//! Set `AEGIS_NATIVE_FALLBACK=1` to run the same flow with the program
-//! compiled natively into the test (no `.so` needed). That checks the
-//! encoding and the digest, but the compute numbers are then meaningless and
-//! the CU assertion is skipped.
 
 use std::path::{Path, PathBuf};
 
@@ -51,7 +46,7 @@ use cchs_core::{adrs, LAYER_BOTTOM, LAYER_RECOVERY, TYPE_CHAIN};
 use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use solana_program_test::{processor, tokio, ProgramTest, ProgramTestContext};
+use solana_program_test::{tokio, ProgramTest, ProgramTestContext};
 use solana_sdk::instruction::{AccountMeta, Instruction};
 use solana_sdk::pubkey::Pubkey;
 use solana_sdk::signature::Signer;
@@ -203,7 +198,6 @@ fn parse_state(data: &[u8]) -> State {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Sbf,
-    Native,
 }
 
 struct Row {
@@ -263,25 +257,16 @@ impl Harness {
     }
 }
 
-/// Adapter for the native fallback: the Anchor entrypoint ties the slice and
-/// the `AccountInfo` lifetimes together, `processor!` wants them independent.
-/// The accounts outlive the call, so collapsing the lifetimes is sound.
-fn native_entry<'a, 'b, 'c, 'd>(
-    program_id: &'a Pubkey,
-    accounts: &'b [solana_sdk::account_info::AccountInfo<'c>],
-    data: &'d [u8],
-) -> solana_sdk::entrypoint::ProgramResult {
-    let accounts: &'c [solana_sdk::account_info::AccountInfo<'c>] =
-        unsafe { std::mem::transmute(accounts) };
-    aegis_account::entry(program_id, accounts, data)
-}
-
 // ---------------------------------------------------------------- test
 
 #[tokio::test]
 async fn compute_units_per_instruction() {
     let fx = fixture();
-    let program_id = aegis_account::ID;
+    // Convert `Pubkey`s between the program crate (anchor-lang) and the test
+    // runtime (solana-sdk) by bytes, so the test does not depend on the two
+    // resolving to one `solana-pubkey` version.
+    let program_id = Pubkey::new_from_array(aegis_account::ID.to_bytes());
+    let pk18 = |k: &Pubkey| anchor_lang::prelude::Pubkey::new_from_array(k.to_bytes());
 
     let mode = match locate_so() {
         Some(so) => {
@@ -289,15 +274,10 @@ async fn compute_units_per_instruction() {
             std::env::set_var("SBF_OUT_DIR", so.parent().unwrap());
             Mode::Sbf
         }
-        None if std::env::var("AEGIS_NATIVE_FALLBACK").is_ok() => Mode::Native,
-        None => panic!(
-            "aegis_account.so not found: run `cargo build-sbf` first (or set SBF_OUT_DIR); \
-             set AEGIS_NATIVE_FALLBACK=1 to run the flow natively without compute metering"
-        ),
+        None => panic!("aegis_account.so not found: run `cargo build-sbf` first (or set SBF_OUT_DIR)"),
     };
     let mut pt = match mode {
         Mode::Sbf => ProgramTest::new("aegis_account", program_id, None),
-        Mode::Native => ProgramTest::new("aegis_account", program_id, processor!(native_entry)),
     };
     // Raise the per-transaction budget so no SetComputeUnitLimit instruction
     // is needed: each transaction below carries exactly one instruction, so
@@ -400,7 +380,7 @@ async fn compute_units_per_instruction() {
         let auth = hashes(&op["l0"]["auth"]);
         assert_eq!(auth.len(), H);
         let mut sh = SolSha256::default();
-        let msg = execute_digest(&mut sh, &account, nonce, idx, &system_program::id(), &transfer_data);
+        let msg = execute_digest(&mut sh, &pk18(&account), nonce, idx, &pk18(&system_program::id()), &transfer_data);
         let wots = key.wots_sign(LAYER_BOTTOM, idx >> H, (idx & 1023) as u32, &msg);
         let r0 = bottom_root(&mut sh, idx, &msg, LayerSig { wots: &wots, auth: &auth })
             .expect("bottom layer");
@@ -459,7 +439,7 @@ async fn compute_units_per_instruction() {
         let auth = hashes(&rec["auth"]);
         assert_eq!(auth.len(), REC_H);
         let mut sh = SolSha256::default();
-        let msg = recover_digest(&mut sh, &account, 0, &new_root, &new_rec_root);
+        let msg = recover_digest(&mut sh, &pk18(&account), 0, &new_root, &new_rec_root);
         let wots = key.wots_sign(LAYER_RECOVERY, 0, 0, &msg);
         let r = verify_layer(&mut sh, LAYER_RECOVERY, 0, 0, &msg, &wots, &auth, REC_H);
         assert_eq!(r, rec_root, "re-signed recovery leaf reaches recRoot");
@@ -486,8 +466,7 @@ async fn compute_units_per_instruction() {
     if let Ok(path) = std::env::var("GITHUB_STEP_SUMMARY") {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(path) {
-            let kind = if mode == Mode::Sbf { "SBF build" } else { "native fallback" };
-            let _ = writeln!(f, "### aegis_account compute units (BanksClient, {kind})\n\n{table}");
+            let _ = writeln!(f, "### aegis_account compute units (BanksClient, SBF build)\n\n{table}");
         }
     }
 
@@ -511,9 +490,6 @@ fn render(rows: &[Row], mode: Mode) -> String {
         ));
     }
     match mode {
-        Mode::Native => s.push_str(
-            "\nProgram executed natively (AEGIS_NATIVE_FALLBACK): compute units are not meaningful.\n",
-        ),
         Mode::Sbf => {
             // Least-squares fit CU = a + b * steps over the execute rows, then
             // extrapolate to the worst-case message.

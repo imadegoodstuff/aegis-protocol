@@ -174,9 +174,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with: { workspaces: solana }
       - run: cargo check -p aegis_account --features no-entrypoint
+      # Pinned to the Agave line of the solana-program-test runtime used by the
+      # compute-unit test (programs/aegis_account/Cargo.toml), so the ELF the
+      # platform tools emit is one that runtime can load.
       - name: Install Anza toolchain
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.6/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
       - run: ls -l target/deploy/aegis_account.so
