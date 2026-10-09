@@ -13,8 +13,17 @@ pragma solidity ^0.8.28;
 /// @dev    Concrete contracts supply the hash: `AegisCCHS` (SHA-256, parameter
 ///         set CCHS-S-20, byte-compatible with every other chain) and
 ///         `AegisCCHSK` (keccak256, CCHS-K-20, ~6x cheaper on the EVM).
-///         Client is stateless: it reads `nextIdx` and `nonce` from chain and
-///         derives everything from a 32-byte master seed.
+///         The client derives everything from a 32-byte key and keeps one
+///         integer per lane: the highest index it has signed (spec §4.3).
+///
+///         Lanes. The 2^20 leaves are split into 2^LANE_BITS lanes by the top
+///         bits of the index; each lane has its own monotone `nextIdx` and its
+///         own `nonce`. A device that owns a lane signs without coordinating
+///         with devices that own other lanes: their transactions can land in
+///         any order, none of them invalidates another's digest, and the
+///         one-time property of every leaf is still enforced here, per lane.
+///         A single-device client uses lane 0 and sees exactly the behaviour
+///         of a single monotone index.
 abstract contract AegisCCHSBase {
     // ---------------------------------------------------------------- params
     uint256 internal constant W      = 16;
@@ -22,23 +31,27 @@ abstract contract AegisCCHSBase {
     uint256 internal constant H      = 10;   // tree height per layer
     uint256 internal constant LEAVES = 1 << H;
     uint256 internal constant REC_H  = 8;
+    /// @notice 2^LANE_BITS lanes of 2^(2H - LANE_BITS) leaves each (16 × 65 536).
+    uint256 public  constant LANE_BITS  = 4;
+    uint256 internal constant LANE_SHIFT = 2 * H - LANE_BITS;
 
     // --------------------------------------------------------------- storage
     /// @notice Top-layer tree root. Rotatable only via `recover`.
     bytes32 public root;
     /// @notice Recovery tree root (single layer, height 8).
     bytes32 public recRoot;
-    /// @notice Epoch increments on every recovery; namespaces `cachedRoot`.
+    /// @notice Epoch increments on every recovery; namespaces `cachedRoot` and the lanes.
     uint64  public epoch;
-    /// @notice Next unused leaf index in [0, 2^20).
-    uint64  public nextIdx;
-    /// @notice Transaction nonce bound into every message digest.
-    uint64  public nonce;
     /// @notice Next unused recovery leaf in [0, 256).
     uint64  public recNonce;
 
     /// @dev key = (epoch << 64) | bottomTreeIdx
     mapping(uint256 => bytes32) public cachedRoot;
+
+    /// @dev key = (epoch << 8) | lane; value = nonce << 64 | nextIdx (absolute leaf index).
+    ///      A fresh (epoch, lane) slot is zero, which reads as nextIdx = first
+    ///      leaf of the lane and nonce = 0.
+    mapping(uint256 => uint256) internal _lane;
 
     // ---------------------------------------------------------------- types
     struct LayerSig {
@@ -176,21 +189,25 @@ abstract contract AegisCCHSBase {
     }
 
     /// @dev Index discipline shared by both entry points, then the digest.
+    ///      The lane is the top LANE_BITS bits of `idx`; `idx` must not be below
+    ///      the lane's `nextIdx`, and the digest binds the lane's nonce.
     function _begin(uint64 idx, address target, uint256 value, bytes calldata data)
         internal view returns (bytes32)
     {
-        if (idx < nextIdx) revert IndexUsed();
         if (idx >= (1 << (2 * H))) revert Exhausted();
-        return _digest(idx, target, value, data);
+        uint256 s = _lane[_laneKey(idx)];
+        if (idx < uint64(s)) revert IndexUsed();
+        return _digest(uint64(s >> 64), idx, target, value, data);
     }
 
     /// @dev State update (effects) then the call (interaction).
     function _finish(uint64 idx, address target, uint256 value, bytes calldata data)
         internal returns (bytes memory result)
     {
+        uint256 k = _laneKey(idx);
         unchecked {
-            nextIdx = idx + 1;
-            nonce  += 1;
+            uint256 s = _lane[k];
+            _lane[k] = (((s >> 64) + 1) << 64) | uint256(idx + 1);
         }
         bool ok;
         (ok, result) = target.call{value: value}(data);
@@ -201,7 +218,8 @@ abstract contract AegisCCHSBase {
     // ============================================================ recovery
 
     /// @notice Rotate `root` and `recRoot`, authorized by the recovery tree.
-    ///         Resets `nextIdx` and bumps `epoch` (logically clearing the cache).
+    ///         Bumps `epoch`, which opens fresh lanes (every `nextIdx` back to
+    ///         the start of its lane, every nonce 0) and logically clears the cache.
     function recover(
         bytes32 newRoot,
         bytes32 newRecRoot,
@@ -234,7 +252,6 @@ abstract contract AegisCCHSBase {
 
         root    = newRoot;
         recRoot = newRecRoot;
-        nextIdx = 0;
         unchecked {
             epoch    += 1;
             recNonce  = rn + 1;
@@ -244,8 +261,9 @@ abstract contract AegisCCHSBase {
 
     // ============================================================ internals
 
-    /// @dev M = hash("AEGIS_CCHS_V1" ‖ chainId ‖ this ‖ nonce ‖ idx ‖ target ‖ value ‖ keccak256(data))
-    function _digest(uint64 idx, address target, uint256 value, bytes calldata data)
+    /// @dev M = hash("AEGIS_CCHS_V1" ‖ chainId ‖ this ‖ nonce ‖ idx ‖ target ‖ value ‖ keccak256(data)),
+    ///      `nonce` being the nonce of the lane of `idx`.
+    function _digest(uint64 laneNonce, uint64 idx, address target, uint256 value, bytes calldata data)
         internal view returns (bytes32)
     {
         return _hash(
@@ -253,7 +271,7 @@ abstract contract AegisCCHSBase {
                 "AEGIS_CCHS_V1",
                 block.chainid,
                 address(this),
-                nonce,
+                laneNonce,
                 idx,
                 target,
                 value,
@@ -265,6 +283,11 @@ abstract contract AegisCCHSBase {
     /// @dev `cachedRoot` key: (epoch << 64) | bottomTreeIdx.
     function _cacheKey(uint64 treeIdx) internal view returns (uint256) {
         return (uint256(epoch) << 64) | treeIdx;
+    }
+
+    /// @dev `_lane` key: (epoch << 8) | lane of `idx`.
+    function _laneKey(uint64 idx) internal view returns (uint256) {
+        return (uint256(epoch) << 8) | (idx >> LANE_SHIFT);
     }
 
     /// @dev Recompute the root of tree (`layer`, `treeIdx`) from a WOTS+
@@ -322,28 +345,34 @@ abstract contract AegisCCHSBase {
 
     // ============================================================== views
 
+    /// @notice Lane of a leaf index: its top LANE_BITS bits.
+    function laneOf(uint64 idx) public pure returns (uint8) {
+        return uint8(idx >> LANE_SHIFT);
+    }
+
+    /// @notice Next unused leaf index of `lane` in the current epoch (absolute
+    ///         index; the first leaf of the lane when nothing has landed).
+    function nextIdx(uint8 lane) public view returns (uint64) {
+        uint64 n = uint64(_lane[(uint256(epoch) << 8) | lane]);
+        uint64 first = uint64(uint256(lane) << LANE_SHIFT);
+        return n > first ? n : first;
+    }
+
+    /// @notice Nonce of `lane` in the current epoch, bound into every digest of the lane.
+    function nonce(uint8 lane) public view returns (uint64) {
+        return uint64(_lane[(uint256(epoch) << 8) | lane] >> 64);
+    }
+
     /// @notice Digest the client must sign for an `execute` at leaf `idx`
-    ///         (`idx >= nextIdx`) with the current nonce.
+    ///         (`idx >= nextIdx(laneOf(idx))`) with the lane's current nonce.
     function digestAt(uint64 idx, address target, uint256 value, bytes calldata data)
         external view returns (bytes32)
     {
-        return _digest(idx, target, value, data);
-    }
-
-    /// @notice Digest for an `execute` at `nextIdx`.
-    function nextDigest(address target, uint256 value, bytes calldata data)
-        external view returns (bytes32)
-    {
-        return _digest(nextIdx, target, value, data);
+        return _digest(uint64(_lane[_laneKey(idx)] >> 64), idx, target, value, data);
     }
 
     /// @notice Whether an `execute` at leaf `idx` must include the top-layer proof.
     function needsTopLayerAt(uint64 idx) public view returns (bool) {
         return cachedRoot[_cacheKey(idx >> H)] == bytes32(0);
-    }
-
-    /// @notice Whether an `execute` at `nextIdx` must include the top-layer proof.
-    function needsTopLayer() external view returns (bool) {
-        return needsTopLayerAt(nextIdx);
     }
 }

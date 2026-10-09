@@ -17,7 +17,7 @@ const ADAPTERS: Adapter[] = [
     addrStatus: "mainnet", pq: "contract",
     address: "CREATE2(factory, keccak(root ‖ recRoot ‖ set), initCode)",
     hash: "keccak256 opcode (S-20: precompile 0x02)", storage: "mapping((epoch<<64)|treeIdx → bytes32)", path: "evm/src/AegisCCHSBase.sol",
-    blurb: "AegisCCHSBase holds all logic; AegisCCHS and AegisCCHSK bind the hash. The signer chooses the leaf index (monotonic, bound into the digest): execute for a cached subtree, executeFirst to register one. 20 Foundry tests per set plus factory tests driven by client-generated vectors, interop verified in an EVM. The factory lives at 0xAa61…0611 on every chain; it is published nowhere yet, and the first Protect on a chain publishes it (no deployer key, no project funds)." },
+    blurb: "AegisCCHSBase holds all logic; AegisCCHS and AegisCCHSK bind the hash. The signer chooses the leaf index (monotonic, bound into the digest): execute for a cached subtree, executeFirst to register one. 20 Foundry tests per set plus factory tests driven by client-generated vectors, interop verified in an EVM. The factory lives at 0x7f86…817F on every chain; it is published nowhere yet, and the first Protect on a chain publishes it (no deployer key, no project funds)." },
   { id: "tron", name: "TRON", family: "TVM (Solidity)", set: "CCHS-K-20",
     addrStatus: "mainnet", pq: "contract",
     address: "base58check(0x41 ‖ keccak256(pk)[12:])",
@@ -144,7 +144,7 @@ export default function ArchitectureDiagram() {
               <span className="arch-status live">cache</span>
             </div>
             <div className="arch-sub">
-              root, recRoot, epoch, nextIdx<br />
+              root, recRoot, epoch, nextIdx[lane], nonce[lane]<br />
               cachedRoot[(epoch, treeIdx)]
             </div>
           </div>

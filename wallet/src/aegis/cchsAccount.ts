@@ -76,52 +76,85 @@ export function predictAccount(root: Hex, recRoot: Hex, variant: Variant): Addre
 // ------------------------------------------------------------ index discipline
 //
 // A WOTS+ leaf signs exactly one message. The chain enforces monotonic use
-// (`idx >= nextIdx`), but it cannot see a signature that was produced and
-// never landed. So the client keeps a write-ahead record of the highest index
-// it has signed per (chain, account, epoch), and never signs the same index
-// twice: the next signature uses max(nextIdx on chain, highest signed + 1). A
-// leaf whose transaction was dropped is simply abandoned.
+// per lane (`idx >= nextIdx(lane)`), but it cannot see a signature that was
+// produced and never landed. So the client keeps a write-ahead record of the
+// highest index it has signed per (chain, account, epoch, lane), and never
+// signs the same index twice: the next signature uses
+// max(nextIdx(lane) on chain, highest signed + 1). A leaf whose transaction
+// was dropped is simply abandoned.
 //
-// If the record is missing while the account has already been used
-// (nextIdx > 0), this device cannot know which leaves a previous copy of the
-// record covered, and a dropped transaction may still be sitting in a mempool
-// with a leaf above nextIdx. The only complete answer is to leave the index
-// space: perform a recovery (new epoch, keys derived from the master and the
-// epoch number) and start a fresh record there. model/cchs-client.mjs shows
-// that the weaker rule "wait until the pool drains" is not enough.
+// Lanes. The contract splits the 2^20 leaves into 16 lanes of 65 536 by the
+// top four bits of the index, each with its own nextIdx and nonce. A device
+// owns one lane (`deviceLane`), so several devices sign concurrently without
+// any coordination: the chain keeps every lane monotone, and a transaction of
+// one lane never changes the nonce of another. Two devices must not share a
+// lane (that is the partition rule of CCHS.spec.md §4.3 made explicit); the
+// lane is chosen once per device and shown in the UI.
+//
+// If the record is missing while the lane has already been used
+// (nextIdx(lane) above the lane's first leaf), this device cannot know which
+// leaves a previous copy of the record covered, and a dropped transaction may
+// still be sitting in a mempool with a leaf above nextIdx. The only complete
+// answer is to leave the index space: perform a recovery (new epoch, keys
+// derived from the chain key and the epoch number) and start a fresh record
+// there. model/cchs-client.mjs shows that the weaker rule "wait until the pool
+// drains" is not enough.
 //
 // Recovery messages are deterministic per (epoch, recNonce): the new roots are
 // a pure function of the master and the next epoch, so re-signing a dropped
 // recovery produces the same message, never a second one under the same
 // recovery leaf. The recovery leaf is still recorded before signing.
 
-const idxKey = (chainId: number, account: Address, epoch: number) => `aegis/cchs/signed/${chainId}/${account.toLowerCase()}/${epoch}`;
+export const LANE_BITS = 4;
+export const LANES = 1 << LANE_BITS;
+export const LANE_SHIFT = 2 * 10 - LANE_BITS; // 2H − LANE_BITS = 16
+/** First leaf index of a lane. */
+export const laneFirst = (lane: number) => lane << LANE_SHIFT;
+/** Lane of a leaf index. */
+export const laneOf = (idx: number) => idx >> LANE_SHIFT;
+
+const LANE_KEY = 'aegis/cchs/device-lane';
+/** The lane this device signs in (0 unless the user assigned another one for a second device). */
+export function deviceLane(): number {
+  const v = Number(globalThis.localStorage?.getItem(LANE_KEY) ?? 0);
+  return Number.isInteger(v) && v >= 0 && v < LANES ? v : 0;
+}
+export function setDeviceLane(lane: number): void {
+  if (!Number.isInteger(lane) || lane < 0 || lane >= LANES) throw new Error(`lane must be in [0, ${LANES})`);
+  globalThis.localStorage?.setItem(LANE_KEY, String(lane));
+}
+
+const idxKey = (chainId: number, account: Address, epoch: number, lane: number) =>
+  `aegis/cchs/signed/${chainId}/${account.toLowerCase()}/${epoch}${lane ? `/lane/${lane}` : ''}`;
 const recKey = (chainId: number, account: Address) => `aegis/cchs/rec-signed/${chainId}/${account.toLowerCase()}`;
 
-/** Highest leaf index this device has ever signed for the account in `epoch`, or null if no record exists. */
-export function highestSignedIndex(chainId: number, account: Address, epoch: number): number | null {
-  const v = globalThis.localStorage?.getItem(idxKey(chainId, account, epoch));
+/** Highest leaf index this device has ever signed for the account in `epoch` and `lane`, or null if no record exists. */
+export function highestSignedIndex(chainId: number, account: Address, epoch: number, lane = 0): number | null {
+  const v = globalThis.localStorage?.getItem(idxKey(chainId, account, epoch, lane));
   return v === null || v === undefined ? null : Number(v);
 }
 
 /**
- * True when this device must not sign under the current epoch: the account has
- * been used (nextIdx > 0) but this device holds no record for the epoch.
+ * True when this device must not sign in `lane` under the current epoch: the
+ * lane has been used (nextIdx above its first leaf) but this device holds no
+ * record for it.
  */
-export function recordMissing(chainId: number, account: Address, epoch: number, onchainNext: bigint): boolean {
-  return onchainNext > 0n && highestSignedIndex(chainId, account, epoch) === null;
+export function recordMissing(chainId: number, account: Address, epoch: number, onchainNext: bigint, lane = 0): boolean {
+  return onchainNext > BigInt(laneFirst(lane)) && highestSignedIndex(chainId, account, epoch, lane) === null;
 }
 
-/** Index to sign next: never below the chain's `nextIdx`, never one this device used. */
-export function nextSigningIndex(chainId: number, account: Address, epoch: number, onchainNext: bigint): number {
-  const rec = highestSignedIndex(chainId, account, epoch);
-  return Math.max(Number(onchainNext), (rec ?? -1) + 1);
+/** Index to sign next in `lane`: never below the chain's `nextIdx(lane)`, never one this device used, never outside the lane. */
+export function nextSigningIndex(chainId: number, account: Address, epoch: number, onchainNext: bigint, lane = 0): number {
+  const rec = highestSignedIndex(chainId, account, epoch, lane);
+  const idx = Math.max(Number(onchainNext), (rec ?? -1) + 1, laneFirst(lane));
+  if (laneOf(idx) !== lane) throw new Error(`lane ${lane} is exhausted`);
+  return idx;
 }
 
 /** Record `idx` as used. Call before producing the signature, not after. */
-export function markIndexSigned(chainId: number, account: Address, epoch: number, idx: number): void {
-  const rec = highestSignedIndex(chainId, account, epoch);
-  if (rec === null || idx > rec) globalThis.localStorage?.setItem(idxKey(chainId, account, epoch), String(idx));
+export function markIndexSigned(chainId: number, account: Address, epoch: number, idx: number, lane = 0): void {
+  const rec = highestSignedIndex(chainId, account, epoch, lane);
+  if (rec === null || idx > rec) globalThis.localStorage?.setItem(idxKey(chainId, account, epoch, lane), String(idx));
 }
 
 /** Highest recovery nonce this device has signed for the account, or -1. */

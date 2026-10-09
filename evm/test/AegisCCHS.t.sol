@@ -42,7 +42,7 @@ abstract contract CCHSVectorTest is Test {
 
         assertEq(a.root(),    vm.parseJsonBytes32(json, ".root"));
         assertEq(a.recRoot(), vm.parseJsonBytes32(json, ".recRoot"));
-        assertEq(a.nextIdx(), 0);
+        assertEq(a.nextIdx(0), 0);
     }
 
     // ------------------------------------------------------------ helpers
@@ -77,18 +77,18 @@ abstract contract CCHSVectorTest is Test {
     // ---------------------------------------------------------- vectors
 
     function test_digestMatchesClient() public view {
-        assertEq(a.nextDigest(target, value, ""), vm.parseJsonBytes32(json, ".ops[0].digest"));
+        assertEq(a.digestAt(a.nextIdx(0), target, value, ""), vm.parseJsonBytes32(json, ".ops[0].digest"));
     }
 
     function test_firstSigInSubtreeNeedsTopLayer() public {
-        assertTrue(a.needsTopLayer());
+        assertTrue(a.needsTopLayerAt(a.nextIdx(0)));
         (, bool hasL1, ) = _op(0);
         assertTrue(hasL1);
         _exec(0);
         assertEq(target.balance, value);
-        assertEq(a.nextIdx(), 1);
-        assertEq(a.nonce(), 1);
-        assertFalse(a.needsTopLayer());
+        assertEq(a.nextIdx(0), 1);
+        assertEq(a.nonce(0), 1);
+        assertFalse(a.needsTopLayerAt(a.nextIdx(0)));
         assertEq(a.cachedRoot(0), vm.parseJsonBytes32(json, ".bottomRoot0"));
     }
 
@@ -101,7 +101,7 @@ abstract contract CCHSVectorTest is Test {
         emit log_named_uint("cached-path execution gas", g - gasleft());
         _exec(2);
         assertEq(target.balance, 3 * value);
-        assertEq(a.nextIdx(), 3);
+        assertEq(a.nextIdx(0), 3);
     }
 
     function test_firstSigGas() public {
@@ -157,15 +157,15 @@ abstract contract CCHSVectorTest is Test {
         assertFalse(hasL1);
         assertEq(a.digestAt(i5, target, value, ""), vm.parseJsonBytes32(json, ".skip.ops[0].digest"));
         a.execute(target, value, "", i5, l0);
-        assertEq(a.nextIdx(), 6);
-        assertEq(a.nonce(), 2);
+        assertEq(a.nextIdx(0), 6);
+        assertEq(a.nonce(0), 2);
 
         (uint64 i1024, AegisCCHSBase.LayerSig memory m0, bool h1, AegisCCHSBase.LayerSig memory m1) = _skipOp(1);
         assertEq(i1024, 1024);
         assertTrue(h1);
         assertTrue(a.needsTopLayerAt(i1024));
         a.executeFirst(target, value, "", i1024, m0, m1);
-        assertEq(a.nextIdx(), 1025);
+        assertEq(a.nextIdx(0), 1025);
         assertEq(a.cachedRoot(1), vm.parseJsonBytes32(json, ".bottomRoot1"));
         assertEq(target.balance, 3 * value);
     }
@@ -177,7 +177,7 @@ abstract contract CCHSVectorTest is Test {
         (AegisCCHSBase.LayerSig memory l0, , ) = _op(1);
         (, , AegisCCHSBase.LayerSig memory l1) = _op(0);
         a.executeFirst(target, value, "", 1, l0, l1);
-        assertEq(a.nextIdx(), 2);
+        assertEq(a.nextIdx(0), 2);
     }
 
     /// Jumping into a fresh subtree without its top layer is rejected.
@@ -204,7 +204,7 @@ abstract contract CCHSVectorTest is Test {
         a.execute(target, value, "", i5, l0);
         (uint64 i1024, AegisCCHSBase.LayerSig memory m0, , AegisCCHSBase.LayerSig memory m1) = _skipOp(1);
         a.executeFirst(target, value, "", i1024, m0, m1);
-        assertEq(a.nextIdx(), 1025);
+        assertEq(a.nextIdx(0), 1025);
 
         (AegisCCHSBase.LayerSig memory l1, , ) = _op(1);
         vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
@@ -240,6 +240,72 @@ abstract contract CCHSVectorTest is Test {
         a.executeFirst(target, value, "", 0, l0, l1);
     }
 
+    // ------------------------------------------------------------- lanes
+
+    function _laneOp() internal view returns (uint64 idx, AegisCCHSBase.LayerSig memory l0, AegisCCHSBase.LayerSig memory l1) {
+        idx = uint64(vm.parseJsonUint(json, ".lane.ops[0].idx"));
+        l0 = _layer(".lane.ops[0].l0");
+        l1 = _layer(".lane.ops[0].l1");
+    }
+
+    /// Lane 1 starts at leaf 65 536 with its own nonce 0; its digest is the
+    /// client's, and landing it leaves lane 0 untouched: op 0 (lane 0, nonce 0)
+    /// is still valid afterwards, in either order.
+    function test_lanesAreIndependent() public {
+        (uint64 i, AegisCCHSBase.LayerSig memory l0, AegisCCHSBase.LayerSig memory l1) = _laneOp();
+        assertEq(i, uint64(1) << 16);
+        assertEq(a.laneOf(i), 1);
+        assertEq(a.nextIdx(1), i);
+        assertEq(a.nonce(1), 0);
+        assertEq(a.digestAt(i, target, value, ""), vm.parseJsonBytes32(json, ".lane.ops[0].digest"));
+        assertTrue(a.needsTopLayerAt(i));
+
+        a.executeFirst(target, value, "", i, l0, l1);
+        assertEq(a.nextIdx(1), i + 1);
+        assertEq(a.nonce(1), 1);
+        assertEq(a.cachedRoot(64), vm.parseJsonBytes32(json, ".lane.bottomRoot"));
+        // lane 0 unchanged: still at 0 / nonce 0, op 0 lands as if nothing happened
+        assertEq(a.nextIdx(0), 0);
+        assertEq(a.nonce(0), 0);
+        _exec(0);
+        assertEq(a.nextIdx(0), 1);
+        assertEq(a.nextIdx(1), i + 1);
+        assertEq(target.balance, 2 * value);
+    }
+
+    function test_lanesIndependentOtherOrder() public {
+        _exec(0);
+        _exec(1);
+        (uint64 i, AegisCCHSBase.LayerSig memory l0, AegisCCHSBase.LayerSig memory l1) = _laneOp();
+        a.executeFirst(target, value, "", i, l0, l1);
+        assertEq(a.nextIdx(0), 2);
+        assertEq(a.nonce(0), 2);
+        assertEq(a.nextIdx(1), i + 1);
+        assertEq(a.nonce(1), 1);
+    }
+
+    /// A lane's index is monotone on its own: replay in lane 1 is IndexUsed
+    /// even though lane 0 has moved, and lane 0's leaves are not abandoned by
+    /// a spend in lane 1.
+    function test_revert_laneReplay() public {
+        (uint64 i, AegisCCHSBase.LayerSig memory l0, AegisCCHSBase.LayerSig memory l1) = _laneOp();
+        a.executeFirst(target, value, "", i, l0, l1);
+        vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
+        a.executeFirst(target, value, "", i, l0, l1);
+        vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
+        a.execute(target, value, "", i, l0);
+    }
+
+    /// Untouched lanes read as their first leaf; lane 15 ends at 2^20 - 1.
+    function test_laneViews() public view {
+        for (uint8 l = 0; l < 16; ++l) {
+            assertEq(a.nextIdx(l), uint64(l) << 16);
+            assertEq(a.nonce(l), 0);
+        }
+        assertEq(a.laneOf((uint64(1) << 20) - 1), 15);
+        assertEq(a.LANE_BITS(), 4);
+    }
+
     // --------------------------------------------------------- recovery
 
     function _recovery() internal view returns (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) {
@@ -258,9 +324,22 @@ abstract contract CCHSVectorTest is Test {
         assertEq(a.root(), newRoot);
         assertEq(a.recRoot(), newRec);
         assertEq(a.epoch(), 1);
-        assertEq(a.nextIdx(), 0);
+        assertEq(a.nextIdx(0), 0);
+        assertEq(a.nonce(0), 0);
         assertEq(a.recNonce(), 1);
-        assertTrue(a.needsTopLayer());
+        assertTrue(a.needsTopLayerAt(a.nextIdx(0)));
+    }
+
+    /// Recovery opens fresh lanes for every lane, not only lane 0.
+    function test_recoverResetsAllLanes() public {
+        (uint64 i, AegisCCHSBase.LayerSig memory l0, AegisCCHSBase.LayerSig memory l1) = _laneOp();
+        a.executeFirst(target, value, "", i, l0, l1);
+        _exec(0);
+        (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
+        a.recover(newRoot, newRec, w, p);
+        assertEq(a.nextIdx(1), i);
+        assertEq(a.nonce(1), 0);
+        assertEq(a.nextIdx(0), 0);
     }
 
     function test_revert_oldKeyAfterRecovery() public {

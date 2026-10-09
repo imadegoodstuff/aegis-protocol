@@ -9,7 +9,7 @@
 //    (after the ERC-20 approvals it needs). On an existing account it moves
 //    the assets in with plain transfers instead.
 // 5. "Spend" moves anything back out: the digest is computed locally, checked
-//    against the contract's nextDigest, signed with the CCHS key, and the
+//    against the contract's digestAt for this device's lane, signed with the CCHS key, and the
 //    `execute` call is relayed by the injected wallet, which only pays gas.
 //    Nothing is signed or sent without the user's wallet confirmation.
 
@@ -21,7 +21,7 @@ import {
 } from "../aegis/wallet";
 import { isValidMnemonic } from "../aegis/derive";
 import { CchsPool } from "../aegis/cchsPool";
-import { cchsMaster, deriveChainIdentity, type ChainIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, recordMissing, epochKey, highestRecoverySigned, markRecoverySigned, type CchsIdentity } from "../aegis/cchsAccount";
+import { cchsMaster, deriveChainIdentity, type ChainIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, recordMissing, epochKey, deviceLane, setDeviceLane, laneFirst, LANES, highestRecoverySigned, markRecoverySigned, type CchsIdentity } from "../aegis/cchsAccount";
 import { cchsK, H, toAbiLayerSig, signatureBytes, toHex, type CchsKey, type Tree } from "../aegis/cchs";
 import CopyBtn from "./CopyBtn";
 
@@ -38,7 +38,7 @@ type ChainState = {
 
 type RowAction = { phase: "idle" | "switching" | "confirm" | "pending" | "done" | "error"; tx?: Hex; msg?: string; step?: string };
 
-type SpendState = { phase: "idle" | "reading" | "signing" | "confirm" | "pending" | "done" | "error" | "rotate" | "rotating" | "rotated"; msg?: string; tx?: Hex; bytes?: number; layers?: number; epoch?: number; nextIdx?: number };
+type SpendState = { phase: "idle" | "reading" | "signing" | "confirm" | "pending" | "done" | "error" | "rotate" | "rotating" | "rotated"; msg?: string; tx?: Hex; bytes?: number; layers?: number; epoch?: number; nextIdx?: number; lane?: number };
 
 const NON_EVM = [
   { name: "Solana", set: "C-20", status: "single-packet program in solana/: cache_subtree once per 1 024 operations, then one 864 B signature per execute (v0 tx with lookup table, 1 090 B); fixture-tested, not deployed" },
@@ -78,6 +78,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   const [spendAsset, setSpendAsset] = useState("native");
   const [spendTo, setSpendTo] = useState("");
   const [spendAmt, setSpendAmt] = useState("");
+  const [lane, setLane] = useState(() => deviceLane());
   const [spend, setSpend] = useState<SpendState>({ phase: "idle" });
 
   const tokens = useMemo(() => parseTokens(tokenText), [tokenText]);
@@ -325,7 +326,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       });
       setSpend({ phase: "rotating", msg: "pending…", tx });
       await pub.waitForTransactionReceipt({ hash: tx });
-      markIndexSigned(chain.id, account, epoch + 1, -1); // fresh record for the new epoch
+      markIndexSigned(chain.id, account, epoch + 1, -1, deviceLane()); // fresh record for the new epoch in this device's lane
       setSpend({ phase: "rotated", epoch: epoch + 1, tx });
       setRefresh((n) => n + 1);
     } catch (e) {
@@ -355,21 +356,23 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [spendTo as Address, parseUnits(spendAmt || "0", ts.decimals)] });
       }
 
-      // 2. Choose the leaf: never below the chain's nextIdx, never one this device signed before.
+      // 2. Choose the leaf in this device's lane: never below the lane's nextIdx,
+      //    never one this device signed before. Other devices own other lanes.
+      const lane = deviceLane();
       const [nextIdx, nonce, epochBig, onchainRoot, onchainRecRoot] = await Promise.all([
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nextIdx" }) as Promise<bigint>,
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nonce" }) as Promise<bigint>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nextIdx", args: [lane] }) as Promise<bigint>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nonce", args: [lane] }) as Promise<bigint>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "epoch" }) as Promise<bigint>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "root" }) as Promise<Hex>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recRoot" }) as Promise<Hex>,
       ]);
       const epoch = Number(epochBig);
-      if (recordMissing(chain.id, account, epoch, nextIdx)) {
-        setSpend({ phase: "rotate", epoch, nextIdx: Number(nextIdx) });
+      if (recordMissing(chain.id, account, epoch, nextIdx, lane)) {
+        setSpend({ phase: "rotate", epoch, nextIdx: Number(nextIdx) - laneFirst(lane), lane });
         return;
       }
       const { key, trees } = await epochKeys(chain.id, epoch, onchainRoot, onchainRecRoot);
-      const idx = nextSigningIndex(chain.id, account, epoch, nextIdx);
+      const idx = nextSigningIndex(chain.id, account, epoch, nextIdx, lane);
       const [needsTop, onchainDigest] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "needsTopLayerAt", args: [BigInt(idx)] }) as Promise<boolean>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "digestAt", args: [BigInt(idx), target, value, data] }) as Promise<Hex>,
@@ -389,7 +392,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       const treeIdx = BigInt(idx >> H);
       const ck = `0/${treeIdx}`;
       if (!trees.has(ck)) trees.set(ck, await poolRef.current!.tree(key, "K", 0, treeIdx, H));
-      markIndexSigned(chain.id, account, epoch, idx);
+      markIndexSigned(chain.id, account, epoch, idx, lane);
       const sig = cchsK.sign(key, idx, m, !needsTop, trees);
       // Local verification against the roots the chain holds, before anything leaves the device.
       cchsK.verify({ root: hexToBytes(onchainRoot), recRoot: hexToBytes(onchainRecRoot) }, idx, m, sig, needsTop ? undefined : trees.get(ck)!.root);
@@ -543,6 +546,11 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                   </label>
                   <label><span>Recipient</span><input spellCheck={false} placeholder="0x…" value={spendTo} onChange={(e) => setSpendTo(e.target.value)} /></label>
                   <label><span>Amount</span><input type="number" min="0" step="any" placeholder="0.0" value={spendAmt} onChange={(e) => setSpendAmt(e.target.value)} /></label>
+                  <label title="The account's 2^20 leaves are split into 16 lanes with independent on-chain counters. Give every device its own lane; devices then sign concurrently without coordinating. Never let two devices share a lane."><span>Device lane</span>
+                    <select value={lane} onChange={(e) => { setDeviceLane(Number(e.target.value)); setLane(Number(e.target.value)); }}>
+                      {Array.from({ length: LANES }, (_, i) => <option key={i} value={i}>{i}{i === 0 ? " (default)" : ""} · leaves {(laneFirst(i)).toLocaleString("en-US")}–{(laneFirst(i + 1) - 1).toLocaleString("en-US")}</option>)}
+                    </select>
+                  </label>
                 </div>
                 <div className="spend-actions">
                   <button className="btn btn-primary btn-sm" disabled={!walletPresent || spendChain === "" || !spendTo || !spendAmt || ["reading", "signing", "confirm", "pending"].includes(spend.phase)} onClick={doSpend}>
@@ -556,7 +564,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                 {(spend.phase === "rotate" || spend.phase === "rotating" || spend.phase === "rotated") && (
                   <div className="spend-actions">
                     <span className="protect-err">
-                      {spend.phase === "rotate" && <>This device has no signing record for this account (epoch {spend.epoch}, {spend.nextIdx} leaves used). It cannot know which leaves an earlier copy signed, so it will not sign in this epoch. Rotate the keys first: one recovery transaction opens a fresh index space (epoch {spend.epoch! + 1}, keys derived from the same mnemonic).</>}
+                      {spend.phase === "rotate" && <>This device has no signing record for lane {spend.lane} of this account (epoch {spend.epoch}, {spend.nextIdx} leaves of the lane used). It cannot know which leaves an earlier copy signed, so it will not sign in this lane in this epoch. Either give this device a lane no other device uses (device lane, above), or rotate the keys: one recovery transaction opens a fresh index space (epoch {spend.epoch! + 1}, keys derived from the same mnemonic).</>}
                       {spend.phase === "rotating" && (spend.msg ?? "rotating…")}
                       {spend.phase === "rotated" && <>keys rotated to epoch {spend.epoch}; you can sign now</>}
                     </span>

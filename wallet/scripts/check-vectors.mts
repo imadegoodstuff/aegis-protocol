@@ -66,7 +66,9 @@ for (const v of ['S', 'K'] as const) {
   check(`${v}-20 fixture bottomRoot0`, cchs.toHex(c.buildTree(key, 0, 0n, cchs.H).root), f.bottomRoot0);
   check(`${v}-20 fixture bottomRoot1`, cchs.toHex(c.buildTree(key, 0, 1n, cchs.H).root), f.bottomRoot1);
   const account = fromHex(f.account);
-  for (const op of [...f.ops, ...f.skip.ops]) {
+  check(`${v}-20 fixture lane bottomRoot (tree 64)`, cchs.toHex(c.buildTree(key, 0, 64n, cchs.H).root), f.lane.bottomRoot);
+  check(`${v}-20 lane op sits at the first leaf of lane 1 with lane nonce 0`, `${f.lane.ops[0].idx}/${f.lane.ops[0].nonce}`, `${1 << 16}/0`);
+  for (const op of [...f.ops, ...f.skip.ops, ...f.lane.ops]) {
     const m = c.executeDigest({ chainId: BigInt(f.chainId), account, nonce: BigInt(op.nonce), idx: BigInt(op.idx), target: fromHex(op.target), value: BigInt(op.value), dataHash: fromHex(keccak256(op.data)) });
     check(`${v}-20 digest idx ${op.idx}`, cchs.toHex(m), op.digest);
     const s = c.sign(key, op.idx, m, op.l1 === null, cache);

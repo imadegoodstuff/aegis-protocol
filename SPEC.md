@@ -75,14 +75,16 @@ function recover(bytes32 newRoot, bytes32 newRecRoot,
 
 function digestAt(uint64 idx, address target, uint256 value, bytes data) view returns (bytes32)
 function needsTopLayerAt(uint64 idx) view returns (bool)
-function nextDigest(address target, uint256 value, bytes data) view returns (bytes32)  // idx = nextIdx
-function needsTopLayer() view returns (bool)
+function nextIdx(uint8 lane) view returns (uint64)
+function nonce(uint8 lane) view returns (uint64)
+function laneOf(uint64 idx) pure returns (uint8)   // idx >> 16
 
-bytes32 root; bytes32 recRoot; uint64 epoch; uint64 nextIdx; uint64 nonce; uint64 recNonce;
+bytes32 root; bytes32 recRoot; uint64 epoch; uint64 recNonce;
 mapping(uint256 => bytes32) cachedRoot;   // key = (epoch << 64) | bottomTreeIdx
+mapping(uint256 => uint256) _lane;        // key = (epoch << 8) | lane, value = nonce << 64 | nextIdx
 ```
 
-`idx` is chosen by the signer: any `idx ≥ nextIdx` is accepted and `nextIdx` becomes `idx + 1` (`IndexUsed` otherwise). `executeFirst` on an already registered subtree ignores the redundant top layer.
+`idx` is chosen by the signer within its lane (16 lanes of 65 536 leaves, lane = top four bits): any `idx ≥ nextIdx(lane)` is accepted and that lane's `nextIdx` becomes `idx + 1` (`IndexUsed` otherwise); lanes are independent, so devices owning different lanes sign concurrently. `executeFirst` on an already registered subtree ignores the redundant top layer.
 
 Two contracts share this interface via `AegisCCHSBase`: `AegisCCHS` (`CCHS-S-20`, SHA-256) and `AegisCCHSK` (`CCHS-K-20`, keccak256, EVM default). Both: w = 16, 67 chains, two layers of height 10, 2^20 signatures, 256 recoveries.
 

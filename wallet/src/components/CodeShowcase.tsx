@@ -64,23 +64,24 @@ const TABS: Tab[] = [
 abstract contract AegisCCHSBase {
     bytes32 public root;      // top-layer tree root, rotated only by recover
     bytes32 public recRoot;   // recovery tree root (height 8)
-    uint64  public epoch;     // bumped by every recovery; namespaces the cache
-    uint64  public nextIdx;   // next unused leaf in [0, 2^20)
-    uint64  public nonce;
+    uint64  public epoch;     // bumped by every recovery; namespaces cache and lanes
     /// key = (epoch << 64) | bottomTreeIdx
     mapping(uint256 => bytes32) public cachedRoot;
+    /// key = (epoch << 8) | lane; value = nonce << 64 | nextIdx.
+    /// 16 lanes of 65 536 leaves: one device per lane, no coordination.
+    mapping(uint256 => uint256) internal _lane;
 
     /// Cached path: one WOTS+ signature and one auth path, 2 464 B.
     function execute(address target, uint256 value, bytes calldata data,
                      uint64 idx, LayerSig calldata l0)
         external returns (bytes memory result)
     {
-        bytes32 m  = _begin(idx, target, value, data);   // idx >= nextIdx
+        bytes32 m  = _begin(idx, target, value, data);   // idx >= nextIdx of its lane
         bytes32 r0 = _layerRoot(0, idx >> H, uint32(idx & (LEAVES - 1)), m, l0);
         bytes32 cached = cachedRoot[_cacheKey(idx >> H)];
         if (cached == bytes32(0)) revert MissingTopLayer();
         if (cached != r0)         revert BadSubtreeRoot();
-        return _finish(idx, target, value, data);        // nextIdx = idx + 1
+        return _finish(idx, target, value, data);        // lane: nextIdx = idx + 1, nonce += 1
     }
 
     /// First operation in a subtree: also carries the top-layer proof,

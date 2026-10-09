@@ -17,7 +17,7 @@ import { Common, Hardfork, Chain } from '@ethereumjs/common';
 import { Address, Account, hexToBytes, bytesToHex } from '@ethereumjs/util';
 import { encodeFunctionData, decodeFunctionResult, keccak256, type Hex } from 'viem';
 import * as cchs from '../src/aegis/cchs.ts';
-import { chainKey, epochKey, evmChainTag, predictAccount } from '../src/aegis/cchsAccount.ts';
+import { chainKey, epochKey, evmChainTag, laneFirst, laneOf, predictAccount } from '../src/aegis/cchsAccount.ts';
 import artifacts from '../src/aegis/cchsArtifacts.json' with { type: 'json' };
 
 const common = new Common({ chain: Chain.Mainnet, hardfork: Hardfork.Cancun });
@@ -77,19 +77,21 @@ for (const variant of ['S', 'K'] as const) {
 
   const view = async (fn: string, args: any[] = []) => { const r = await send(account, encode(abi, fn, args)); if (!r.ok) throw new Error(`${fn} reverted`); return decode(abi, fn, r.ret) as any; };
 
-  // 3. signing helper (mirrors ProtectPanel.doSpend)
-  let signed = -1; // write-ahead record of this "device"
-  async function spend(opts: { key?: cchs.CchsKey; trees?: Map<string, cchs.Tree>; idx?: number; value?: bigint; target?: Address; tamper?: (s: cchs.CchsSignature) => void; noTop?: boolean; record?: boolean } = {}) {
+  // 3. signing helper (mirrors ProtectPanel.doSpend); one write-ahead record per lane ("device")
+  let signed: Record<number, number> = {};
+  async function spend(opts: { key?: cchs.CchsKey; trees?: Map<string, cchs.Tree>; idx?: number; lane?: number; value?: bigint; target?: Address; tamper?: (s: cchs.CchsSignature) => void; noTop?: boolean; record?: boolean } = {}) {
     const key = opts.key ?? master, trees = opts.trees ?? cache;
     const epoch = Number(await view('epoch'));
-    const nextIdx = Number(await view('nextIdx')), nonce = BigInt(await view('nonce'));
-    const idx = opts.idx ?? Math.max(nextIdx, signed + 1);
+    const lane = opts.lane ?? (opts.idx !== undefined ? laneOf(opts.idx) : 0);
+    const nextIdx = Number(await view('nextIdx', [lane])), nonce = BigInt(await view('nonce', [lane]));
+    const idx = opts.idx ?? Math.max(nextIdx, (signed[lane] ?? -1) + 1, laneFirst(lane));
+    if (laneOf(idx) !== lane) fail(`${set} index ${idx} is not in lane ${lane}`);
     const value = opts.value ?? 10n ** 17n, target = opts.target ?? recipient;
     const needsTop = opts.noTop ? false : (await view('needsTopLayerAt', [BigInt(idx)])) as boolean;
     const onchain = (await view('digestAt', [BigInt(idx), target.toString(), value, '0x'])) as string;
     const m = c.executeDigest({ chainId: 1n, account: hexToBytes(account.toString()), nonce, idx: BigInt(idx), target: hexToBytes(target.toString()), value, dataHash: hexToBytes(keccak256('0x')) });
     if (bytesToHex(m) !== onchain) fail(`${set} client digest != digestAt at idx ${idx}`);
-    if (opts.record !== false) signed = Math.max(signed, idx);
+    if (opts.record !== false) signed[lane] = Math.max(signed[lane] ?? -1, idx);
     const sig = c.sign(key, idx, m, !needsTop, trees);
     opts.tamper?.(sig);
     const fn = sig.l1 ? 'executeFirst' : 'execute';
@@ -105,7 +107,7 @@ for (const variant of ['S', 'K'] as const) {
   rows.push({ set, step: 'cached subtree (execute)', calldata: r.calldata, exec: r.exec, total: r.total });
 
   // 5. signer-chosen index: skip, jump, then everything that must fail
-  r = await spend({ idx: 9 }); if (!r.ok || Number(await view('nextIdx')) !== 10) fail(`${set} skip to 9`);
+  r = await spend({ idx: 9 }); if (!r.ok || Number(await view('nextIdx', [0])) !== 10) fail(`${set} skip to 9`);
   r = await spend({ idx: 1024 }); if (!r.ok || !r.needsTop) fail(`${set} jump to subtree 1 with top layer`);
   rows.push({ set, step: 'jump to a fresh subtree (executeFirst)', calldata: r.calldata, exec: r.exec, total: r.total });
   r = await spend({ idx: 1030, noTop: true }); if (!r.ok) fail(`${set} cached signature in subtree 1`);
@@ -114,6 +116,31 @@ for (const variant of ['S', 'K'] as const) {
   if ((await spend({ idx: 2048, noTop: true, record: false })).ok) fail(`${set} FRESH SUBTREE WITHOUT TOP LAYER ACCEPTED`);
   if ((await spend({ record: false, tamper: (s) => { s.l0.wots[5][0] ^= 1; } })).ok) fail(`${set} TAMPERED CHAIN VALUE ACCEPTED`);
   if ((await spend({ record: false, tamper: (s) => { s.l0.auth[2][0] ^= 1; } })).ok) fail(`${set} TAMPERED AUTH PATH ACCEPTED`);
+
+  // 5b. lanes: a second "device" owns lane 1 and signs without reading lane 0.
+  //     Its first leaf is 65 536 (bottom tree 64) with lane nonce 0; landing it
+  //     leaves lane 0's nextIdx and nonce untouched, and a lane-0 transaction
+  //     prepared *before* the lane-1 one landed still lands afterwards.
+  const lane0Before = [Number(await view('nextIdx', [0])), Number(await view('nonce', [0]))];
+  const prepared = await (async () => { // prepare a lane-0 signature now, send it later
+    const idx = Math.max(lane0Before[0], (signed[0] ?? -1) + 1), nonce = BigInt(lane0Before[1]);
+    const m = c.executeDigest({ chainId: 1n, account: hexToBytes(account.toString()), nonce, idx: BigInt(idx), target: hexToBytes(recipient.toString()), value: 10n ** 17n, dataHash: hexToBytes(keccak256('0x')) });
+    signed[0] = idx;
+    const sig = c.sign(master, idx, m, true, cache);
+    return { idx, data: encode(abi, 'execute', [recipient.toString(), 10n ** 17n, '0x', BigInt(idx), cchs.toAbiLayerSig(sig.l0)]) };
+  })();
+  r = await spend({ lane: 1 }); if (!r.ok || r.idx !== laneFirst(1) || !r.needsTop) fail(`${set} first signature in lane 1: ${r.err}`);
+  rows.push({ set, step: 'first signature in lane 1 (another device, executeFirst)', calldata: r.calldata, exec: r.exec, total: r.total });
+  r = await spend({ lane: 1 }); if (!r.ok || r.idx !== laneFirst(1) + 1) fail(`${set} cached signature in lane 1: ${r.err}`);
+  rows.push({ set, step: 'cached signature in lane 1 (execute)', calldata: r.calldata, exec: r.exec, total: r.total });
+  if (Number(await view('nextIdx', [0])) !== lane0Before[0] || Number(await view('nonce', [0])) !== lane0Before[1]) fail(`${set} lane 1 moved lane 0's state`);
+  if (Number(await view('nextIdx', [1])) !== laneFirst(1) + 2 || Number(await view('nonce', [1])) !== 2) fail(`${set} lane 1 state`);
+  const late = await send(account, prepared.data);
+  if (!late.ok) fail(`${set} lane-0 transaction prepared before lane-1 activity was invalidated: ${late.err}`);
+  if ((await spend({ idx: laneFirst(1), record: false })).ok) fail(`${set} LANE 1 INDEX REUSE ACCEPTED`);
+  if ((await spend({ idx: laneFirst(1) + 1, record: false })).ok) fail(`${set} LANE 1 BACKWARD INDEX ACCEPTED`);
+  // a lane-1 digest is not valid as a lane-0 one and vice versa: the index (and so the lane) is in the digest
+  if ((await spend({ idx: laneFirst(2), noTop: true, record: false })).ok) fail(`${set} FRESH LANE WITHOUT TOP LAYER ACCEPTED`);
 
   // 6. rotation: recovery to epoch 1 with keys derived from the same chain key
   const recNonce = Number(await view('recNonce'));
@@ -125,7 +152,7 @@ for (const variant of ['S', 'K'] as const) {
   const rot = await send(account, encode(abi, 'recover', [cchs.toHex(nextPub.root), cchs.toHex(nextPub.recRoot), rs.wots.map(cchs.toHex), rs.auth.map(cchs.toHex)]));
   if (!rot.ok) fail(`${set} rotation rejected: ${rot.err}`);
   rows.push({ set, step: 'key rotation (recover)', calldata: rot.calldata, exec: rot.exec, total: rot.total });
-  if (Number(await view('epoch')) !== 1 || Number(await view('nextIdx')) !== 0) fail(`${set} epoch/nextIdx after rotation`);
+  if (Number(await view('epoch')) !== 1 || Number(await view('nextIdx', [0])) !== 0 || Number(await view('nextIdx', [1])) !== laneFirst(1) || Number(await view('nonce', [1])) !== 0) fail(`${set} epoch/lanes after rotation`);
   if ((await view('root')) !== cchs.toHex(nextPub.root)) fail(`${set} root not rotated`);
   // old keys are dead, even at a fresh index with their top layer
   if ((await spend({ record: false })).ok) fail(`${set} OLD EPOCH KEY ACCEPTED AFTER ROTATION`);
@@ -133,7 +160,7 @@ for (const variant of ['S', 'K'] as const) {
   if ((await send(account, encode(abi, 'recover', [cchs.toHex(nextPub.root), cchs.toHex(nextPub.recRoot), rs.wots.map(cchs.toHex), rs.auth.map(cchs.toHex)]))).ok) fail(`${set} ROTATION REPLAYED`);
 
   // 7. spend under epoch 1 (fresh index space: first signature carries the top layer), then withdraw everything
-  signed = -1;
+  signed = {};
   r = await spend({ key: next, trees: nextCache }); if (!r.ok || !r.needsTop) fail(`${set} first signature under epoch 1: ${r.err}`);
   rows.push({ set, step: 'first signature after rotation (executeFirst)', calldata: r.calldata, exec: r.exec, total: r.total });
   const rest = await balance(account);

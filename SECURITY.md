@@ -9,6 +9,7 @@ Aegis has **not** been audited. Nothing in this repository is deployed on a main
 3. **Replay resistance.** A valid signature is bound to `(chainId, account, epoch, idx, target, value, data)`; it is accepted at most once by one account on one chain.
 4. **Cache soundness.** A cached bottom-subtree root is only ever accepted for the `(epoch, treeIdx)` it was proven for, and the proof bound it to the root current at that time.
 5. **Recovery.** The holder of the master can move the account to a new root (same master, next epoch; or a fresh master) using a one-time key that is never used for spending, and the previous root is dead afterwards.
+6. **Lane independence (EVM contracts).** The index space is split into 16 lanes with independent on-chain `nextIdx` and `nonce`; an accepted operation in one lane changes the verifier's verdict on no signature made for another lane (`CCHS.spec.md` §6, LI). Devices that own distinct lanes therefore sign concurrently without coordination. Which device owns which lane is a client assignment and is not checked on chain.
 
 Not claimed: anonymity, resistance to a compromised client device while it holds the master, anything about the chains' own cryptography (account addresses derived with ECDSA/Ed25519 are not post-quantum, and the wallet labels them as such), or availability under censorship.
 
@@ -23,11 +24,11 @@ Not claimed: anonymity, resistance to a compromised client device while it holds
 
 | Property | Check | Where | In CI |
 |---|---|---|---|
-| Verifier logic (claims 2–4 on the chain side) | bounded model check, 4 seeded bugs caught | `model/cchs-state.mjs` | yes |
+| Verifier logic (claims 2–4 and lane independence on the chain side) | bounded model check, 6 seeded bugs caught (incl. a nonce shared across lanes) | `model/cchs-state.mjs` | yes |
 | Client rules (claim 2 on the device side) | bounded model check, 6 seeded rule violations caught (incl. one tree shared between two chains) | `model/cchs-client.mjs` | yes |
 | Wallet implements the client rules | unit tests over a storage shim | `wallet/scripts/check-index-discipline.mts` | yes |
-| Contract behaviour per set | Foundry, 20 tests × 3 sets incl. index reuse, backward index after skip, stale root, wrong chain | `evm/test/AegisCCHS.t.sol` | yes |
-| Full life cycle with costs | create → first → cached → skip → rotation → old root rejected → withdraw, in an EVM | `wallet/scripts/evm-flow.mts` | yes |
+| Contract behaviour per set | Foundry, 26 tests × 2 sets incl. index reuse, backward index after skip, stale root, lanes (independence, replay, reset by recovery) | `evm/test/AegisCCHS.t.sol` | yes |
+| Full life cycle with costs | create → first → cached → skip → second lane → rotation → old root rejected → withdraw, in an EVM | `wallet/scripts/evm-flow.mts` | yes |
 | Cross-implementation agreement | shared fixtures replayed by Solidity, Rust, Cairo, FunC, Move, TypeScript | `evm/test/fixtures/`, each chain directory | yes |
 | Key derivation is pinned | mnemonic → master → roots → addresses vector | `evm/test/fixtures/cchs-derivation.json`, `wallet/scripts/check-vectors.mts` | yes |
 | Hash security numbers | hand analysis, two accountings | `CCHS.spec.md` §5.5 | n/a |
@@ -39,7 +40,7 @@ Bounded model checks explore every state up to the stated bounds; they are not p
 - No independent audit of any component.
 - No machine-checked proof; no written reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` (C-20).
 - No mainnet deployment; gas figures come from a local EVM and Solana compute units from the `solana-program-test` runtime in CI, not from a public cluster.
-- The wallet is a reference implementation: single signer by default, browser `localStorage` for the index record, no hardware-key support.
+- The wallet is a reference implementation: browser `localStorage` for the index record and the device lane, no hardware-key support; lane assignment between devices is a user action that the protocol cannot check.
 - Side channels in the client's hash chains (timing of WOTS+ chain lengths) are not addressed; the signer runs in a browser or a user's own process.
 
 ## 5. Audit scope we propose

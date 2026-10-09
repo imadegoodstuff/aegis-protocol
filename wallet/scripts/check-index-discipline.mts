@@ -11,7 +11,7 @@ const store = new Map<string, string>();
   clear: () => store.clear(),
 };
 
-const { nextSigningIndex, markIndexSigned, highestSignedIndex, recordMissing, highestRecoverySigned, markRecoverySigned, epochKey, chainKey, evmChainTag, labelChainTag } = await import('../src/aegis/cchsAccount.ts');
+const { nextSigningIndex, markIndexSigned, highestSignedIndex, recordMissing, highestRecoverySigned, markRecoverySigned, epochKey, chainKey, evmChainTag, labelChainTag, laneOf, laneFirst, deviceLane, setDeviceLane, LANES } = await import('../src/aegis/cchsAccount.ts');
 const { toHex, cchsK, sk } = await import('../src/aegis/cchs.ts');
 
 let failures = 0;
@@ -50,6 +50,27 @@ markRecoverySigned(1, A, 0);
 ok(highestRecoverySigned(1, A) === 0, 'recovery leaf 0 recorded before signing');
 markIndexSigned(1, A, 1, -1);
 ok(!recordMissing(1, A, 1, 0n) && nextSigningIndex(1, A, 1, 0n) === 0, 'epoch 1 starts with a fresh record at index 0');
+
+// lanes: a second device owns lane 3; its record is separate, its first index is the lane's first leaf,
+// and a lane that has been used without a record on this device is refused like an account was.
+store.clear();
+ok(laneOf(0) === 0 && laneOf(65_535) === 0 && laneOf(65_536) === 1 && laneOf((1 << 20) - 1) === LANES - 1, 'lane = top four bits of the index');
+ok(laneFirst(3) === 3 * 65_536, 'lane 3 starts at leaf 196 608');
+ok(deviceLane() === 0, 'a device defaults to lane 0');
+setDeviceLane(3);
+ok(deviceLane() === 3, 'the device lane is persisted');
+let threw = false; try { setDeviceLane(16); } catch { threw = true; }
+ok(threw, 'lane 16 does not exist');
+ok(!recordMissing(1, A, 0, BigInt(laneFirst(3)), 3), 'fresh lane 3 (nextIdx at its first leaf) needs no record');
+ok(nextSigningIndex(1, A, 0, BigInt(laneFirst(3)), 3) === laneFirst(3), 'first index in lane 3 is its first leaf, even though lane 0 has records');
+ok(nextSigningIndex(1, A, 0, 0n, 3) === laneFirst(3), 'a chain value below the lane (misread) never pulls the index out of the lane');
+markIndexSigned(1, A, 0, laneFirst(3), 3);
+ok(highestSignedIndex(1, A, 0, 3) === laneFirst(3) && highestSignedIndex(1, A, 0, 0) === null, 'lane records are separate (lane 0 untouched)');
+ok(nextSigningIndex(1, A, 0, BigInt(laneFirst(3)), 3) === laneFirst(3) + 1, 'dropped lane-3 transaction: its leaf is abandoned');
+ok(recordMissing(1, A, 0, BigInt(laneFirst(2) + 5), 2), 'lane 2 used on chain, no record here: refused');
+threw = false; try { nextSigningIndex(1, A, 0, BigInt(laneFirst(4)), 3); } catch { threw = true; }
+ok(threw, 'a lane cannot sign past its last leaf');
+setDeviceLane(0);
 
 // per-epoch keys: epoch 0 is the master; later epochs are distinct and deterministic
 const master = { master: new Uint8Array(32).fill(7) };
