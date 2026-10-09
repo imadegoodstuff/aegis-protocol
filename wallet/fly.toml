@@ -27,5 +27,5 @@ primary_region = "iad"
     path = "/"
 
 [[vm]]
-  size = "performance-1x"         # dedicated CPU, 2 GB RAM
-  memory = "2gb"
+  size = "performance-12x"        # 12 dedicated vCPUs, 24 GB RAM
+  memory = "24gb"
