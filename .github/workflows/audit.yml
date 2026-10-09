@@ -45,6 +45,16 @@ jobs:
         with: { python-version: '3.11' }
       - run: pip install mythril
       - run: myth version
+      # solc-bin.ethereum.org, which Mythril's solcx would download from, no
+      # longer resolves; take the 0.8.28 static binary from the solidity
+      # release and let Mythril pick up `solc` from PATH.
+      - name: solc 0.8.28
+        run: |
+          mkdir -p "$HOME/bin"
+          curl -sSL -o "$HOME/bin/solc" https://github.com/ethereum/solidity/releases/download/v0.8.28/solc-static-linux
+          chmod +x "$HOME/bin/solc"
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+          "$HOME/bin/solc" --version
       # Same compiler settings as foundry.toml (via-ir, 0.8.28); Mythril reads
       # them from a solc standard-json "settings" object.
       - name: Compiler settings
@@ -63,8 +73,10 @@ jobs:
           : > mythril-report.md
           for f in src/AegisCCHS.sol src/AegisCCHSK.sol src/AegisCCHSFactory.sol src/UpgradeHelper.sol; do
             echo "## $f" >> mythril-report.md
-            myth analyze "$f" --solv 0.8.28 --solc-json solc.json --execution-timeout 900 --max-depth 64 -o markdown \
-              | tee -a mythril-report.md || true
+            myth analyze "$f" --solc-json solc.json --execution-timeout 900 --max-depth 64 -o markdown \
+              2> myth.err | tee -a mythril-report.md || true
+            cat myth.err
+            if grep -q "\[ERROR\]" myth.err; then echo "Mythril failed on $f"; exit 1; fi
             echo >> mythril-report.md
           done
       - name: Summary
