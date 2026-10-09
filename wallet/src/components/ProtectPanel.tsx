@@ -61,12 +61,14 @@ function parseTokens(s: string): Address[] {
 }
 
 export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
-  const wellFormed = isValidMnemonic(mnemonic);
+  const valid = isValidMnemonic(mnemonic);
   const seedBits = mnemonicEntropyBits(mnemonic);
   // A CCHS account is as strong as the seed behind it: a quantum search over
   // the seed costs about 2^(bits/2) steps, so 128 bits of mnemonic sit far
-  // below the 2^113 of the signatures (CCHS.spec.md §5.6, P4). Refuse them.
-  const valid = wellFormed && seedBits >= CCHS_MIN_SEED_BITS;
+  // below the 2^113 of the signatures (CCHS.spec.md §5.6, P4). A weak seed
+  // may still derive its keys and Spend (nothing is ever stranded), but it
+  // may not Protect: no account is created or funded behind such a seed.
+  const strongSeed = seedBits >= CCHS_MIN_SEED_BITS;
   const poolRef = useRef<CchsPool | null>(null);
   const [id, setId] = useState<CchsIdentity | null>(null);
   const [genMs, setGenMs] = useState<number | null>(null);
@@ -194,7 +196,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   }
 
   async function protect(chain: Chain) {
-    if (!id) return;
+    if (!id || !strongSeed) return;
     const set = (a: RowAction) => setActions((s) => ({ ...s, [chain.id]: a }));
     const st = states[chain.id];
     try {
@@ -434,30 +436,22 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   const protectedChains = useMemo(() => PROTECT_CHAINS.filter((c) => states[c.id]?.account === "deployed"), [states]);
   const spendTokens = spendChain === "" ? [] : Object.entries(states[spendChain]?.tokens ?? {});
 
-  if (!wellFormed) return null;
-
-  if (!valid) {
-    return (
-      <div className="card swap-panel protect-panel">
-        <div className="swap-head">
-          <div className="section-eyebrow">Protect · hash-only account · any asset</div>
-          <h3>This mnemonic carries {seedBits} bits of entropy. CCHS needs {CCHS_MIN_SEED_BITS}.</h3>
-          <p>
-            A hash-based account is exactly as strong as the seed behind it. The signatures cost an attacker at least 2^113
-            quantum steps, but a search over a {seedBits}-bit seed costs about 2^{seedBits / 2}, and every key of every chain
-            derives from that seed. Use a 24-word mnemonic (256 bits) before protecting anything; the panel stays closed
-            for shorter ones so that no account is ever created behind a weaker seed than its signatures.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  if (!valid) return null;
 
   return (
     <div className="card swap-panel protect-panel">
       <div className="swap-head">
         <div className="section-eyebrow">Protect · hash-only account · any asset</div>
         <h3>One mnemonic. An independent key tree and account on every EVM chain. One click each.</h3>
+        {!strongSeed && (
+          <p className="protect-warn">
+            This mnemonic carries {seedBits} bits of entropy; CCHS requires {CCHS_MIN_SEED_BITS}. A hash-based account is
+            exactly as strong as the seed behind it: the signatures cost an attacker at least 2^113 quantum steps, but a
+            search over a {seedBits}-bit seed checked against one public chain value costs about 2^{seedBits / 2 + 12}, and
+            every key of every chain derives from that seed. Protect is disabled for this phrase. Spend still works, so
+            anything an earlier build put behind it can be moved to an account made from a 24-word mnemonic.
+          </p>
+        )}
         <p>
           Your mnemonic derives a CCHS master key, and from it a separate <code>CCHS-K-20</code> tree for each chain
           (a WOTS+ leaf signs one message, so no tree is ever shared between chains). Each tree's roots fix an account
@@ -541,9 +535,9 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                   </div>
                   <button
                     className={`btn ${st?.account === "deployed" ? "" : "btn-primary"} btn-sm`}
-                    disabled={!canProtect || label === "Protected"}
+                    disabled={!canProtect || !strongSeed || label === "Protected"}
                     onClick={() => protect(chain)}
-                    title={!walletPresent ? "Install an injected wallet" : st?.factory === "absent" ? "Publishes the factory through the deterministic proxy, then creates your account" : ""}
+                    title={!strongSeed ? `A ${seedBits}-bit seed is below the ${CCHS_MIN_SEED_BITS} bits CCHS requires` : !walletPresent ? "Install an injected wallet" : st?.factory === "absent" ? "Publishes the factory through the deterministic proxy, then creates your account" : ""}
                   >
                     {label}
                   </button>
