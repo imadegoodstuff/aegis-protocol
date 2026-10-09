@@ -6,7 +6,9 @@ import PqSignDemo from "./PqSignDemo";
 import SwapPanel  from "./SwapPanel";
 import ProtectPanel from "./ProtectPanel";
 
-const SAMPLE = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+// BIP-39 test vector for 32 zero bytes of entropy: 24 words, 256 bits. A 12-word
+// phrase is accepted by the derivation demo but refused by the CCHS panel (§5.6 P4).
+const SAMPLE = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
 
 const EVM_CHAINS = [
   "Ethereum", "BSC", "Polygon", "Arbitrum", "Optimism",
@@ -29,13 +31,14 @@ export default function DerivePanel() {
         <p>
           It derives the CCHS master (hash-only account), an SLH-DSA-SHAKE-192s key (FIPS 205, for the
           hybrid account) and standard addresses for 25 chains. Everything runs in Web Workers; nothing
-          leaves the page. The sample phrase is the public Hardhat / Foundry test vector.
+          leaves the page. The sample phrase is the public BIP-39 test vector for all-zero entropy (24 words); CCHS
+          accounts require 24 words, because a hash-based account is only as strong as the seed behind it.
         </p>
       </div>
 
       <div className="derive-input">
         <label className="derive-label">
-          <span>mnemonic (12 / 24 words)</span>
+          <span>mnemonic (24 words for CCHS; 12 derive addresses only)</span>
           <textarea
             className="derive-area mono"
             spellCheck={false}

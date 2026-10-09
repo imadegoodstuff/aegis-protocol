@@ -124,6 +124,15 @@ export function isValidMnemonic(mnemonic: string): boolean {
   try { return validateMnemonic(mnemonic.trim(), wordlist); } catch { return false; }
 }
 
+/** Entropy behind a BIP-39 mnemonic: 11 bits per word, of which 1/33 is checksum (12 words → 128, 24 → 256). */
+export function mnemonicEntropyBits(mnemonic: string): number {
+  const words = mnemonic.trim().split(/\s+/).filter(Boolean).length;
+  return Math.floor((words * 11 * 32) / 33);
+}
+
+/** The seed entropy below which a CCHS account is weaker than its signatures (CCHS.spec.md §5.6, path P4). */
+export const CCHS_MIN_SEED_BITS = 256;
+
 /** Full identity including the real SLH-DSA secret key (never leaves this closure's return). */
 export type Identity = Derived & {
   // Private material — only exposed by `identity()`; `derive()` strips it.

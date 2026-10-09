@@ -19,7 +19,7 @@ import { encodeFunctionData, erc20Abi, formatEther, formatUnits, hexToBytes, isA
 import {
   detectInjected, requestAccounts, getChainId, switchChain, makePublicClient, makeWalletClient, shortAddr, PROTECT_CHAINS,
 } from "../aegis/wallet";
-import { isValidMnemonic } from "../aegis/derive";
+import { isValidMnemonic, mnemonicEntropyBits, CCHS_MIN_SEED_BITS } from "../aegis/derive";
 import { CchsPool } from "../aegis/cchsPool";
 import { cchsMaster, deriveChainIdentity, type ChainIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, recordMissing, epochKey, deviceLane, setDeviceLane, laneFirst, LANES, highestRecoverySigned, markRecoverySigned, type CchsIdentity } from "../aegis/cchsAccount";
 import { cchsK, H, toAbiLayerSig, signatureBytes, toHex, type CchsKey, type Tree } from "../aegis/cchs";
@@ -61,7 +61,12 @@ function parseTokens(s: string): Address[] {
 }
 
 export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
-  const valid = isValidMnemonic(mnemonic);
+  const wellFormed = isValidMnemonic(mnemonic);
+  const seedBits = mnemonicEntropyBits(mnemonic);
+  // A CCHS account is as strong as the seed behind it: a quantum search over
+  // the seed costs about 2^(bits/2) steps, so 128 bits of mnemonic sit far
+  // below the 2^113 of the signatures (CCHS.spec.md §5.6, P4). Refuse them.
+  const valid = wellFormed && seedBits >= CCHS_MIN_SEED_BITS;
   const poolRef = useRef<CchsPool | null>(null);
   const [id, setId] = useState<CchsIdentity | null>(null);
   const [genMs, setGenMs] = useState<number | null>(null);
@@ -429,7 +434,24 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   const protectedChains = useMemo(() => PROTECT_CHAINS.filter((c) => states[c.id]?.account === "deployed"), [states]);
   const spendTokens = spendChain === "" ? [] : Object.entries(states[spendChain]?.tokens ?? {});
 
-  if (!valid) return null;
+  if (!wellFormed) return null;
+
+  if (!valid) {
+    return (
+      <div className="card swap-panel protect-panel">
+        <div className="swap-head">
+          <div className="section-eyebrow">Protect · hash-only account · any asset</div>
+          <h3>This mnemonic carries {seedBits} bits of entropy. CCHS needs {CCHS_MIN_SEED_BITS}.</h3>
+          <p>
+            A hash-based account is exactly as strong as the seed behind it. The signatures cost an attacker at least 2^113
+            quantum steps, but a search over a {seedBits}-bit seed costs about 2^{seedBits / 2}, and every key of every chain
+            derives from that seed. Use a 24-word mnemonic (256 bits) before protecting anything; the panel stays closed
+            for shorter ones so that no account is ever created behind a weaker seed than its signatures.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="card swap-panel protect-panel">
