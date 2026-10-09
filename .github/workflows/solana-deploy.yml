@@ -1,0 +1,85 @@
+name: solana-deploy
+
+# Deploys (or upgrades) the aegis_account program from the commit it runs on.
+# Manual only. The two keypairs come from repository secrets:
+#   SOLANA_PROGRAM_KEYPAIR  JSON keypair of AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr
+#   SOLANA_DEPLOYER_KEYPAIR JSON keypair of the payer / upgrade authority
+# On devnet the payer is topped up from the faucet; on mainnet-beta it has to
+# hold the rent already (about 2x the ELF size in lamports at the current
+# rate) and nothing here moves funds other than paying for the deployment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      cluster:
+        description: "Cluster"
+        required: true
+        default: devnet
+        type: choice
+        options: [devnet, mainnet-beta]
+
+concurrency: solana-deploy
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: solana } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: solana }
+      - name: Install Anza toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.6/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - name: Build the program (SBF)
+        run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml -- --locked
+      - name: Keypairs
+        env:
+          PROGRAM_KEYPAIR: ${{ secrets.SOLANA_PROGRAM_KEYPAIR }}
+          DEPLOYER_KEYPAIR: ${{ secrets.SOLANA_DEPLOYER_KEYPAIR }}
+        run: |
+          test -n "$PROGRAM_KEYPAIR" || { echo "SOLANA_PROGRAM_KEYPAIR secret missing"; exit 1; }
+          test -n "$DEPLOYER_KEYPAIR" || { echo "SOLANA_DEPLOYER_KEYPAIR secret missing"; exit 1; }
+          umask 077
+          printf '%s' "$PROGRAM_KEYPAIR" > "$RUNNER_TEMP/program.json"
+          printf '%s' "$DEPLOYER_KEYPAIR" > "$RUNNER_TEMP/deployer.json"
+          PROG=$(solana-keygen pubkey "$RUNNER_TEMP/program.json")
+          grep -q "declare_id!(\"$PROG\")" programs/aegis_account/src/lib.rs || { echo "program keypair $PROG does not match declare_id!"; exit 1; }
+          solana config set --url "${{ inputs.cluster }}" --keypair "$RUNNER_TEMP/deployer.json"
+          echo "deployer: $(solana address)"
+      - name: Fund the deployer (devnet faucet)
+        if: inputs.cluster == 'devnet'
+        run: |
+          need=$(( $(stat -c %s target/deploy/aegis_account.so) * 2 ))
+          rent=$(solana rent "$need" --output json | python3 -c 'import json,sys; print(json.load(sys.stdin)["rent_exempt_minimum_lamports"])')
+          want=$(( rent + 500000000 ))
+          echo "ELF $(stat -c %s target/deploy/aegis_account.so) bytes, rent $rent lamports, want $want"
+          for i in $(seq 1 12); do
+            have=$(solana balance --lamports | cut -d' ' -f1)
+            [ "$have" -ge "$want" ] && break
+            solana airdrop 2 || solana airdrop 1 || true
+            sleep 10
+          done
+          solana balance
+      - name: Deploy
+        run: |
+          solana program deploy target/deploy/aegis_account.so \
+            --program-id "$RUNNER_TEMP/program.json" \
+            --upgrade-authority "$RUNNER_TEMP/deployer.json" \
+            --max-sign-attempts 30 \
+            --with-compute-unit-price 1000
+          solana program show "$(solana-keygen pubkey "$RUNNER_TEMP/program.json")"
+      - name: Record
+        run: |
+          {
+            echo "## aegis_account on ${{ inputs.cluster }}"
+            echo
+            echo '```'
+            solana program show "$(solana-keygen pubkey "$RUNNER_TEMP/program.json")"
+            echo '```'
+            echo
+            echo "commit ${{ github.sha }}, ELF sha256 $(sha256sum target/deploy/aegis_account.so | cut -d' ' -f1)"
+          } >> "$GITHUB_STEP_SUMMARY"
+          shred -u "$RUNNER_TEMP/program.json" "$RUNNER_TEMP/deployer.json"
