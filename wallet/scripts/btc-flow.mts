@@ -182,12 +182,21 @@ async function main() {
   const dep = await rpc<{ deployments: Record<string, { active: boolean }> }>('getdeploymentinfo');
   for (const d of ['op_cat', 'checksigfromstack']) if (!dep.deployments[d]?.active) throw new Error(`${d} is not active on this node`);
 
-  const { pub } = epochOf(0);
-  let state = initialState(pub, 0, HT);
+  // BTC_RESUME=txid:vout:sat:epoch:t:nextIdx continues an existing lineage from its current UTXO (t = -1 for nothing cached).
+  const resume = process.env.BTC_RESUME?.split(':');
+  const e0 = resume ? Number(resume[3]) : 0;
+  const { pub, trees: trees0 } = epochOf(e0);
+  let state = initialState(pub, e0, HT);
+  if (resume) {
+    const t = Number(resume[4]);
+    state = { ...state, t, R: t === NO_SUBTREE ? state.R : trees0.bottom[t].root, nextIdx: Number(resume[5]) };
+  }
   let out = accountOutput(state);
   const addr0 = p2trAddress(out.output.scriptPubKey, net);
-  log(`account (epoch 0, nothing cached): ${addr0}`);
-  let utxo = await fund(addr0, out.output.scriptPubKey);
+  log(`account (${stateStr(state)}): ${addr0}`);
+  let utxo = resume
+    ? { txid: txidFromHex(resume[0]), vout: Number(resume[1]), value: BigInt(resume[2]), scriptPubKey: out.output.scriptPubKey }
+    : await fund(addr0, out.output.scriptPubKey);
 
   let tNew = 0, idx = 0;
   for (const leaf of STEPS) {
