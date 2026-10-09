@@ -2,6 +2,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import ChainDashboard from "./components/ChainDashboard";
 import ChainMarquee   from "./components/ChainMarquee";
 import ShieldMark     from "./components/ShieldMark";
+import CopyBtn        from "./components/CopyBtn";
 import ThemeToggle    from "./components/ThemeToggle";
 import HypertreeFigure from "./components/HypertreeFigure";
 import ParamsTable    from "./components/ParamsTable";
@@ -19,6 +20,9 @@ applyTheme(getInitialTheme());
 
 const BUILD = (((import.meta as unknown as { env?: Record<string, string> }).env?.VITE_BUILD_SHA) || "dev").slice(0, 7);
 const REPO = "https://github.com/imadegoodstuff/aegis-protocol";
+const X_URL = "https://x.com/aegisprotocolon";
+/** Community token on Solana (Token-2022, mint and freeze authority disabled). No role in the protocol. */
+const TOKEN_CA = "5BHTmt8bnEizr5tcokZTWoHjMmptR29Me6MqLrVWpump";
 
 const NAV = [
   { href: "#protect", label: "Protect" },
@@ -433,6 +437,13 @@ export default function App() {
               <a href="https://eprint.iacr.org/2017/965" target="_blank" rel="noreferrer">WOTS+ / XMSS (RFC 8391)</a>
               <a href="https://nvlpubs.nist.gov/nistpubs/fips/nist.fips.205.pdf" target="_blank" rel="noreferrer">FIPS 205 SLH-DSA</a>
               <a href="https://github.com/bitcoin/bips/blob/master/bip-0347.mediawiki" target="_blank" rel="noreferrer">BIP-347 OP_CAT</a>
+            </div>
+            <div className="footer-col">
+              <h3 className="footer-col-title">Community</h3>
+              <a href={X_URL} target="_blank" rel="noreferrer">X · @aegisprotocolon</a>
+              <a href={`https://solscan.io/token/${TOKEN_CA}`} target="_blank" rel="noreferrer">AEGIS token (Solana)</a>
+              <span className="mono" style={{ fontSize: 11, wordBreak: "break-all" }}>CA {TOKEN_CA} <CopyBtn value={TOKEN_CA} /></span>
+              <span style={{ fontSize: 11, opacity: 0.75 }}>The token has no role in the protocol: no fees, no governance, no staking.</span>
             </div>
           </div>
           <div className="footer-bottom">

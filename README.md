@@ -2,7 +2,9 @@
 
 **Hash-only post-quantum accounts, one seed, every chain.**
 
-Aegis is a smart-account protocol whose authorization layer reduces to a single assumption: SHA-256 preimage resistance. No elliptic curves, no lattices, no trusted setup, no admin keys, no pools, no token.
+Aegis is a smart-account protocol whose authorization layer reduces to a single assumption: SHA-256 preimage resistance. No elliptic curves, no lattices, no trusted setup, no admin keys, no pools, no protocol token.
+
+Site: [aegisprotocol.si](https://aegisprotocol.si) · X: [@aegisprotocolon](https://x.com/aegisprotocolon) · Community token (Solana, Token-2022, mint and freeze authority disabled): **AEGIS** `5BHTmt8bnEizr5tcokZTWoHjMmptR29Me6MqLrVWpump`. The token plays no role in the protocol: no fees, no governance, no staking; holding it grants nothing in any contract here. It is an SPL token like any other and can itself be held in a CCHS vault.
 
 Its core is **CCHS — Chain-Cached Hypertree Signatures**, a hash-based signature architecture that uses the one property on-chain verifiers have and classical verifiers do not: persistent storage.
 
