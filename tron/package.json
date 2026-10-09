@@ -1,0 +1,15 @@
+{
+  "name": "aegis-tron",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "predict": "node predict.mjs",
+    "self-test": "node predict.mjs --self-test",
+    "deploy:nile": "node deploy-factory.mjs nile",
+    "deploy:mainnet": "node deploy-factory.mjs mainnet"
+  },
+  "dependencies": {
+    "tronweb": "^6.5.1"
+  }
+}

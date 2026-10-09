@@ -6,17 +6,34 @@
 /// subtree is verified once and cached in a `Table`; later signatures in
 /// that subtree carry only the bottom layer.
 ///
+/// No elliptic-curve key is in the authorization path. `CchsAccount` is a
+/// shared object: nobody owns it, no function takes an owner signature, and
+/// the transaction sender only pays gas. Funds of any coin type `T` are
+/// held inside the object (`Bag` of `Balance<T>` keyed by type name) and
+/// leave it only through `execute_transfer<T>`, gated by the CCHS signature.
+///
+/// Immutability requirement: after `sui client publish` the `UpgradeCap`
+/// must be destroyed with `sui::package::make_immutable`; otherwise the
+/// publisher's key could upgrade this package and take the funds. See
+/// ../README.md for the exact command sequence and deployment models.
+///
 /// Byte-exact with `evm/src/AegisCCHS.sol` and `wallet/src/aegis/cchs.ts`
 /// for ADRS, chain steps, leaf compression and Merkle nodes. Only the
 /// message digest differs per chain (see `digest`). Spec: ../../CCHS.spec.md
 module aegis::aegis_account {
+    use std::ascii;
     use std::bcs;
     use std::hash;
+    use std::type_name::{Self, TypeName};
+    use sui::bag::{Self, Bag};
     use sui::balance::{Self, Balance};
     use sui::coin::{Self, Coin};
     use sui::event;
-    use sui::sui::SUI;
     use sui::table::{Self, Table};
+    #[test_only]
+    use sui::sui::SUI;
+    #[test_only]
+    use sui::test_scenario;
 
     // ------------------------------------------------------------ params
     const LEN: u64 = 67;           // 64 message chains + 3 checksum chains
@@ -25,6 +42,8 @@ module aegis::aegis_account {
     const CAPACITY: u64 = 1048576; // 2^(2*H)
     const REC_CAPACITY: u64 = 256; // 2^REC_H
     const LAYER_REC: u8 = 0xFF;
+    /// Asset-id kind tag bound into the digest (coin type).
+    const ASSET_KIND_COIN: u8 = 0x00;
 
     // ------------------------------------------------------------ errors
     const EBadLength: u64 = 1;
@@ -34,6 +53,7 @@ module aegis::aegis_account {
     const EBadTopRoot: u64 = 5;
     const EBadRecovery: u64 = 6;
     const EZeroRoot: u64 = 7;
+    const ENoBalance: u64 = 8;
 
     // ------------------------------------------------------------ state
     /// Shared object. Nobody owns it; authorization is purely the CCHS signature.
@@ -53,19 +73,20 @@ module aegis::aegis_account {
         rec_nonce: u64,
         /// key = (epoch << 64) | bottom_tree_idx  ->  verified bottom subtree root
         cached_root: Table<u128, vector<u8>>,
-        /// Funds held by the account (SUI only in v1).
-        balance: Balance<SUI>,
+        /// `TypeName` of `T` -> `Balance<T>`, one entry per coin type held.
+        balances: Bag,
     }
 
     // ------------------------------------------------------------ events
     public struct Created has copy, drop { account: address, root: vector<u8>, rec_root: vector<u8> }
-    public struct Executed has copy, drop { account: address, idx: u64, recipient: address, amount: u64 }
+    public struct Executed has copy, drop { account: address, idx: u64, asset: vector<u8>, recipient: address, amount: u64 }
     public struct SubtreeCached has copy, drop { account: address, epoch: u64, tree_idx: u64, subtree_root: vector<u8> }
     public struct Recovered has copy, drop { account: address, new_epoch: u64, new_root: vector<u8>, new_rec_root: vector<u8> }
 
     // ============================================================ create
 
-    /// Create a new shared CCHS account.
+    /// Create a new shared CCHS account. Any sender may call this; the
+    /// sender keeps no authority over the object.
     entry fun create(root: vector<u8>, rec_root: vector<u8>, ctx: &mut TxContext) {
         assert_root(&root);
         assert_root(&rec_root);
@@ -81,25 +102,31 @@ module aegis::aegis_account {
             nonce: 0,
             rec_nonce: 0,
             cached_root: table::new<u128, vector<u8>>(ctx),
-            balance: balance::zero<SUI>(),
+            balances: bag::new(ctx),
         });
     }
 
-    /// Deposit SUI into the account. Anyone may fund it.
-    entry fun deposit(acct: &mut CchsAccount, c: Coin<SUI>) {
-        balance::join(&mut acct.balance, coin::into_balance(c));
+    /// Deposit a coin of any type into the account. Anyone may fund it.
+    entry fun deposit<T>(acct: &mut CchsAccount, c: Coin<T>) {
+        let key = asset_key<T>();
+        if (bag::contains_with_type<TypeName, Balance<T>>(&acct.balances, key)) {
+            let b: &mut Balance<T> = bag::borrow_mut(&mut acct.balances, key);
+            balance::join(b, coin::into_balance(c));
+        } else {
+            bag::add(&mut acct.balances, key, coin::into_balance(c));
+        }
     }
 
     // ============================================================ execute
 
-    /// Send `amount` MIST of SUI from the account's balance to `recipient`,
+    /// Send `amount` of `T` from the account's balance to `recipient`,
     /// authorized by a CCHS signature on the transfer digest.
     ///
     /// `l0_*` is the bottom-layer WOTS+ signature (67 x 32 bytes) and auth path
     /// (10 x 32 bytes) for leaf `next_idx`. `has_l1` / `l1_*` carry the
     /// top-layer proof, required on the first use of each bottom subtree.
     /// Anyone may submit the transaction; the signature is the only gate.
-    entry fun execute_transfer(
+    entry fun execute_transfer<T>(
         acct: &mut CchsAccount,
         recipient: address,
         amount: u64,
@@ -114,16 +141,20 @@ module aegis::aegis_account {
         let idx = acct.next_idx;
         assert!(idx < CAPACITY, EExhausted);
 
-        let m = digest(account, acct.nonce, idx, recipient, amount);
+        let asset = asset_id<T>();
+        let m = digest(account, acct.nonce, idx, asset, recipient, amount);
         verify_and_cache(acct, account, idx, &m, &l0_wots, &l0_auth, has_l1, &l1_wots, &l1_auth);
 
         // effects before interaction
         acct.next_idx = idx + 1;
         acct.nonce = acct.nonce + 1;
 
-        let out = coin::take(&mut acct.balance, amount, ctx);
+        let key = asset_key<T>();
+        assert!(bag::contains_with_type<TypeName, Balance<T>>(&acct.balances, key), ENoBalance);
+        let b: &mut Balance<T> = bag::borrow_mut(&mut acct.balances, key);
+        let out = coin::take(b, amount, ctx);
         transfer::public_transfer(out, recipient);
-        event::emit(Executed { account, idx, recipient, amount });
+        event::emit(Executed { account, idx, asset, recipient, amount });
     }
 
     // ============================================================ recovery
@@ -163,9 +194,22 @@ module aegis::aegis_account {
 
     // ============================================================ views
 
-    /// Digest the client must sign for the next `execute_transfer`.
-    public fun next_digest(acct: &CchsAccount, recipient: address, amount: u64): vector<u8> {
-        digest(object::uid_to_address(&acct.id), acct.nonce, acct.next_idx, recipient, amount)
+    /// Asset id for coin type `T`: sha2_256(0x00 || ascii(type_name::with_defining_ids<T>())).
+    /// For SUI the name is "0000000000000000000000000000000000000000000000000000000000000002::sui::SUI".
+    public fun asset_id<T>(): vector<u8> {
+        let mut buf = vector::singleton(ASSET_KIND_COIN);
+        vector::append(&mut buf, ascii::into_bytes(type_name::into_string(asset_key<T>())));
+        hash::sha2_256(buf)
+    }
+
+    /// Digest the client must sign for the next `execute_transfer<T>`.
+    public fun next_digest<T>(acct: &CchsAccount, recipient: address, amount: u64): vector<u8> {
+        digest(object::uid_to_address(&acct.id), acct.nonce, acct.next_idx, asset_id<T>(), recipient, amount)
+    }
+
+    /// Digest the client must sign for the next `recover`.
+    public fun next_recovery_digest(acct: &CchsAccount, new_root: vector<u8>, new_rec_root: vector<u8>): vector<u8> {
+        recovery_digest(object::uid_to_address(&acct.id), acct.rec_nonce, &new_root, &new_rec_root)
     }
 
     /// Whether the next `execute_transfer` must include the top-layer proof.
@@ -179,9 +223,21 @@ module aegis::aegis_account {
     public fun next_idx(acct: &CchsAccount): u64 { acct.next_idx }
     public fun nonce(acct: &CchsAccount): u64 { acct.nonce }
     public fun rec_nonce(acct: &CchsAccount): u64 { acct.rec_nonce }
-    public fun balance_value(acct: &CchsAccount): u64 { balance::value(&acct.balance) }
+
+    /// Balance of `T` held by the account (0 if none was ever deposited).
+    public fun balance_value<T>(acct: &CchsAccount): u64 {
+        let key = asset_key<T>();
+        if (bag::contains_with_type<TypeName, Balance<T>>(&acct.balances, key)) {
+            let b: &Balance<T> = bag::borrow(&acct.balances, key);
+            balance::value(b)
+        } else {
+            0
+        }
+    }
 
     // ============================================================ internals
+
+    fun asset_key<T>(): TypeName { type_name::with_defining_ids<T>() }
 
     fun assert_root(r: &vector<u8>) {
         assert!(vector::length(r) == 32, EBadLength);
@@ -193,9 +249,10 @@ module aegis::aegis_account {
     }
 
     /// M = sha2_256("AEGIS_CCHS_V1" || "sui" || object_id(32) || nonce(8 BE) || idx(8 BE)
-    ///              || sha2_256(recipient(32) || amount(8 BE)))
-    fun digest(account: address, nonce: u64, idx: u64, recipient: address, amount: u64): vector<u8> {
-        let mut action = bcs::to_bytes(&recipient);
+    ///              || sha2_256(asset || recipient(32) || amount(8 BE)))
+    fun digest(account: address, nonce: u64, idx: u64, asset: vector<u8>, recipient: address, amount: u64): vector<u8> {
+        let mut action = asset;
+        vector::append(&mut action, bcs::to_bytes(&recipient));
         vector::append(&mut action, be64(amount));
         let action_hash = hash::sha2_256(action);
 
@@ -265,7 +322,6 @@ module aegis::aegis_account {
     ): vector<u8> {
         assert!(vector::length(m) == 32, EBadLength);
         assert!(vector::length(wots) == LEN, EBadLength);
-        assert!(vector::length(auth) == height, EBadLength);
 
         let d = digits(m);
 
@@ -285,9 +341,20 @@ module aegis::aegis_account {
             vector::append(&mut leaf_buf, x);
             c = c + 1;
         };
-        let mut node = hash::sha2_256(leaf_buf);
+        merkle_root(layer, tree_idx, leaf_idx, height, hash::sha2_256(leaf_buf), auth)
+    }
 
-        // Auth path, leaf -> root.
+    /// Auth path, leaf -> root: node_k = sha2_256(adrs(layer, tree, 0x02, pos >> 1, k, 0) || left || right).
+    public fun merkle_root(
+        layer: u8,
+        tree_idx: u64,
+        leaf_idx: u64,
+        height: u64,
+        node: vector<u8>,
+        auth: &vector<vector<u8>>,
+    ): vector<u8> {
+        assert!(vector::length(auth) == height, EBadLength);
+        let mut node = node;
         let mut pos = leaf_idx;
         let mut k: u64 = 0;
         while (k < height) {
@@ -372,6 +439,8 @@ module aegis::aegis_account {
 
     // ============================================================ tests
     // Vectors: evm/test/fixtures/cchs-s-20.json (CCHS-S-20, master 0x07..07).
+    // Digest vectors were recomputed independently with Node's crypto module
+    // from the byte layouts documented above.
 
     #[test]
     fun test_adrs_layout() {
@@ -413,6 +482,239 @@ module aegis::aegis_account {
         *vector::borrow_mut(&mut wots, 3) = x"0000000000000000000000000000000000000000000000000000000000000000";
         let r0 = verify_layer(0, 0, 1, 10, &m, &wots, &fixture_op1_l0_auth());
         assert!(r0 == x"0e2f82e50284c90ccbf4cc9621789de2746ade4e231383eb2a89794db19ff80a", 0);
+    }
+
+    #[test]
+    fun test_asset_id_and_digest_vectors() {
+        let name = ascii::into_bytes(type_name::into_string(asset_key<SUI>()));
+        assert!(name == b"0000000000000000000000000000000000000000000000000000000000000002::sui::SUI", 0);
+        let sui = asset_id<SUI>();
+        assert!(sui == x"bccbbf91e43e347c81f378bf1e03af44a87c9a3819067862aa38e9a1a0114764", 1);
+        // account 0xcafe, nonce 0, idx 0, SUI, recipient 0xb0b, amount 400
+        let m = digest(@0xcafe, 0, 0, sui, @0xb0b, 400);
+        assert!(m == x"96a85d1219011a466c044813c71af0f646e6a19c8c199f0f76a395e637846eb8", 2);
+        let root = x"1111111111111111111111111111111111111111111111111111111111111111";
+        let rec_root = x"2222222222222222222222222222222222222222222222222222222222222222";
+        let mr = recovery_digest(@0xcafe, 0, &root, &rec_root);
+        assert!(mr == x"834674aed2d0e06a52fc60c9b36152be49a9ab720794382e8afc14068fa9ce81", 3);
+    }
+
+    #[test]
+    fun test_create_deposit_execute_first_in_subtree() {
+        let creator = @0xa11ce;
+        let bob = @0xb0b;
+        let mut ts = test_scenario::begin(creator);
+
+        let r0 = test_root(0, 0, 0, H, false);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+
+        // A different sender funds and submits: no owner key exists.
+        test_scenario::next_tx(&mut ts, @0xfee);
+        let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
+        deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
+        assert!(balance_value<SUI>(&acct) == 1000, 0);
+        assert!(needs_top_layer(&acct), 1);
+
+        let m0 = next_digest<SUI>(&acct, bob, 400);
+        execute_transfer<SUI>(
+            &mut acct, bob, 400,
+            test_sign(0, 0, 0, &m0), test_auth(0, 0, 0, H, false),
+            true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, false),
+            test_scenario::ctx(&mut ts),
+        );
+        assert!(balance_value<SUI>(&acct) == 600, 2);
+        assert!(next_idx(&acct) == 1 && nonce(&acct) == 1, 3);
+        assert!(!needs_top_layer(&acct), 4);
+        test_scenario::return_shared(acct);
+
+        test_scenario::next_tx(&mut ts, bob);
+        let c = test_scenario::take_from_sender<Coin<SUI>>(&ts);
+        assert!(coin::value(&c) == 400, 5);
+        coin::burn_for_testing(c);
+        test_scenario::end(ts);
+    }
+
+    #[test]
+    fun test_cached_second_op_and_recover() {
+        let bob = @0xb0b;
+        let mut ts = test_scenario::begin(@0xa11ce);
+
+        // Bottom tree 0 with real leaves 0 and 1 (shared root).
+        let r0 = test_root(0, 0, 0, H, true);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+
+        test_scenario::next_tx(&mut ts, @0xfee);
+        let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
+        deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
+
+        let m0 = next_digest<SUI>(&acct, bob, 400);
+        execute_transfer<SUI>(
+            &mut acct, bob, 400,
+            test_sign(0, 0, 0, &m0), test_auth(0, 0, 0, H, true),
+            true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, false),
+            test_scenario::ctx(&mut ts),
+        );
+        // Cached subtree: bottom layer only.
+        let m1 = next_digest<SUI>(&acct, bob, 100);
+        execute_transfer<SUI>(
+            &mut acct, bob, 100,
+            test_sign(0, 0, 1, &m1), test_auth(0, 0, 1, H, true),
+            false, vector::empty(), vector::empty(),
+            test_scenario::ctx(&mut ts),
+        );
+        assert!(balance_value<SUI>(&acct) == 500, 0);
+        assert!(next_idx(&acct) == 2, 1);
+
+        // Recovery rotates the roots; object id and funds stay.
+        let new_root = x"3333333333333333333333333333333333333333333333333333333333333333";
+        let new_rec = x"4444444444444444444444444444444444444444444444444444444444444444";
+        let mr = next_recovery_digest(&acct, new_root, new_rec);
+        recover(&mut acct, new_root, new_rec, test_sign(LAYER_REC, 0, 0, &mr), test_auth(LAYER_REC, 0, 0, REC_H, false));
+        assert!(root(&acct) == new_root && rec_root(&acct) == new_rec, 2);
+        assert!(epoch(&acct) == 1 && next_idx(&acct) == 0 && rec_nonce(&acct) == 1, 3);
+        assert!(needs_top_layer(&acct), 4);
+        assert!(balance_value<SUI>(&acct) == 500, 5);
+        test_scenario::return_shared(acct);
+        test_scenario::end(ts);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = aegis::aegis_account::EBadSubtreeRoot)]
+    fun test_replayed_signature_fails() {
+        let bob = @0xb0b;
+        let mut ts = test_scenario::begin(@0xa11ce);
+        let r0 = test_root(0, 0, 0, H, false);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        test_scenario::next_tx(&mut ts, @0xfee);
+        let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
+        deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
+
+        let m0 = next_digest<SUI>(&acct, bob, 400);
+        let l0 = test_sign(0, 0, 0, &m0);
+        let a0 = test_auth(0, 0, 0, H, false);
+        execute_transfer<SUI>(&mut acct, bob, 400, l0, a0, true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, false), test_scenario::ctx(&mut ts));
+        // Same signature again: leaf 1 and a new digest, so the recomputed
+        // subtree root differs from the cached one.
+        execute_transfer<SUI>(&mut acct, bob, 400, l0, a0, false, vector::empty(), vector::empty(), test_scenario::ctx(&mut ts));
+        test_scenario::return_shared(acct);
+        test_scenario::end(ts);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = aegis::aegis_account::EMissingTopLayer)]
+    fun test_first_use_without_top_layer_fails() {
+        let bob = @0xb0b;
+        let mut ts = test_scenario::begin(@0xa11ce);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        test_scenario::next_tx(&mut ts, @0xfee);
+        let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
+        deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
+        let m0 = next_digest<SUI>(&acct, bob, 400);
+        execute_transfer<SUI>(&mut acct, bob, 400, test_sign(0, 0, 0, &m0), test_auth(0, 0, 0, H, false), false, vector::empty(), vector::empty(), test_scenario::ctx(&mut ts));
+        test_scenario::return_shared(acct);
+        test_scenario::end(ts);
+    }
+
+    #[test]
+    #[expected_failure(abort_code = aegis::aegis_account::EBadTopRoot)]
+    fun test_wrong_amount_fails() {
+        let bob = @0xb0b;
+        let mut ts = test_scenario::begin(@0xa11ce);
+        let r0 = test_root(0, 0, 0, H, false);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(top_root, test_root(LAYER_REC, 0, 0, REC_H, false), test_scenario::ctx(&mut ts));
+        test_scenario::next_tx(&mut ts, @0xfee);
+        let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
+        deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
+        // Signed for 400, submitted for 900: the bottom root no longer matches
+        // the top-layer message, so the top layer fails against `root`.
+        let m0 = next_digest<SUI>(&acct, bob, 400);
+        execute_transfer<SUI>(&mut acct, bob, 900, test_sign(0, 0, 0, &m0), test_auth(0, 0, 0, H, false), true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, false), test_scenario::ctx(&mut ts));
+        test_scenario::return_shared(acct);
+        test_scenario::end(ts);
+    }
+
+    // ---- test-only key material. A WOTS+ key whose chain secrets are
+    // sha2_256 of a tag; sibling nodes are either the real neighbour leaf
+    // (level 0, `real_sibling`) or tagged pseudo-random values. Verification
+    // only recomputes the root from leaf and path, so this is a valid tree.
+
+    #[test_only]
+    fun test_sk(layer: u8, tree_idx: u64, leaf_idx: u64, c: u64): vector<u8> {
+        let mut buf = b"AEGIS_TEST_SK";
+        vector::push_back(&mut buf, layer);
+        vector::append(&mut buf, be64(tree_idx));
+        vector::append(&mut buf, be64(leaf_idx));
+        vector::append(&mut buf, be64(c));
+        hash::sha2_256(buf)
+    }
+
+    #[test_only]
+    fun test_chain(layer: u8, tree_idx: u64, leaf_idx: u64, c: u64, x: vector<u8>, from: u8, to: u8): vector<u8> {
+        let mut x = x;
+        let mut s = from;
+        while (s < to) {
+            let mut input = adrs(layer, tree_idx, 0x00, leaf_idx, (c as u8), s);
+            vector::append(&mut input, x);
+            x = hash::sha2_256(input);
+            s = s + 1;
+        };
+        x
+    }
+
+    #[test_only]
+    fun test_leaf(layer: u8, tree_idx: u64, leaf_idx: u64): vector<u8> {
+        let mut buf = adrs(layer, tree_idx, 0x01, leaf_idx, 0, 0);
+        let mut c: u64 = 0;
+        while (c < LEN) {
+            vector::append(&mut buf, test_chain(layer, tree_idx, leaf_idx, c, test_sk(layer, tree_idx, leaf_idx, c), 0, 15));
+            c = c + 1;
+        };
+        hash::sha2_256(buf)
+    }
+
+    #[test_only]
+    fun test_sign(layer: u8, tree_idx: u64, leaf_idx: u64, m: &vector<u8>): vector<vector<u8>> {
+        let d = digits(m);
+        let mut sig = vector::empty<vector<u8>>();
+        let mut c: u64 = 0;
+        while (c < LEN) {
+            let dc = *vector::borrow(&d, c);
+            vector::push_back(&mut sig, test_chain(layer, tree_idx, leaf_idx, c, test_sk(layer, tree_idx, leaf_idx, c), 0, dc));
+            c = c + 1;
+        };
+        sig
+    }
+
+    #[test_only]
+    fun test_auth(layer: u8, tree_idx: u64, leaf_idx: u64, height: u64, real_sibling: bool): vector<vector<u8>> {
+        let mut auth = vector::empty<vector<u8>>();
+        let mut k: u64 = 0;
+        while (k < height) {
+            let node_idx = (leaf_idx >> (k as u8)) ^ 1;
+            let sib = if (k == 0 && real_sibling) {
+                test_leaf(layer, tree_idx, node_idx)
+            } else {
+                let mut buf = b"AEGIS_TEST_NODE";
+                vector::push_back(&mut buf, layer);
+                vector::append(&mut buf, be64(tree_idx));
+                vector::append(&mut buf, be64(node_idx));
+                vector::push_back(&mut buf, (k as u8));
+                hash::sha2_256(buf)
+            };
+            vector::push_back(&mut auth, sib);
+            k = k + 1;
+        };
+        auth
+    }
+
+    #[test_only]
+    fun test_root(layer: u8, tree_idx: u64, leaf_idx: u64, height: u64, real_sibling: bool): vector<u8> {
+        merkle_root(layer, tree_idx, leaf_idx, height, test_leaf(layer, tree_idx, leaf_idx), &test_auth(layer, tree_idx, leaf_idx, height, real_sibling))
     }
 
     #[test_only]

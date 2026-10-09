@@ -3,7 +3,7 @@ name = "cchs-core"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
-description = "CCHS-S-20 (Chain-Cached Hypertree Signatures) verifier core: WOTS+ / Merkle / cache state machine over an injected SHA-256"
+description = "CCHS (Chain-Cached Hypertree Signatures) verifier core, parameter sets S-20 and C-20: WOTS+ / Merkle / cache state machine over an injected SHA-256"
 
 [lib]
 crate-type = ["rlib"]

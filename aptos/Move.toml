@@ -1,13 +1,16 @@
 [package]
 name    = "aegis_aptos"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Aegis Protocol"]
+# Required. An upgradable package would let the publisher's (elliptic-curve)
+# key replace this code and drain every CCHS account that uses it. The CLI
+# reads this field and sets the on-chain policy at publish time; it cannot
+# be weakened afterwards.
+upgrade_policy = "immutable"
 
 [addresses]
-aegis = "_"            # fill in at deploy time
+aegis = "_"            # the publisher's own address; see README "Deployment"
 
 [dependencies]
 AptosFramework = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-framework", rev = "mainnet" }
-
-[dev-dependencies]
 AptosStdlib    = { git = "https://github.com/aptos-labs/aptos-core.git", subdir = "aptos-move/framework/aptos-stdlib",    rev = "mainnet" }

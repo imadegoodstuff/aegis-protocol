@@ -2,7 +2,7 @@
 name = "aegis_account"
 version = "0.2.0"
 edition = "2021"
-description = "Aegis CCHS-S-20 post-quantum smart account for Solana (SVM)"
+description = "Aegis CCHS-C-20 post-quantum smart account for Solana (SVM): single-packet hash-based signatures"
 
 [lib]
 crate-type = ["cdylib", "lib"]

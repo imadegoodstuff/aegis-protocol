@@ -131,9 +131,38 @@ jobs:
       - run: npm run build
       - run: npm test
 
-  # Solana needs the Anchor toolchain (5+ min install); wired in as a
-  # separate workflow once anchor-cli is cached.
+  # Host-side type check of the Anchor program (anchor-lang compiles natively),
+  # then the SBF build with the Anza platform tools. anchor-cli is not needed
+  # for the build itself; the IDL is produced at release time.
   solana:
-    name: Solana (Anchor) · placeholder
+    name: Solana (CCHS-C-20 program, SBF)
     runs-on: ubuntu-latest
-    steps: [ { run: 'echo "Anchor build runs in a dedicated workflow once anchor-cli is cached"' } ]
+    defaults: { run: { working-directory: solana } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with: { workspaces: solana }
+      - run: cargo check -p aegis_account --features no-entrypoint
+      - name: Install Anza toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+      - run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
+      - run: ls -l target/deploy/aegis_account.so
+
+  tron:
+    name: TRON (TVM build, opcode scan, predictor self-test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci
+        working-directory: deploy
+      - run: node predict.mjs --self-test
+        working-directory: tron
+      - run: node build.mjs
+        working-directory: tron
+      - name: TVM init code must equal the EVM artifact
+        run: node -e "const a=require('./tron/artifacts/cchs-tvm.json'); if(a.identicalToEvmArtifact!==true){console.error('init code differs from wallet/src/aegis/cchsArtifacts.json');process.exit(1)}"

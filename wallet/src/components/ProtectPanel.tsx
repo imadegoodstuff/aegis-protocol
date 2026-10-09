@@ -41,13 +41,14 @@ type RowAction = { phase: "idle" | "switching" | "confirm" | "pending" | "done" 
 type SpendState = { phase: "idle" | "reading" | "signing" | "confirm" | "pending" | "done" | "error"; msg?: string; tx?: Hex; bytes?: number; layers?: number };
 
 const NON_EVM = [
-  { name: "Solana", set: "S-20", status: "program source in solana/, CI-checked; not deployed; signatures exceed the 1 232 B packet limit until a staging-buffer path exists" },
+  { name: "Solana", set: "C-20", status: "single-packet program in solana/: cache_subtree once per 1 024 operations, then one 864 B signature per execute (v0 tx with lookup table, 1 082 B); fixture-tested, not deployed" },
+  { name: "TRON", set: "K-20 / S-20", status: "same contracts built for the TVM in tron/ (byte-identical init code, 0x41 CREATE2 predictor); not published on Nile or mainnet" },
   { name: "Osmosis · Injective · Neutron · Juno · Stargaze", set: "S-20", status: "CosmWasm contract in cosmwasm/, compiled in CI; not uploaded on any chain (Osmosis and Injective also require governance for code upload)" },
   { name: "NEAR", set: "S-20", status: "contract source in near/, compiled in CI; not deployed" },
-  { name: "Aptos / Sui", set: "S-20", status: "Move modules in aptos/, sui/, compiled and fixture-tested in CI; not published" },
+  { name: "Aptos / Sui", set: "S-20", status: "Move modules in aptos/ (resource account, zeroed auth key, no signer in execute) and sui/ (any Coin<T> vault); immutable publication documented; fixture + end-to-end tests in CI; not published" },
   { name: "Starknet", set: "S-20", status: "Cairo account in cairo/, built and tested in CI; not declared" },
   { name: "TON", set: "S-20", status: "FunC account in ton/, sandbox-tested; not deployed" },
-  { name: "Bitcoin", set: "WOTS+ tapleaf", status: "needs OP_CAT for transaction binding (BIP-347, not active); no hash-only account is possible today" },
+  { name: "Bitcoin", set: "WOTS+ tapleaf", status: "no construction under current consensus binds a hash-based witness to a transaction (CCHS.spec.md 7.1); needs OP_CAT (BIP-347). Address derived here is BIP-84 P2WPKH, single-use, not labelled post-quantum" },
 ];
 
 function parseTokens(s: string): Address[] {

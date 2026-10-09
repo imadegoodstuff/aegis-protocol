@@ -19,6 +19,12 @@ interface IERC20Minimal {
 contract AegisCCHSFactory {
     event AccountDeployed(address indexed account, bytes32 indexed root, bool sha256Variant);
 
+    /// @notice Accounts created by this factory, keyed by `_salt(root, recRoot, variant)`.
+    ///         Idempotence is decided from this record, not from a recomputed
+    ///         CREATE2 address, so `deploy` behaves the same on VMs whose
+    ///         CREATE2 address prefix differs from `0xff` (TRON uses `0x41`).
+    mapping(bytes32 => address) public accountOf;
+
     error DeployFailed();
     error FundFailed();
     error TokenTransferFailed(address token);
@@ -31,15 +37,16 @@ contract AegisCCHSFactory {
     function deploy(bytes32 root, bytes32 recRoot, bool sha256Variant)
         public payable returns (address account)
     {
-        account = predict(root, recRoot, sha256Variant);
-        if (account.code.length == 0) {
-            bytes32 salt = _salt(root, recRoot, sha256Variant);
+        bytes32 salt = _salt(root, recRoot, sha256Variant);
+        account = accountOf[salt];
+        if (account == address(0)) {
             if (sha256Variant) {
                 account = address(new AegisCCHS{salt: salt}(root, recRoot));
             } else {
                 account = address(new AegisCCHSK{salt: salt}(root, recRoot));
             }
             if (account == address(0)) revert DeployFailed();
+            accountOf[salt] = account;
             emit AccountDeployed(account, root, sha256Variant);
         }
         if (msg.value != 0) {
@@ -67,7 +74,9 @@ contract AegisCCHSFactory {
         }
     }
 
-    /// @notice Counterfactual address for `(root, recRoot, variant)`.
+    /// @notice Counterfactual address for `(root, recRoot, variant)` under the
+    ///         EVM CREATE2 rule (`0xff` prefix). On TRON the prefix is `0x41`;
+    ///         use `accountOf` after deployment or the client-side predictor.
     function predict(bytes32 root, bytes32 recRoot, bool sha256Variant)
         public view returns (address)
     {

@@ -11,10 +11,16 @@
 //! `evm/src/AegisCCHS.sol` and `wallet/src/aegis/cchs.ts`; the shared ground
 //! truth is `evm/test/fixtures/cchs-s-20.json`.
 //!
+//! The [`compact`] module implements the second parameter set, CCHS-C-20
+//! (n = 24, w = 256, 26 chains, same tree shape), whose 864-byte layer fits a
+//! single Solana packet. Its ground truth is `evm/test/fixtures/cchs-c-20.json`.
+//!
 //! Spec: `../CCHS.spec.md`.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
+
+pub mod compact;
 
 // ------------------------------------------------------------------ params
 

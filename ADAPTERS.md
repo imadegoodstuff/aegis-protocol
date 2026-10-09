@@ -16,12 +16,12 @@ The CCHS verifier (`CCHS.spec.md` §5) requires only SHA-256, byte concatenation
 | 6 | Base | EVM | `evm/` | Solidity | CREATE2 | precompile | same | same |
 | 7 | Avalanche | EVM | `evm/` | Solidity | CREATE2 | precompile | same | same |
 | 8 | Linea / Scroll / Mantle / Blast / Mode | EVM | `evm/` | Solidity | CREATE2 | precompile | same | same |
-| 9 | TRON | TVM | `tron/` | Solidity | `base58check(0x41 ‖ addr)` | precompile | shared with EVM | shared with EVM |
+| 9 | TRON | TVM | `tron/` | Solidity | CREATE2 with prefix `0x41`, shown as `base58check(0x41 ‖ addr)`; factory address per publisher (no deterministic proxy) | precompile `0x02` | same sources, TVM build (`tron/build.mjs`: cancun target, opcode-scanned, init code byte-identical to the EVM artifact); not yet deployed on Nile or mainnet | same bytecode as EVM; `deploy()`/`accountOf` correct on TRON, on-chain `predict()` view uses the EVM `0xff` rule, so predict with `wallet/src/aegis/tronAccount.ts` |
 | 10 | Starknet | Cairo VM | `cairo/` | Cairo 1 | class hash + pedersen | `core::sha256` (`compute_sha256_u32_array`) | implemented (`AegisCCHS`: multicall via `call_contract_syscall`, recover, cache map) | **implemented** (`scarb test` replays bottom, top and recovery vectors); not yet deployed |
-| 11 | Solana | SVM | `solana/` | Rust / Anchor | `base58(ed25519_pk)` | `sha256` syscall | implemented (`cchs-core` + Anchor program) | implemented (CI-compiled, core verified against vectors) |
+| 11 | Solana | SVM | `solana/` | Rust / Anchor | `base58(ed25519_pk)` | `sha256` syscall | implemented (`cchs-core::compact` + Anchor program; **CCHS-C-20**, 864-byte layer, `cache_subtree` + `execute` split so every signature is one packet) | implemented (core verified against `cchs-c-20.json`; Anchor build and devnet run pending) |
 | 12 | Cosmos | CosmWasm | `cosmwasm/` | Rust | `bech32(ripemd160(sha256(pk)))` | `sha2` crate | implemented (`cchs-core` + contract) | implemented (CI-compiled, core verified against vectors) |
-| 13 | Aptos | Move | `aptos/` | Move | `sha3_256(pk ‖ 0x00)` | `hash::sha2_256` | implemented (APT transfer, v1) | **implemented** (CI-compiled, layer verify tested against vectors) |
-| 14 | Sui | Move | `sui/` | Move 2024 | `blake2b_256(0x00 ‖ pk)` | `hash::sha2_256` | implemented (shared object, SUI balance, v1) | **implemented** (CI-compiled, layer verify tested against vectors) |
+| 13 | Aptos | Move | `aptos/` | Move | resource account: `sha3_256(bcs(creator) ‖ "AEGIS_CCHS_V1" ‖ root ‖ 0xFF)` | `hash::sha2_256` | implemented: resource account with zeroed auth key, `SignerCapability` held by the module, signer-free `execute_transfer<CoinType>` / `execute_transfer_fa`; module must be published `upgrade_policy = "immutable"` | **implemented** (CI-compiled; fixture vectors plus end-to-end create/fund/execute/cached/recover tests); not published on any network yet |
+| 14 | Sui | Move | `sui/` | Move 2024 | shared object id | `hash::sha2_256` | implemented: shared object, no owner signature anywhere, generic `Bag` of `Balance<T>` with `execute_transfer<T>`; package must be made immutable (`sui::package::make_immutable`) after publish | **implemented** (CI-compiled; fixture vectors plus end-to-end `test_scenario` tests); not published on any network yet |
 | 15 | NEAR | WASM | `near/` | Rust / near-sdk | `hex(ed25519_pk)` | `env::sha256_array` | implemented (`cchs-core` + contract) | implemented (CI-compiled, core verified against vectors) |
 | 16 | TON | TVM (TON) | `ton/` | FunC | `hash(StateInit)` | `HASHEXT_SHA256` | implemented (internal-message account: `send_raw_message` action, recover, dict cache) | **implemented, sandbox-tested** (fixture roots + full execute/cache/replay/recover flow); not yet deployed |
 | 17 | Bitcoin | Script | `bitcoin/` | Tapscript | BIP-84 P2WPKH (key hidden until spend) | `OP_SHA256` | design (`CCHS.spec.md` §7.1) | flat Tapscript tree today; cached variant needs OP_CAT |
@@ -30,19 +30,23 @@ Address derivation for all 23 supported chains is implemented and produces stand
 
 ## Shared Rust core
 
-`cchs-core/` is a `no_std`, dependency-free crate implementing the whole CCHS-S-20 verifier (ADRS, WOTS+ chain completion, leaf compression, Merkle path, cache state machine, recovery) over an injected SHA-256. Its test suite (`cargo test -p cchs-core --features std`, CI job `cchs-core`) replays `evm/test/fixtures/cchs-s-20.json`: first-in-subtree with top layer, two cached signatures, tampered chain value / auth path / message, and the recovery rotation. The Solana, CosmWasm and NEAR adapters depend on it by path and add only their chain digest, storage and call dispatch.
+`cchs-core/` is a `no_std`, dependency-free crate implementing the whole CCHS-S-20 verifier (ADRS, WOTS+ chain completion, leaf compression, Merkle path, cache state machine, recovery) over an injected SHA-256. Its test suite (`cargo test -p cchs-core --features std`, CI job `cchs-core`) replays `evm/test/fixtures/cchs-s-20.json`: first-in-subtree with top layer, two cached signatures, tampered chain value / auth path / message, and the recovery rotation. The CosmWasm and NEAR adapters depend on it by path and add only their chain digest, storage and call dispatch.
+
+The same crate carries a second parameter set in `cchs_core::compact`: **CCHS-C-20** — n = 24 (SHA-256 truncated to 24 bytes), w = 256, 24 message chains + 2 checksum chains (LEN = 26), the same two layers of height 10, recovery tree of height 8 and the same 32-byte ADRS. One layer is 26 × 24 + 10 × 24 = 864 bytes, which is what lets a bottom-layer signature fit a 1 232-byte Solana packet. Besides the S-20-shaped API (`verify_layer`, `wots_leaf`, `root_from_path`, `CchsState::execute_verify`, `recover_verify`) it exposes `bottom_root(idx, m, l0)` and `verify_top_layer(root, tree_idx, r0, l1)` so a host can fill the subtree cache in one transaction and execute in another. Test vectors: `evm/test/fixtures/cchs-c-20.json`, replayed by `cchs-core/tests/vectors_compact.rs` (same CI job). Client: `wallet/src/aegis/cchsCompact.ts`. The Solana adapter uses this set; key derivation is domain-separated (`cchs/sk/c`), so one master yields independent S-20, K-20 and C-20 trees.
 
 Per-chain digests (the EVM chain id is replaced by a chain tag):
 
-| Chain | `M` |
-|---|---|
-| Solana | `sha256("AEGIS_CCHS_V1" ‖ "solana" ‖ account(32) ‖ nonce BE ‖ idx BE ‖ sha256(target_program ‖ ix_data))` |
-| CosmWasm | `sha256("AEGIS_CCHS_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ nonce BE ‖ idx BE ‖ sha256(to_json_binary(msgs)))` |
-| NEAR | `sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(account_id) ‖ nonce BE ‖ idx BE ‖ sha256(len‖receiver ‖ len‖method ‖ len‖args ‖ deposit u128 BE))` |
-| Aptos | `sha256("AEGIS_CCHS_V1" ‖ "aptos" ‖ bcs(account)(32) ‖ nonce BE ‖ idx BE ‖ sha256(bcs(recipient) ‖ amount u64 BE))` (Move, `aptos/`) |
-| Sui | `sha256("AEGIS_CCHS_V1" ‖ "sui" ‖ object_id(32) ‖ nonce BE ‖ idx BE ‖ sha256(recipient(32) ‖ amount u64 BE))` (Move, `sui/`) |
-| Starknet | `sha256("AEGIS_CCHS_V1" ‖ "starknet" ‖ contract_address(32 BE) ‖ nonce BE ‖ idx BE ‖ sha256(for each call: to(32) ‖ selector(32) ‖ calldata_len u32 BE ‖ calldata[i](32)…))` (Cairo, `cairo/`) |
-| TON | `sha256("AEGIS_CCHS_V1" ‖ "ton" ‖ address_hash(32) ‖ nonce BE ‖ idx BE ‖ cell_hash(action))`, `action = { mode:uint8 msg:^Cell }` (FunC, `ton/`) |
+| Chain | Parameter set | `M` |
+|---|---|---|
+| Solana | CCHS-C-20 | `sha256("AEGIS_CCHS_V1" ‖ "solana" ‖ account(32) ‖ nonce BE ‖ idx BE ‖ sha256(target_program ‖ ix_data))[0..24)` |
+| CosmWasm | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ nonce BE ‖ idx BE ‖ sha256(to_json_binary(msgs)))` |
+| NEAR | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(account_id) ‖ nonce BE ‖ idx BE ‖ sha256(len‖receiver ‖ len‖method ‖ len‖args ‖ deposit u128 BE))` |
+| Aptos | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "aptos" ‖ bcs(resource_account)(32) ‖ nonce BE ‖ idx BE ‖ sha256(asset ‖ bcs(recipient) ‖ amount u64 BE))`, `asset = sha256(0x00 ‖ type_name<CoinType>)` or `sha256(0x01 ‖ bcs(fa_metadata))` (Move, `aptos/`) |
+| Sui | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "sui" ‖ object_id(32) ‖ nonce BE ‖ idx BE ‖ sha256(asset ‖ recipient(32) ‖ amount u64 BE))`, `asset = sha256(0x00 ‖ type_name::with_defining_ids<T>)` (Move, `sui/`) |
+| Starknet | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "starknet" ‖ contract_address(32 BE) ‖ nonce BE ‖ idx BE ‖ sha256(for each call: to(32) ‖ selector(32) ‖ calldata_len u32 BE ‖ calldata[i](32)…))` (Cairo, `cairo/`) |
+| TON | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "ton" ‖ address_hash(32) ‖ nonce BE ‖ idx BE ‖ cell_hash(action))`, `action = { mode:uint8 msg:^Cell }` (FunC, `ton/`) |
+
+Solana's recovery digest is likewise truncated: `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "solana" ‖ account(32) ‖ rec_nonce BE ‖ new_root(24) ‖ new_rec_root(24))[0..24)`.
 
 ## What a scaffold contains
 
@@ -61,5 +65,7 @@ needsTopLayer() → bool
 ```
 
 State: `root`, `recRoot`, `epoch`, `nextIdx`, `nonce`, `recNonce`, `cachedRoot[(epoch, treeIdx)]`.
+
+Solana (CCHS-C-20) splits `execute` in two because of the packet limit: `cache_subtree(treeIdx, l1, r0)` fills `cachedRoot` and `execute(l0, ixData)` only ever carries the bottom layer. The state and the acceptance condition are the same; see `solana/README.md`.
 
 Authoritative definition: `CCHS.spec.md` §4–§5.

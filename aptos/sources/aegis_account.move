@@ -6,6 +6,20 @@
 /// subtree is verified once and cached; later signatures in that subtree
 /// carry only the bottom layer.
 ///
+/// No elliptic-curve key is in the authorization path. The funds live in a
+/// resource account whose authentication key is zeroed by the framework at
+/// creation (`account::create_resource_account`), and whose
+/// `SignerCapability` is held inside the `CchsAccount` resource stored at
+/// that same address. `execute_transfer*` takes no signer at all: any payer
+/// may submit it, and the only gate is the CCHS signature. The creator's
+/// key is used exactly once, in `create`, to pick the resource address.
+///
+/// Immutability requirement: this module must be published with
+/// `upgrade_policy = "immutable"` (set in Move.toml). An upgradable module
+/// would give the publisher's key the power to replace this code and take
+/// the funds, which would reintroduce an elliptic-curve key into the trust
+/// path. See ../README.md for the publish command and deployment models.
+///
 /// Byte-exact with `evm/src/AegisCCHS.sol` and `wallet/src/aegis/cchs.ts`
 /// for ADRS, chain steps, leaf compression and Merkle nodes. Only the
 /// message digest differs per chain (see `digest`). Spec: ../../CCHS.spec.md
@@ -14,10 +28,19 @@ module aegis::aegis_account {
     use std::error;
     use std::hash;
     use std::signer;
+    use std::string;
     use std::vector;
     use aptos_std::table::{Self, Table};
+    use aptos_std::type_info;
+    use aptos_framework::account::{Self, SignerCapability};
     use aptos_framework::aptos_account;
     use aptos_framework::event;
+    use aptos_framework::fungible_asset::Metadata;
+    use aptos_framework::object::{Self, Object};
+    #[test_only]
+    use aptos_framework::aptos_coin::{Self, AptosCoin};
+    #[test_only]
+    use aptos_framework::coin;
 
     // ------------------------------------------------------------ params
     const LEN: u64 = 67;          // 64 message chains + 3 checksum chains
@@ -26,6 +49,12 @@ module aegis::aegis_account {
     const CAPACITY: u64 = 1048576; // 2^(2*H)
     const REC_CAPACITY: u64 = 256; // 2^REC_H
     const LAYER_REC: u8 = 0xFF;
+
+    /// Resource-account seed prefix: seed = SEED_PREFIX || root.
+    const SEED_PREFIX: vector<u8> = b"AEGIS_CCHS_V1";
+    /// Asset-id kind tags bound into the digest.
+    const ASSET_KIND_COIN: u8 = 0x00;
+    const ASSET_KIND_FA: u8 = 0x01;
 
     // ------------------------------------------------------------ errors
     const E_ALREADY_INIT: u64 = 1;
@@ -39,7 +68,8 @@ module aegis::aegis_account {
     const E_ZERO_ROOT: u64 = 9;
 
     // ------------------------------------------------------------ state
-    /// Stored under the owner's address.
+    /// Stored under the resource account's own address. That address is the
+    /// CCHS account address bound into every digest.
     struct CchsAccount has key {
         /// Top-layer tree root. Rotatable only via `recover`.
         root: vector<u8>,
@@ -55,11 +85,19 @@ module aegis::aegis_account {
         rec_nonce: u64,
         /// key = (epoch << 64) | bottom_tree_idx  ->  verified bottom subtree root
         cached_root: Table<u128, vector<u8>>,
+        /// The only way to produce a signer for the resource account. Never
+        /// leaves this module; used only after a CCHS signature verified.
+        signer_cap: SignerCapability,
+        /// Address whose signer picked the resource address in `create`.
+        /// Informational; it has no authority after creation.
+        creator: address,
     }
 
     // ------------------------------------------------------------ events
     #[event]
-    struct Executed has drop, store { account: address, idx: u64, recipient: address, amount: u64 }
+    struct Created has drop, store { account: address, creator: address, root: vector<u8>, rec_root: vector<u8> }
+    #[event]
+    struct Executed has drop, store { account: address, idx: u64, asset: vector<u8>, recipient: address, amount: u64 }
     #[event]
     struct SubtreeCached has drop, store { account: address, epoch: u64, tree_idx: u64, subtree_root: vector<u8> }
     #[event]
@@ -67,13 +105,23 @@ module aegis::aegis_account {
 
     // ============================================================ create
 
-    /// Publish a CCHS account under `account`'s address.
-    public entry fun create(account: &signer, root: vector<u8>, rec_root: vector<u8>) {
-        let addr = signer::address_of(account);
-        assert!(!exists<CchsAccount>(addr), error::already_exists(E_ALREADY_INIT));
+    /// Create a CCHS account. A resource account is derived from
+    /// `creator` and `seed = "AEGIS_CCHS_V1" || root`
+    /// (`account::create_resource_account`), its authentication key is
+    /// zeroed by the framework, and the returned `SignerCapability` is
+    /// stored inside the `CchsAccount` resource published at the resource
+    /// address. Funds sent to that address are spendable only through
+    /// `execute_transfer*`. `creator` may be any signer, including a relayer;
+    /// it keeps no authority. Use `derive_address` to predict the address.
+    public entry fun create(creator: &signer, root: vector<u8>, rec_root: vector<u8>) {
         assert_root(&root);
         assert_root(&rec_root);
-        move_to(account, CchsAccount {
+        let (res_signer, signer_cap) = account::create_resource_account(creator, resource_seed(&root));
+        let addr = signer::address_of(&res_signer);
+        assert!(!exists<CchsAccount>(addr), error::already_exists(E_ALREADY_INIT));
+        let creator_addr = signer::address_of(creator);
+        event::emit(Created { account: addr, creator: creator_addr, root, rec_root });
+        move_to(&res_signer, CchsAccount {
             root,
             rec_root,
             epoch: 0,
@@ -81,23 +129,30 @@ module aegis::aegis_account {
             nonce: 0,
             rec_nonce: 0,
             cached_root: table::new<u128, vector<u8>>(),
+            signer_cap,
+            creator: creator_addr,
         });
+    }
+
+    /// Convenience: move `amount` of `CoinType` from `payer` into the CCHS
+    /// account. Equivalent to `aptos_account::transfer_coins<CoinType>(payer,
+    /// acct_addr, amount)`; any direct transfer to the address works too.
+    public entry fun deposit<CoinType>(payer: &signer, acct_addr: address, amount: u64) {
+        assert!(exists<CchsAccount>(acct_addr), error::not_found(E_NOT_INIT));
+        aptos_account::transfer_coins<CoinType>(payer, acct_addr, amount);
     }
 
     // ============================================================ execute
 
-    /// Transfer `amount` octas of APT from the owner's account to `recipient`,
-    /// authorized by a CCHS signature on the transfer digest.
+    /// Transfer `amount` of `CoinType` (APT is `0x1::aptos_coin::AptosCoin`)
+    /// from the CCHS account to `recipient`, authorized only by a CCHS
+    /// signature on the transfer digest. No signer: anyone may submit.
     ///
-    /// `l0_*` is the bottom-layer WOTS+ signature (67 x 32 bytes) and auth path
-    /// (10 x 32 bytes) for leaf `next_idx`. `has_l1` / `l1_*` carry the
+    /// `l0_*` is the bottom-layer WOTS+ signature (67 x 32 bytes) and auth
+    /// path (10 x 32 bytes) for leaf `next_idx`. `has_l1` / `l1_*` carry the
     /// top-layer proof, required on the first use of each bottom subtree.
-    ///
-    /// v1 note: the coin move uses `aptos_account::transfer`, which needs the
-    /// owner's signer. A signer-free design (resource account holding a
-    /// `SignerCapability`, arbitrary payloads) is planned for a later version.
-    public entry fun execute_transfer(
-        account: &signer,
+    public entry fun execute_transfer<CoinType>(
+        acct_addr: address,
         recipient: address,
         amount: u64,
         l0_wots: vector<vector<u8>>,
@@ -106,29 +161,71 @@ module aegis::aegis_account {
         l1_wots: vector<vector<u8>>,
         l1_auth: vector<vector<u8>>,
     ) acquires CchsAccount {
-        let addr = signer::address_of(account);
-        assert!(exists<CchsAccount>(addr), error::not_found(E_NOT_INIT));
-        let acct = borrow_global_mut<CchsAccount>(addr);
+        let asset = coin_asset_id<CoinType>();
+        let (idx, res_signer) = authorize(
+            acct_addr, &asset, recipient, amount, &l0_wots, &l0_auth, has_l1, &l1_wots, &l1_auth,
+        );
+        aptos_account::transfer_coins<CoinType>(&res_signer, recipient, amount);
+        event::emit(Executed { account: acct_addr, idx, asset, recipient, amount });
+    }
+
+    /// Same as `execute_transfer`, for a fungible asset identified by its
+    /// `Metadata` object (tokens that exist only as fungible assets).
+    public entry fun execute_transfer_fa(
+        acct_addr: address,
+        metadata: Object<Metadata>,
+        recipient: address,
+        amount: u64,
+        l0_wots: vector<vector<u8>>,
+        l0_auth: vector<vector<u8>>,
+        has_l1: bool,
+        l1_wots: vector<vector<u8>>,
+        l1_auth: vector<vector<u8>>,
+    ) acquires CchsAccount {
+        let asset = fa_asset_id(object::object_address(&metadata));
+        let (idx, res_signer) = authorize(
+            acct_addr, &asset, recipient, amount, &l0_wots, &l0_auth, has_l1, &l1_wots, &l1_auth,
+        );
+        aptos_account::transfer_fungible_assets(&res_signer, metadata, recipient, amount);
+        event::emit(Executed { account: acct_addr, idx, asset, recipient, amount });
+    }
+
+    /// Verify the CCHS signature for the next leaf, advance the counters, and
+    /// return the leaf index used plus a signer for the resource account.
+    /// All state effects happen here, before any asset moves.
+    fun authorize(
+        acct_addr: address,
+        asset: &vector<u8>,
+        recipient: address,
+        amount: u64,
+        l0_wots: &vector<vector<u8>>,
+        l0_auth: &vector<vector<u8>>,
+        has_l1: bool,
+        l1_wots: &vector<vector<u8>>,
+        l1_auth: &vector<vector<u8>>,
+    ): (u64, signer) acquires CchsAccount {
+        assert!(exists<CchsAccount>(acct_addr), error::not_found(E_NOT_INIT));
+        let acct = borrow_global_mut<CchsAccount>(acct_addr);
 
         let idx = acct.next_idx;
         assert!(idx < CAPACITY, error::out_of_range(E_EXHAUSTED));
 
-        let m = digest(addr, acct.nonce, idx, recipient, amount);
-        verify_and_cache(acct, addr, idx, &m, &l0_wots, &l0_auth, has_l1, &l1_wots, &l1_auth);
+        let m = digest(acct_addr, acct.nonce, idx, *asset, recipient, amount);
+        verify_and_cache(acct, acct_addr, idx, &m, l0_wots, l0_auth, has_l1, l1_wots, l1_auth);
 
         // effects before interaction
         acct.next_idx = idx + 1;
         acct.nonce = acct.nonce + 1;
 
-        aptos_account::transfer(account, recipient, amount);
-        event::emit(Executed { account: addr, idx, recipient, amount });
+        (idx, account::create_signer_with_capability(&acct.signer_cap))
     }
 
     // ============================================================ recovery
 
     /// Rotate `root` and `rec_root`, authorized by the recovery tree.
     /// Resets `next_idx` and bumps `epoch` (logically clearing the cache).
-    /// Callable by anyone holding a valid recovery signature.
+    /// Callable by anyone holding a valid recovery signature. The account
+    /// address does not change (it was fixed by the original root).
     public entry fun recover(
         acct_addr: address,
         new_root: vector<u8>,
@@ -163,14 +260,51 @@ module aegis::aegis_account {
 
     // ============================================================ views
 
-    /// Digest the client must sign for the next `execute_transfer`.
+    /// Address the CCHS account will get when `creator` calls `create` with `root`.
     #[view]
-    public fun next_digest(acct_addr: address, recipient: address, amount: u64): vector<u8> acquires CchsAccount {
-        let acct = borrow_global<CchsAccount>(acct_addr);
-        digest(acct_addr, acct.nonce, acct.next_idx, recipient, amount)
+    public fun derive_address(creator: address, root: vector<u8>): address {
+        account::create_resource_address(&creator, resource_seed(&root))
     }
 
-    /// Whether the next `execute_transfer` must include the top-layer proof.
+    /// Asset id for `Coin<CoinType>`: sha2_256(0x00 || utf8(type_name<CoinType>())).
+    /// For APT the name is "0x1::aptos_coin::AptosCoin".
+    #[view]
+    public fun coin_asset_id<CoinType>(): vector<u8> {
+        let buf = vector::singleton(ASSET_KIND_COIN);
+        vector::append(&mut buf, *string::bytes(&type_info::type_name<CoinType>()));
+        hash::sha2_256(buf)
+    }
+
+    /// Asset id for a fungible asset: sha2_256(0x01 || bcs(metadata_address)).
+    #[view]
+    public fun fa_asset_id(metadata: address): vector<u8> {
+        let buf = vector::singleton(ASSET_KIND_FA);
+        vector::append(&mut buf, bcs::to_bytes(&metadata));
+        hash::sha2_256(buf)
+    }
+
+    /// Digest the client must sign for the next `execute_transfer<CoinType>`.
+    #[view]
+    public fun next_digest<CoinType>(acct_addr: address, recipient: address, amount: u64): vector<u8> acquires CchsAccount {
+        let acct = borrow_global<CchsAccount>(acct_addr);
+        digest(acct_addr, acct.nonce, acct.next_idx, coin_asset_id<CoinType>(), recipient, amount)
+    }
+
+    /// Digest the client must sign for the next `execute_transfer_fa`.
+    #[view]
+    public fun next_digest_fa(acct_addr: address, metadata: address, recipient: address, amount: u64): vector<u8> acquires CchsAccount {
+        let acct = borrow_global<CchsAccount>(acct_addr);
+        digest(acct_addr, acct.nonce, acct.next_idx, fa_asset_id(metadata), recipient, amount)
+    }
+
+    /// Digest the client must sign for the next `recover`.
+    #[view]
+    public fun next_recovery_digest(acct_addr: address, new_root: vector<u8>, new_rec_root: vector<u8>): vector<u8> acquires CchsAccount {
+        let acct = borrow_global<CchsAccount>(acct_addr);
+        recovery_digest(acct_addr, acct.rec_nonce, &new_root, &new_rec_root)
+    }
+
+    /// Whether the next `execute_transfer*` must include the top-layer proof.
     #[view]
     public fun needs_top_layer(acct_addr: address): bool acquires CchsAccount {
         let acct = borrow_global<CchsAccount>(acct_addr);
@@ -189,6 +323,8 @@ module aegis::aegis_account {
     public fun nonce(acct_addr: address): u64 acquires CchsAccount { borrow_global<CchsAccount>(acct_addr).nonce }
     #[view]
     public fun rec_nonce(acct_addr: address): u64 acquires CchsAccount { borrow_global<CchsAccount>(acct_addr).rec_nonce }
+    #[view]
+    public fun creator_of(acct_addr: address): address acquires CchsAccount { borrow_global<CchsAccount>(acct_addr).creator }
 
     // ============================================================ internals
 
@@ -197,14 +333,24 @@ module aegis::aegis_account {
         assert!(*r != x"0000000000000000000000000000000000000000000000000000000000000000", error::invalid_argument(E_ZERO_ROOT));
     }
 
+    /// seed = "AEGIS_CCHS_V1" || root (13 + 32 bytes). The resource address is
+    /// sha3_256(bcs(creator) || seed || 0xFF), per `account::create_resource_address`.
+    fun resource_seed(root: &vector<u8>): vector<u8> {
+        let seed = SEED_PREFIX;
+        vector::append(&mut seed, *root);
+        seed
+    }
+
     fun cache_key(epoch: u64, tree_idx: u64): u128 {
         ((epoch as u128) << 64) | (tree_idx as u128)
     }
 
     /// M = sha2_256("AEGIS_CCHS_V1" || "aptos" || bcs(account) || nonce(8 BE) || idx(8 BE)
-    ///              || sha2_256(bcs(recipient) || amount(8 BE)))
-    fun digest(account: address, nonce: u64, idx: u64, recipient: address, amount: u64): vector<u8> {
-        let action = bcs::to_bytes(&recipient);
+    ///              || sha2_256(asset || bcs(recipient) || amount(8 BE)))
+    /// `account` is the resource account address; `asset` is `coin_asset_id` or `fa_asset_id`.
+    fun digest(account: address, nonce: u64, idx: u64, asset: vector<u8>, recipient: address, amount: u64): vector<u8> {
+        let action = asset;
+        vector::append(&mut action, bcs::to_bytes(&recipient));
         vector::append(&mut action, be64(amount));
         let action_hash = hash::sha2_256(action);
 
@@ -274,7 +420,6 @@ module aegis::aegis_account {
     ): vector<u8> {
         assert!(vector::length(m) == 32, error::invalid_argument(E_BAD_LENGTH));
         assert!(vector::length(wots) == LEN, error::invalid_argument(E_BAD_LENGTH));
-        assert!(vector::length(auth) == height, error::invalid_argument(E_BAD_LENGTH));
 
         let d = digits(m);
 
@@ -294,9 +439,19 @@ module aegis::aegis_account {
             vector::append(&mut leaf_buf, x);
             c = c + 1;
         };
-        let node = hash::sha2_256(leaf_buf);
+        merkle_root(layer, tree_idx, leaf_idx, height, hash::sha2_256(leaf_buf), auth)
+    }
 
-        // Auth path, leaf -> root.
+    /// Auth path, leaf -> root: node_k = sha2_256(adrs(layer, tree, 0x02, pos >> 1, k, 0) || left || right).
+    public fun merkle_root(
+        layer: u8,
+        tree_idx: u64,
+        leaf_idx: u64,
+        height: u64,
+        node: vector<u8>,
+        auth: &vector<vector<u8>>,
+    ): vector<u8> {
+        assert!(vector::length(auth) == height, error::invalid_argument(E_BAD_LENGTH));
         let pos = leaf_idx;
         let k = 0;
         while (k < height) {
@@ -381,6 +536,8 @@ module aegis::aegis_account {
 
     // ============================================================ tests
     // Vectors: evm/test/fixtures/cchs-s-20.json (CCHS-S-20, master 0x07..07).
+    // Digest / address vectors were recomputed independently with Node's
+    // crypto module (sha256, sha3-256) from the byte layouts documented above.
 
     #[test]
     fun test_adrs_layout() {
@@ -422,6 +579,224 @@ module aegis::aegis_account {
         *vector::borrow_mut(&mut wots, 3) = x"0000000000000000000000000000000000000000000000000000000000000000";
         let r0 = verify_layer(0, 0, 1, 10, &m, &wots, &fixture_op1_l0_auth());
         assert!(r0 == x"0e2f82e50284c90ccbf4cc9621789de2746ade4e231383eb2a89794db19ff80a", 0);
+    }
+
+    #[test]
+    fun test_derive_address_vector() {
+        // sha3_256(bcs(0xa11ce) || "AEGIS_CCHS_V1" || 0x11*32 || 0xff)
+        let root = x"1111111111111111111111111111111111111111111111111111111111111111";
+        assert!(resource_seed(&root) == x"41454749535f434348535f56311111111111111111111111111111111111111111111111111111111111111111", 0);
+        assert!(derive_address(@0xa11ce, root) == @0x6a3877bd99d7507ed6dbd0917238ee7b33135d32499d529dc99a1f29af48ca33, 1);
+    }
+
+    #[test]
+    fun test_asset_ids_and_digest_vectors() {
+        assert!(*string::bytes(&type_info::type_name<AptosCoin>()) == b"0x1::aptos_coin::AptosCoin", 0);
+        let apt = coin_asset_id<AptosCoin>();
+        assert!(apt == x"b4caa83e4235ecb06414be3480b265dd67e10ab51736679fdfd62a64807f4112", 1);
+        assert!(fa_asset_id(@0xa) == x"14fe83f39cd306eceb684d801a955bb5092ac3484ac7e3ff585809e19be6fa97", 2);
+        // account 0xcafe, nonce 0, idx 0, APT, recipient 0xb0b, amount 400
+        let m = digest(@0xcafe, 0, 0, apt, @0xb0b, 400);
+        assert!(m == x"96662a83a81b07b57ff154f5bbe77d5921a8880f093781687565e1375ea861e5", 3);
+        let root = x"1111111111111111111111111111111111111111111111111111111111111111";
+        let rec_root = x"2222222222222222222222222222222222222222222222222222222222222222";
+        let mr = recovery_digest(@0xcafe, 0, &root, &rec_root);
+        assert!(mr == x"be47de861c9e54e7246189f1728cf42fc4479ee6e088a2c235956d5260b1b5e9", 4);
+    }
+
+    #[test(framework = @aptos_framework, creator = @0xa11ce)]
+    fun test_create_fund_execute_cached_recover(framework: &signer, creator: &signer) acquires CchsAccount {
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(framework);
+
+        // Key material: bottom tree 0 with real leaves 0 and 1, top leaf 0, recovery leaf 0.
+        let r0 = test_root(0, 0, 0, H, true);
+        let top_root = test_root(1, 0, 0, H, false);
+        let rec0 = test_root(LAYER_REC, 0, 0, REC_H, false);
+
+        create(creator, top_root, rec0);
+        let addr = derive_address(@0xa11ce, top_root);
+        assert!(exists<CchsAccount>(addr), 0);
+        assert!(creator_of(addr) == @0xa11ce, 1);
+        assert!(needs_top_layer(addr), 2);
+
+        // Fund the resource account; the creator key plays no further role.
+        aptos_account::deposit_coins(addr, coin::mint<AptosCoin>(1000, &mint_cap));
+        assert!(coin::balance<AptosCoin>(addr) == 1000, 3);
+
+        // Op 0: first in subtree, needs the top layer. No signer involved.
+        let m0 = next_digest<AptosCoin>(addr, @0xb0b, 400);
+        execute_transfer<AptosCoin>(
+            addr, @0xb0b, 400,
+            test_sign(0, 0, 0, &m0), test_auth(0, 0, 0, H, true),
+            true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, false),
+        );
+        assert!(coin::balance<AptosCoin>(@0xb0b) == 400, 4);
+        assert!(coin::balance<AptosCoin>(addr) == 600, 5);
+        assert!(next_idx(addr) == 1 && nonce(addr) == 1, 6);
+        assert!(!needs_top_layer(addr), 7);
+
+        // Op 1: cached subtree, bottom layer only.
+        let m1 = next_digest<AptosCoin>(addr, @0xb0b, 100);
+        execute_transfer<AptosCoin>(
+            addr, @0xb0b, 100,
+            test_sign(0, 0, 1, &m1), test_auth(0, 0, 1, H, true),
+            false, vector::empty(), vector::empty(),
+        );
+        assert!(coin::balance<AptosCoin>(@0xb0b) == 500, 8);
+        assert!(coin::balance<AptosCoin>(addr) == 500, 9);
+        assert!(next_idx(addr) == 2, 10);
+
+        // Recovery: rotate roots; address and funds stay.
+        let new_root = x"3333333333333333333333333333333333333333333333333333333333333333";
+        let new_rec = x"4444444444444444444444444444444444444444444444444444444444444444";
+        let mr = next_recovery_digest(addr, new_root, new_rec);
+        recover(addr, new_root, new_rec, test_sign(LAYER_REC, 0, 0, &mr), test_auth(LAYER_REC, 0, 0, REC_H, false));
+        assert!(root(addr) == new_root && rec_root(addr) == new_rec, 11);
+        assert!(epoch(addr) == 1 && next_idx(addr) == 0 && rec_nonce(addr) == 1, 12);
+        assert!(needs_top_layer(addr), 13);
+        assert!(coin::balance<AptosCoin>(addr) == 500, 14);
+
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+    }
+
+    #[test(framework = @aptos_framework, creator = @0xa11ce)]
+    #[expected_failure(abort_code = 0x50005, location = Self)]
+    fun test_replayed_signature_fails(framework: &signer, creator: &signer) acquires CchsAccount {
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(framework);
+        let r0 = test_root(0, 0, 0, H, false);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false));
+        let addr = derive_address(@0xa11ce, top_root);
+        aptos_account::deposit_coins(addr, coin::mint<AptosCoin>(1000, &mint_cap));
+
+        let m0 = next_digest<AptosCoin>(addr, @0xb0b, 400);
+        let l0 = test_sign(0, 0, 0, &m0);
+        let a0 = test_auth(0, 0, 0, H, false);
+        execute_transfer<AptosCoin>(addr, @0xb0b, 400, l0, a0, true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, false));
+        // Same signature again: leaf 1 and a new digest, so the recomputed
+        // subtree root differs from the cached one.
+        execute_transfer<AptosCoin>(addr, @0xb0b, 400, l0, a0, false, vector::empty(), vector::empty());
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+    }
+
+    #[test(framework = @aptos_framework, creator = @0xa11ce)]
+    #[expected_failure(abort_code = 0x10006, location = Self)]
+    fun test_first_use_without_top_layer_fails(framework: &signer, creator: &signer) acquires CchsAccount {
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(framework);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false));
+        let addr = derive_address(@0xa11ce, top_root);
+        aptos_account::deposit_coins(addr, coin::mint<AptosCoin>(1000, &mint_cap));
+        let m0 = next_digest<AptosCoin>(addr, @0xb0b, 400);
+        execute_transfer<AptosCoin>(addr, @0xb0b, 400, test_sign(0, 0, 0, &m0), test_auth(0, 0, 0, H, false), false, vector::empty(), vector::empty());
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+    }
+
+    #[test(framework = @aptos_framework, creator = @0xa11ce)]
+    #[expected_failure(abort_code = 0x50007, location = Self)]
+    fun test_wrong_amount_fails(framework: &signer, creator: &signer) acquires CchsAccount {
+        let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(framework);
+        let r0 = test_root(0, 0, 0, H, false);
+        let top_root = test_root(1, 0, 0, H, false);
+        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false));
+        let addr = derive_address(@0xa11ce, top_root);
+        aptos_account::deposit_coins(addr, coin::mint<AptosCoin>(1000, &mint_cap));
+        // Signed for 400, submitted for 900: the bottom root no longer matches
+        // the top-layer message, so the top layer fails against `root`.
+        let m0 = next_digest<AptosCoin>(addr, @0xb0b, 400);
+        execute_transfer<AptosCoin>(addr, @0xb0b, 900, test_sign(0, 0, 0, &m0), test_auth(0, 0, 0, H, false), true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, false));
+        coin::destroy_burn_cap(burn_cap);
+        coin::destroy_mint_cap(mint_cap);
+    }
+
+    #[test(creator = @0xa11ce)]
+    #[expected_failure(abort_code = 0x8000f, location = aptos_framework::account)]
+    fun test_create_twice_same_root_fails(creator: &signer) {
+        let root = x"1111111111111111111111111111111111111111111111111111111111111111";
+        let rec = x"2222222222222222222222222222222222222222222222222222222222222222";
+        create(creator, root, rec);
+        create(creator, root, rec);
+    }
+
+    // ---- test-only key material. A WOTS+ key whose chain secrets are
+    // sha2_256 of a tag; sibling nodes are either the real neighbour leaf
+    // (level 0, `real_sibling`) or tagged pseudo-random values. Verification
+    // only recomputes the root from leaf and path, so this is a valid tree.
+
+    #[test_only]
+    fun test_sk(layer: u8, tree_idx: u64, leaf_idx: u64, c: u64): vector<u8> {
+        let buf = b"AEGIS_TEST_SK";
+        vector::push_back(&mut buf, layer);
+        vector::append(&mut buf, be64(tree_idx));
+        vector::append(&mut buf, be64(leaf_idx));
+        vector::append(&mut buf, be64(c));
+        hash::sha2_256(buf)
+    }
+
+    #[test_only]
+    fun test_chain(layer: u8, tree_idx: u64, leaf_idx: u64, c: u64, x: vector<u8>, from: u8, to: u8): vector<u8> {
+        let s = from;
+        while (s < to) {
+            let input = adrs(layer, tree_idx, 0x00, leaf_idx, (c as u8), s);
+            vector::append(&mut input, x);
+            x = hash::sha2_256(input);
+            s = s + 1;
+        };
+        x
+    }
+
+    #[test_only]
+    fun test_leaf(layer: u8, tree_idx: u64, leaf_idx: u64): vector<u8> {
+        let buf = adrs(layer, tree_idx, 0x01, leaf_idx, 0, 0);
+        let c = 0;
+        while (c < LEN) {
+            vector::append(&mut buf, test_chain(layer, tree_idx, leaf_idx, c, test_sk(layer, tree_idx, leaf_idx, c), 0, 15));
+            c = c + 1;
+        };
+        hash::sha2_256(buf)
+    }
+
+    #[test_only]
+    fun test_sign(layer: u8, tree_idx: u64, leaf_idx: u64, m: &vector<u8>): vector<vector<u8>> {
+        let d = digits(m);
+        let sig = vector::empty<vector<u8>>();
+        let c = 0;
+        while (c < LEN) {
+            let dc = *vector::borrow(&d, c);
+            vector::push_back(&mut sig, test_chain(layer, tree_idx, leaf_idx, c, test_sk(layer, tree_idx, leaf_idx, c), 0, dc));
+            c = c + 1;
+        };
+        sig
+    }
+
+    #[test_only]
+    fun test_auth(layer: u8, tree_idx: u64, leaf_idx: u64, height: u64, real_sibling: bool): vector<vector<u8>> {
+        let auth = vector::empty<vector<u8>>();
+        let k = 0;
+        while (k < height) {
+            let node_idx = (leaf_idx >> (k as u8)) ^ 1;
+            let sib = if (k == 0 && real_sibling) {
+                test_leaf(layer, tree_idx, node_idx)
+            } else {
+                let buf = b"AEGIS_TEST_NODE";
+                vector::push_back(&mut buf, layer);
+                vector::append(&mut buf, be64(tree_idx));
+                vector::append(&mut buf, be64(node_idx));
+                vector::push_back(&mut buf, (k as u8));
+                hash::sha2_256(buf)
+            };
+            vector::push_back(&mut auth, sib);
+            k = k + 1;
+        };
+        auth
+    }
+
+    #[test_only]
+    fun test_root(layer: u8, tree_idx: u64, leaf_idx: u64, height: u64, real_sibling: bool): vector<u8> {
+        merkle_root(layer, tree_idx, leaf_idx, height, test_leaf(layer, tree_idx, leaf_idx), &test_auth(layer, tree_idx, leaf_idx, height, real_sibling))
     }
 
     #[test_only]

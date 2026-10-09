@@ -51,13 +51,13 @@ The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storag
 | Chain | Hash primitive | Status |
 |---|---|---|
 | EVM (Ethereum, BSC, Polygon, Arbitrum, Optimism, Base, Avalanche, Linea, Scroll, Mantle, Blast, Mode, …) | `keccak256` (K-20) or precompile `0x02` (S-20) | contracts + factory complete, interop-tested |
-| TRON | same opcodes (EVM-compatible) | same artifacts |
-| Solana | `sha256` syscall | adapter scaffold |
-| Cosmos (CosmWasm) | `sha2_256` | adapter scaffold |
-| Aptos / Sui | `hash::sha2_256` | adapter scaffold |
-| NEAR | `env::sha256` | adapter scaffold |
-| TON | `HASHEXT_SHA256` | adapter scaffold |
-| Starknet | `core::sha256` | adapter scaffold |
+| TRON | same opcodes (TVM, cancun) | same sources, TVM build byte-identical to the EVM artifact (`tron/`); CREATE2 prefix `0x41` predictor; not yet published on Nile or mainnet |
+| Solana | `sha256` syscall | `CCHS-C-20` Anchor program: `cache_subtree` + single-packet `execute` (`solana/`); fixture-tested, not deployed |
+| Cosmos (CosmWasm) | `sha2_256` | verifier contract on `cchs-core`, fixture-tested, not deployed |
+| Aptos / Sui | `hash::sha2_256` | Move modules: resource account with zeroed auth key (Aptos), `Bag<Balance<T>>` any-coin vault (Sui), immutable publication documented; fixture + end-to-end tests, not published |
+| NEAR | `env::sha256` | verifier contract on `cchs-core`, fixture-tested, not deployed |
+| TON | `HASHEXT_SHA256` | FunC verifier, fixture-tested, not deployed |
+| Starknet | `core::sha256` | Cairo verifier, fixture-tested, not deployed |
 | Bitcoin | `OP_SHA256` + `OP_CAT` (BIP-347, not active) | tree/leaf-script builder in `wallet/src/aegis/btcTapscript.ts`; sighash binding needs OP_CAT, see `CCHS.spec.md` §7.1 |
 
 Standard mainnet address derivation for 23 chains (importable into Phantom, Keplr, Petra, etc.) is implemented in `wallet/src/aegis/derive.ts`. See [`ADAPTERS.md`](ADAPTERS.md).
@@ -96,7 +96,7 @@ node deploy-cchs.mjs --status
 AEGIS_DEPLOYER_KEY=0x… node deploy-cchs.mjs sepolia base arbitrum
 ```
 
-The factory is published through the deterministic-deployment proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so it has the address `0x52aC1CdF75D5f11BCabE8dD0d8429Cd152Ec0091` on every chain where it has been published. Anyone can publish it; the result does not depend on who sends the transaction, and there is no project deployer key. `--status` reports where it is live. The wallet's **Protect** panel predicts the user's account address offline from `wallet/src/aegis/cchsArtifacts.json`, shows live per-chain state, publishes the factory itself as one extra transaction on a chain where it is still missing (the user pays about 2.9 M gas once per chain), and creates + funds the account in one transaction.
+The factory is published through the deterministic-deployment proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so it has the address `0x7d8eAF44A413bb72bB409fbCb5E51aFe4b2Ef22a` on every chain where it has been published. Anyone can publish it; the result does not depend on who sends the transaction, and there is no project deployer key. `--status` reports where it is live. The wallet's **Protect** panel predicts the user's account address offline from `wallet/src/aegis/cchsArtifacts.json`, shows live per-chain state, publishes the factory itself as one extra transaction on a chain where it is still missing (the user pays about 2.9 M gas once per chain), and creates + funds the account in one transaction.
 
 ## Honest limits
 
