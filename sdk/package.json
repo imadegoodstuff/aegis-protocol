@@ -22,7 +22,8 @@
     "build": "vite build && tsc -p tsconfig.types.json",
     "typecheck": "tsc --noEmit -p .",
     "smoke": "tsx scripts/smoke.mts",
-    "prepublishOnly": "npm run build && npm run smoke"
+    "check": "npm run build && npm run typecheck && npm run smoke",
+    "prepublishOnly": "npm run check"
   },
   "repository": {
     "type": "git",

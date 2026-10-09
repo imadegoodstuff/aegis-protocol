@@ -168,8 +168,10 @@ source only and have no SDK path yet.
 ## Examples and checks
 
 `examples/` holds runnable node scripts for EVM, Solana and Bitcoin and a
-browser sketch. `npm run smoke` runs the offline checks CI runs: addresses on
-all three chains, a K-20 signature and an SLH-DSA signature verified locally,
-and the size of a Solana execute transaction.
+browser sketch; they import the built package, so build first. `npm run
+check` is what CI runs: build, type-check (sources, examples, scripts), then
+the offline smoke: addresses on all three chains, a K-20 signature and an
+SLH-DSA signature verified locally, and the size of a Solana execute
+transaction.
 
 MIT.

@@ -111,8 +111,9 @@ jobs:
       - run: npm ci || npm install
         working-directory: wallet
       - run: npm ci || npm install
-      - run: npm run typecheck
       - run: npm run build
+      - name: type-check sources, examples and scripts (the examples import the built package)
+        run: npm run typecheck
       - name: offline smoke (EVM, Solana, Bitcoin addresses; K-20 and SLH-DSA signatures; execute tx size)
         run: npm run smoke
       - name: package contents
