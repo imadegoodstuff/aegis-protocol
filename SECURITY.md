@@ -53,7 +53,7 @@ The Lean proofs cover the transition system only: the hash is an abstraction ("a
 3. `model/*.mjs`: whether the models faithfully abstract the contracts and the client, and whether the bounds are meaningful.
 4. `wallet/src/aegis/`: key derivation, per-epoch keys, signing, the index record, and `ProtectPanel`'s use of them.
 5. `cchs-core` and the non-EVM verifiers against the fixtures and against the Solidity reference.
-6. The C-20 parameter choice.
+6. The parameter choices: the C-20 set, and the attack-path accounting of `CCHS.spec.md` §5.6 that keeps `n = 32` as the default (in particular whether the 32-byte digest and master really cap every wider-output variant at 2^128, and whether the conservative 2^113 figure for the chain and node paths should be the one quoted).
 
 ## 6. Reporting
 

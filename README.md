@@ -33,7 +33,7 @@ Users need a signature layer with the weakest possible assumption, today. Hash f
 
 ## Trust assumptions
 
-1. SHA-256 preimage and second-preimage resistance (Grover bound: 2^128).
+1. SHA-256 preimage and second-preimage resistance: 2^128 quantum under the tight multi-target accounting of FIPS 205, 2^113 under the conservative one; `CCHS.spec.md` §5.5 gives both and §5.6 costs every attack path and the wider-output alternatives.
 2. The user's own device and seed handling.
 
 There is no trusted setup, committee, admin key, treasury, upgrade path, or governance that can alter account logic.

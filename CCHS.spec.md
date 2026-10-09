@@ -22,7 +22,7 @@ Result, at 2^20 signature capacity:
 
 CCHS obtains the keygen cost of a hypertree and the signature size of a flat tree while moving the one-time-key index to the chain. Previously these were a three-way trade-off. It is not a stateless scheme in the SPHINCS+ sense: the verifier holds the index and enforces one landed signature per leaf, and the client still keeps a small write-ahead record so that a signature which never landed is not repeated (§4.3). What the client no longer needs is the tree state of XMSS: the record is a single integer per account and losing it costs capacity, not security, provided the device waits for in-flight transactions to settle before signing again.
 
-Only cryptographic assumption: SHA-256 second-preimage / preimage resistance. Grover bound 2^128.
+Only cryptographic assumption: SHA-256 second-preimage / preimage resistance. Quantum bound 2^128 under the tight (SPHINCS+ / FIPS 205) multi-target accounting, 2^113 under the conservative one that gives the address tweak no credit (§5.5); every attack path is costed and the effect of a wider hash output is worked out in §5.6.
 
 ---
 
@@ -350,6 +350,42 @@ What C-20 trades: ~6× more verifier compute per layer and ~6× more keygen work
 
 **Why the top layer does not get its own Winternitz parameter.** CCHS verifies the top layer once per subtree and the bottom layer once per signature, so the two layers could in principle use different `w`: a large `w` on the top layer would shrink the first-in-subtree proof at a compute cost paid only every 2^10 signatures. The arithmetic says no on every chain this document targets. On the EVM with K-20, `w = 256` on the top layer cuts the 67 chains to 34 and the layer from 2 144 B to 1 088 B, saving about 17 K gas of calldata, while the expected chain work rises from 67 × 7.5 ≈ 500 to 34 × 127.5 ≈ 4 335 hash steps; the measured difference between `executeFirst` and `execute` (≈ 125–145 K execution gas for one layer of ≈ 500 steps, 10 Merkle nodes, the public-key compression and the 20 K cache write) puts a step at roughly 200 gas, so the change would add ≈ 0.75 M gas to every first-in-subtree transaction, i.e. ≈ 730 gas per signature amortized against 17 gas saved. On Solana, C-20 already uses `w = 256` on both layers because bytes, not compute, are the binding constraint, and the bottom layer cannot go the other way (`w = 16` with n = 24 needs 51 chains, 1 224 B, which does not fit a packet). On Bitcoin the chain check is unrolled in script, so script size grows linearly in `w` (`BITCOIN.md` §5.6). The layers therefore share one `w` per set, and the asymmetry CCHS exploits is the cache, not the parameter.
 
+### 5.6 Wider hash outputs: which path limits the scheme, and what `n = 36 / 48 / 64` would cost
+
+A longer hash output raises the security of the scheme only along the paths that go through that hash, and only up to the next path that does not. The attack paths of an accepted CCHS signature, with their cost at `n = 32`, are:
+
+| Path | What the adversary needs | Target count | Classical / quantum at `n = 32` | Grows with `n`? |
+|---|---|---|---|---|
+| P1 chain step | a (second) preimage of `F` at some chain position (C2: an earlier chain value, or a value colliding with a shown one) | `T ≈ 2^30` per tree, tweaked | tight 2^256 / 2^128; conservative 2^226 / 2^113 | yes |
+| P2 leaf and node | a second preimage of `T_leaf` / `T_node` on the authentication path | inside the same `T` | as P1 | yes |
+| P3 message digest | `M' = M` for a different `(target, value, data)` against the one pending digest, or a second preimage of `keccak256(data)` | one (the digest carries the lane nonce, so a landed digest is worthless) | 2^256 / 2^128 | **no** — `M` is a 32-byte `H` by §4, whatever `n` is |
+| P4 master and chain key | the 32-byte `master` or `key(chain)` from public roots | one per account | 2^256 / 2^128 (and the mnemonic gives at most 256 bits) | **no** |
+| P5 seed collision | a second tree whose `pkSeed` equals the victim's, to turn two functions into one | one | 2^128 classical (and it only restores the multi-target term, it forges nothing) | no (`pkSeed` is 16 B by §2) |
+
+At `n = 32` the scheme is balanced: under the tight accounting every path costs 2^128 quantum queries, and the number in the abstract is that one. Under the conservative accounting P1/P2 drop to 2^113 and become the limiting paths; the other three stay at 2^128. This is the precise sense in which "doubling the output does not double the security": raising `n` moves P1/P2 and nothing else, so
+
+- `n = 36` (288-bit output, the smallest `n` with `8n − log₂T ≥ 256`) lifts the *conservative* bound of P1/P2 to ≈ 2^129 and leaves the tight bound at 2^128, because P3 and P4 now limit;
+- `n = 48` lifts P1/P2 to 2^192 tight / ≈ 2^177 conservative, and the scheme is still 2^128 by P3/P4;
+- `n = 64` lifts P1/P2 to 2^256 / ≈ 2^240 and the scheme is still 2^128 by P3/P4.
+
+Moving the scheme itself above 2^128 would require a 384-bit digest in §4, a 384-bit `master` and chain key (HKDF-SHA384 and a seed longer than any BIP-39 mnemonic), a wider `pkSeed`, *and* `n ≥ 48`; none of the chains this document targets has a native hash wider than 256 bits (the EVM has `keccak256` and the SHA-256 precompile, Solana `sol_sha256`/`sol_keccak256`, the Move chains `sha2_256`/`sha3_256`, Cairo `sha256`), so every `F`, `T_leaf`, `T_node` and the digest would be two hash calls with a domain byte, and the verifier's hash count doubles on top of the growth in chains. FIPS 205 defines no `n > 32`, and NIST SP 800-208 admits `n = 24` and `n = 32` for LMS/XMSS; a wider set would be outside every standardised hash-signature parameter and would need its own written bound.
+
+What the three candidates cost, computed from §2 and estimated from the measured K-20 build of §5.2 (≈ 170 gas per hash call plus ≈ 25 K fixed in `execute`, 16 gas per calldata byte, two hash calls per `F` for `n > 32`; these are extrapolations, not measurements, and would move by tens of percent in a real implementation):
+
+| | `n = 32` (K-20, measured) | `n = 36` | `n = 48` | `n = 64` |
+|---|---|---|---|---|
+| `len_1 + len_2` chains | 64 + 3 = 67 | 72 + 3 = 75 | 96 + 3 = 99 | 128 + 3 = 131 |
+| one layer | 2 464 B | 3 060 B | 5 232 B | 9 024 B |
+| first-in-subtree (two layers) | 4 928 B | 6 120 B | 10 464 B | 18 048 B |
+| verifier hash *calls* per layer, avg | ≈ 520 | ≈ 1 150 | ≈ 1 500 | ≈ 1 980 |
+| `execute`, cached, whole transaction | **≈ 173 K** | ≈ 300 K | ≈ 400 K | ≈ 550 K |
+| `cachedRoot` and `root` storage | 1 slot each | 2 slots each (+20 K gas per subtree, +40 K at creation) | 2 | 2 |
+| Solana single-packet path | C-20 only | none (3 060 B is three packets) | none | none |
+| conservative quantum bound, P1/P2 | 2^113 | ≈ 2^129 | ≈ 2^177 | ≈ 2^240 |
+| tight bound of the scheme | 2^128 | 2^128 | 2^128 | 2^128 |
+
+The parameter decision this document takes is therefore: `n = 32` stays the default, labelled as 2^128 under the tight (FIPS 205) accounting and 2^113 under the conservative one, both stated in the abstract; `n = 36` is the candidate if a deployment refuses the tight accounting and wants every path at or above 2^128 for about 1.75× the gas and 1.25× the bytes, and it is recorded in §11 as an evaluated alternative with no implementation; `n = 48` and `n = 64` buy nothing for the scheme as a whole without the digest, key and seed changes above, and are not candidates. None of this touches the Lean proofs of §6.2, which abstract the hash and hold for every `n`; what a change of `n` does touch is the contracts, the encodings, the fixtures of §10, and the two accountings of §5.5, which would have to be rewritten for the new `T` before the new set could carry a label.
+
 ---
 
 ## 6. Security
@@ -362,11 +398,11 @@ Adversary A: full view of chain and mempool; unbounded classical compute; quantu
 
 **C1 — Unforgeability.** A cannot produce an accepting signature for `(target', value', data')` not authorized by the owner.
 
-Sketch. Acceptance requires a WOTS+ signature under key `(0, t_0, j_0)` on `M'`. Each WOTS+ key is used at most once (enforced by `nextIdx` monotonicity). WOTS+ with checksum is existentially unforgeable under one-time chosen-message attack assuming second-preimage resistance of `F` (Hülsing 2013, Theorem 1), with the ADRS tweak eliminating multi-target advantage within the tree and `pkSeed` (§2.1) eliminating it across trees. A's best attack is a preimage search: 2^128 Grover queries.
+Sketch. Acceptance requires a WOTS+ signature under key `(0, t_0, j_0)` on `M'`. Each WOTS+ key is used at most once (enforced by `nextIdx` monotonicity). WOTS+ with checksum is existentially unforgeable under one-time chosen-message attack assuming second-preimage resistance of `F` (Hülsing 2013, Theorem 1), with the ADRS tweak eliminating multi-target advantage within the tree and `pkSeed` (§2.1) eliminating it across trees. A's best attack is a preimage search: 2^128 Grover queries under the tight accounting, 2^113 if the tweak is given no credit (§5.5, §5.6 path P1).
 
 **C2 — Mempool front-running is infeasible.** A observes `(sig_0, auth_0)` for `M` in the mempool and attempts to submit a transaction for `M' ≠ M` in the same block.
 
-Sketch. `M' ≠ M` ⇒ base-16 digit vectors differ. The checksum guarantees ∃ chain `c` with `digits'[c] > digits[c]`. A holds `sig_c = F^{digits[c]}(sk_c)` and needs `F^{digits'[c]}(sk_c)` — a value *earlier* in the chain. Computing it requires inverting `F`. Same 2^128 bound.
+Sketch. `M' ≠ M` ⇒ base-16 digit vectors differ. The checksum guarantees ∃ chain `c` with `digits'[c] > digits[c]`. A holds `sig_c = F^{digits[c]}(sk_c)` and needs `F^{digits'[c]}(sk_c)` — a value *earlier* in the chain. Computing it requires inverting `F`. Same bound as C1. The alternative, `M' = M` for a different transaction, is a second preimage of the single pending 32-byte digest: 2^128 under either accounting (§5.6 path P3).
 
 **C3 — Cache integrity.** A cannot cause `cachedRoot[t_0]` to hold a value other than the owner's `TreeRoot(0, t_0)`.
 
@@ -510,4 +546,5 @@ Key derivation (HKDF-SHA256 from the 32-byte `key(chain)`, itself derived per ch
 4. **Bitcoin.** Nothing binds a hash-based witness to a transaction under current consensus (§7.1); the open problem is the opcode, not the scheme. Once it exists, option (a) forgoes caching and (b) recovers it through UTXO lineage.
 5. **C-20 concrete security.** A written reduction with explicit constants for `n = 24`, `w = 256`, 2^20 leaves in the multi-target quantum setting, and a packet-size measurement for the `n = 28` alternative (§5.5). The multi-user term is closed by `pkSeed` (§2.1); the single-tree constants are still to be written down, and until then the set carries the two-level label given there.
 6. **Compute units on Solana.** Measured in the `solana-program-test` runtime in CI (§5.5); a measurement on a public cluster with the compute-budget instruction in place is still outstanding.
-7. **C-20 keygen cost.** ~15 M hashes: 28 s single-threaded in JS, 5.4 s on the eight-worker WASM pool (`CchsPool.keygen(key, 'C')`). Still an order of magnitude above S-20; a native (Rust/WASM) tree builder would close most of it.
+7. **Wider output.** `n = 36` is the smallest set at which the conservative accounting of §5.5 also reaches 2^128 on the chain and node paths (§5.6): about 1.25× the bytes and an estimated 1.75× the gas of K-20, two hash calls per `F` on every chain this document targets, no single-packet path on Solana. Evaluated, not implemented; it becomes worth implementing only if a deployment refuses the FIPS 205 argument. `n = 48` and `n = 64` are not candidates on their own, because the 32-byte digest and master cap the scheme at 2^128 regardless.
+8. **C-20 keygen cost.** ~15 M hashes: 28 s single-threaded in JS, 5.4 s on the eight-worker WASM pool (`CchsPool.keygen(key, 'C')`). Still an order of magnitude above S-20; a native (Rust/WASM) tree builder would close most of it.
