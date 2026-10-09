@@ -185,7 +185,15 @@ jobs:
         run: |
           sh -c "$(curl -sSfL https://release.anza.xyz/v2.3.6/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
-      - run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
+      # Lock files are not committed. The cargo inside Agave 2.3 is 1.84 and
+      # cannot parse edition-2024 manifests, which blake3 >= 1.8 pulls in
+      # (digest 0.11, cpufeatures 0.3); solana-program only needs blake3 ^1.5.
+      # The host-side cu-test resolves on its own with the stable toolchain.
+      - name: Build the program (SBF)
+        run: |
+          cargo generate-lockfile
+          cargo update -p blake3 --precise 1.5.5
+          cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
       - run: ls -l target/deploy/aegis_account.so
       # Replays cchs-c-20.json through the built .so in the BanksClient runtime
       # (create, cache_subtree, execute x5 incl. the skip ops, recover), prints
