@@ -95,8 +95,36 @@ jobs:
         run: npm run index-discipline
       - name: full account life cycle in an EVM (create, sign, skip, rotate, withdraw) with costs
         run: npm run evm-flow
-      - name: Bitcoin Tapscript leaf executed in a BIP-342 opcode interpreter, sizes pinned
+      - name: Bitcoin CCHS-UTXO leaves (exec, execFirst, recover) executed in a BIP-342 + OP_CAT + OP_CHECKSIGFROMSTACK interpreter, sizes pinned
         run: npm run btc
+
+  bitcoin:
+    name: Bitcoin Inquisition regtest (CCHS-UTXO lineage on a real node)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: wallet } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      - run: npm ci || npm install
+      - name: Bitcoin Inquisition 29.4 (OP_CAT, OP_CHECKSIGFROMSTACK active on regtest)
+        run: |
+          curl -sSL -o inq.tar.gz https://github.com/bitcoin-inquisition/bitcoin/releases/download/v29.4-inq/bitcoin-29.4-inq-x86_64-linux-gnu.tar.gz
+          echo "7ad3cb745575f7c21916cf3c294a95f59e11e5bf6e37c4a47b92697cf4723e22  inq.tar.gz" | sha256sum -c
+          tar -xzf inq.tar.gz
+          mkdir -p "$RUNNER_TEMP/btc"
+          bitcoin-29.4-inq/bin/bitcoind -regtest -daemon -datadir="$RUNNER_TEMP/btc" -server -rpcuser=ci -rpcpassword=ci -rpcport=18443 -fallbackfee=0.0001 -acceptnonstdtxn=0
+          for i in $(seq 1 30); do bitcoin-29.4-inq/bin/bitcoin-cli -regtest -datadir="$RUNNER_TEMP/btc" -rpcuser=ci -rpcpassword=ci getblockchaininfo >/dev/null 2>&1 && break; sleep 1; done
+          bitcoin-29.4-inq/bin/bitcoin-cli -regtest -datadir="$RUNNER_TEMP/btc" -rpcuser=ci -rpcpassword=ci getdeploymentinfo | grep -A3 -E '"(op_cat|checksigfromstack)"'
+      - name: lineage execFirst → exec → exec → recover → execFirst, standardness enforced
+        env:
+          BTC_NETWORK: regtest
+          BTC_RPC_URL: http://127.0.0.1:18443
+          BTC_RPC_USER: ci
+          BTC_RPC_PASS: ci
+          BTC_MASTER_HEX: 4242424242424242424242424242424242424242424242424242424242424242
+          BTC_TOP_HEIGHT: '2'
+        run: npm run btc-flow
 
   cosmwasm:
     name: CosmWasm (Rust wasm32)
