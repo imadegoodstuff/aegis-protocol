@@ -50,6 +50,7 @@ wallet/lh-local.json
 wallet/lighthouse-mobile.json
 sdk/dist/
 sdk/*.tgz
+extension/dist/
 
 # env
 .env

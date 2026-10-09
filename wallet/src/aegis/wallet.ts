@@ -12,6 +12,7 @@ import {
   type Chain,
   type Hex,
 } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 import { sepolia, baseSepolia, mainnet, base, arbitrum, optimism, polygon, bsc, avalanche, linea, scroll, mantle, blast, mode } from "viem/chains";
 
 export const SUPPORTED_CHAINS: Record<number, Chain> = {
@@ -38,7 +39,61 @@ export const DEFAULT_CHAIN = sepolia;
 
 type Eip1193 = { request: (args: { method: string; params?: unknown[] }) => Promise<unknown>; on?: (event: string, cb: (...args: unknown[]) => void) => void; removeListener?: (event: string, cb: (...args: unknown[]) => void) => void; };
 
+// ---------- Local relayer ----------
+// The browser extension has no injected wallet to relay through, so it pays
+// gas from a key of its own: the mnemonic's secp256k1 key (`evmGasKey`),
+// funded with gas money only. It is presented to the panels as an EIP-1193
+// provider so that nothing above this file changes: `eth_sendTransaction`
+// is signed locally and sent over the chain's public RPC; chain switching
+// is a variable; everything else is forwarded to the public client.
+
+let localRelayer: { key: Hex; chainId: number } | null = null;
+
+export function setLocalRelayer(privateKey: Hex | null, chainId: number = DEFAULT_CHAIN.id): void {
+  localRelayer = privateKey ? { key: privateKey, chainId } : null;
+}
+
+export function localRelayerAddress(): Address | null {
+  return localRelayer ? privateKeyToAccount(localRelayer.key).address : null;
+}
+
+function localProvider(): Eip1193 {
+  return {
+    async request({ method, params }) {
+      const r = localRelayer!;
+      const chain = SUPPORTED_CHAINS[r.chainId];
+      switch (method) {
+        case "eth_requestAccounts":
+        case "eth_accounts":
+          return [privateKeyToAccount(r.key).address];
+        case "eth_chainId":
+          return "0x" + r.chainId.toString(16);
+        case "wallet_switchEthereumChain": {
+          const id = parseInt((params as [{ chainId: string }])[0].chainId, 16);
+          if (!SUPPORTED_CHAINS[id]) throw Object.assign(new Error("unsupported chain"), { code: 4902 });
+          r.chainId = id;
+          return null;
+        }
+        case "wallet_addEthereumChain":
+          return null;
+        case "eth_sendTransaction": {
+          const [tx] = params as [{ to?: Address; data?: Hex; value?: Hex; gas?: Hex }];
+          const wc = createWalletClient({ chain, account: privateKeyToAccount(r.key), transport: http(RPC_OVERRIDES[chain.id], { timeout: 20_000 }) });
+          return wc.sendTransaction({
+            to: tx.to, data: tx.data,
+            value: tx.value ? BigInt(tx.value) : undefined,
+            gas: tx.gas ? BigInt(tx.gas) : undefined,
+          });
+        }
+        default:
+          return makePublicClient(chain).request({ method, params } as never);
+      }
+    },
+  };
+}
+
 export function detectInjected(): Eip1193 | null {
+  if (localRelayer) return localProvider();
   if (typeof window === "undefined") return null;
   const e = (window as unknown as { ethereum?: Eip1193 }).ethereum;
   return e ?? null;

@@ -1,0 +1,18 @@
+{
+  "extends": "../wallet/tsconfig.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "types": [],
+    "typeRoots": ["../wallet/node_modules/@types"],
+    "paths": {
+      "@wallet/*": ["../wallet/src/*"],
+      "react": ["../wallet/node_modules/@types/react"],
+      "react/jsx-runtime": ["../wallet/node_modules/@types/react/jsx-runtime"],
+      "react-dom/client": ["../wallet/node_modules/@types/react-dom/client"],
+      "viem": ["../wallet/node_modules/viem"],
+      "@scure/bip39": ["../wallet/node_modules/@scure/bip39"],
+      "@scure/bip39/wordlists/english": ["../wallet/node_modules/@scure/bip39/wordlists/english"]
+    }
+  },
+  "include": ["src"]
+}

@@ -18,6 +18,7 @@ import type { Address, Chain, Hex } from "viem";
 import { encodeFunctionData, erc20Abi, formatEther, formatUnits, hexToBytes, isAddress, keccak256, parseEther, parseUnits } from "viem";
 import {
   detectInjected, requestAccounts, getChainId, switchChain, makePublicClient, makeWalletClient, shortAddr, PROTECT_CHAINS,
+  localRelayerAddress,
 } from "../aegis/wallet";
 import { isValidMnemonic, mnemonicEntropyBits, CCHS_MIN_SEED_BITS } from "../aegis/derive";
 import { CchsPool } from "../aegis/cchsPool";
@@ -37,15 +38,21 @@ type TokenState = {
 function revertReason(e: unknown): string {
   const err = e as { shortMessage?: string; details?: string; message?: string };
   const s = err.details || err.shortMessage || err.message || "reverted";
-  return s.replace(/\s+/g, " ").slice(0, 160);
+  // Some nodes append the ABI-encoded return data after the reason; it says nothing more to a person.
+  return s.replace(/:?\s*0x[0-9a-fA-F]{64,}/g, "").replace(/\s+/g, " ").trim().slice(0, 160);
 }
 
 /** True when a failed `eth_call` failed in transport or at the node, not in the contract: nothing can be concluded about the token. */
 function isTransportError(e: unknown): boolean {
-  const names = new Set(["HttpRequestError", "TimeoutError", "InternalRpcError", "LimitExceededRpcError", "ResourceUnavailableRpcError", "RpcRequestError"]);
   const walk = (e as { walk?: (fn: (err: unknown) => boolean) => unknown }).walk;
-  if (typeof walk === "function") return !!walk.call(e, (err) => names.has((err as { name?: string }).name ?? ""));
-  return names.has((e as { name?: string }).name ?? "");
+  const has = (fn: (err: { name?: string }) => boolean) =>
+    typeof walk === "function" ? !!walk.call(e, (err) => fn(err as { name?: string })) : fn(e as { name?: string });
+  // A revert anywhere in the chain is the contract's answer, whatever wrapped it.
+  if (has((err) => err.name === "ContractFunctionRevertedError" || err.name === "ExecutionRevertedError")) return false;
+  const names = new Set(["HttpRequestError", "TimeoutError", "InternalRpcError", "LimitExceededRpcError", "ResourceUnavailableRpcError"]);
+  if (has((err) => names.has(err.name ?? ""))) return true;
+  // viem wraps raw JSON-RPC errors as RpcRequestError; code 3 is `execution reverted`, -32000 may be either and is read from the message.
+  return has((err) => err.name === "RpcRequestError" && !/revert/i.test((err as { message?: string }).message ?? ""));
 }
 
 type ChainState = {
@@ -220,6 +227,21 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   }, [id, listed, withRwa, wallet, refresh]); // tokensFor is a pure function of `listed` and `withRwa`
 
   const walletPresent = typeof window !== "undefined" && !!detectInjected();
+
+  // Inside the extension the fee payer is a key derived from the same phrase,
+  // so there is nothing to ask the user: connect it as soon as it is set. An
+  // injected wallet (MetaMask) is never connected without a click.
+  useEffect(() => {
+    if (wallet || !localRelayerAddress()) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const [account, chainId] = [await requestAccounts(), await getChainId()];
+        if (!cancelled) setWallet({ account, chainId });
+      } catch { /* no local relayer after all */ }
+    })();
+    return () => { cancelled = true; };
+  }, [wallet]);
 
   async function connect(chain: Chain) {
     let w = wallet;

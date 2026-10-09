@@ -162,6 +162,17 @@ export function identity(mnemonic: string, passphrase = ""): Identity {
   };
 }
 
+/**
+ * The secp256k1 key behind `evmAddress`, on its own: the extension uses it to
+ * pay gas for the hash-only account's transactions (it holds gas money only
+ * and has no authority over the account). Same derivation as `identity()`,
+ * without the SLH-DSA keygen.
+ */
+export function evmGasKey(mnemonic: string, passphrase = ""): Uint8Array {
+  const seed = mnemonicToSeedSync(mnemonic.trim(), passphrase);
+  return hkdf(sha512, seed, undefined, ECDSA_INFO, 32);
+}
+
 /** Address-only derivation (safe to log, no secret material). */
 export function derive(mnemonic: string, passphrase = ""): Derived {
   const seed = mnemonicToSeedSync(mnemonic.trim(), passphrase);

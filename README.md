@@ -75,6 +75,7 @@ aegis/
 ├── ADAPTERS.md           per-chain adapter matrix
 ├── evm/                  Solidity: AegisCCHS, AegisAccountV2, factories, SPHINCS+ C13 verifier, tests
 ├── wallet/               Vite + React client: CCHS client, 23-chain derivation, Web Worker crypto
+├── extension/            browser extension (MV3 side panel): the wallet's panels behind a password, gas paid by a derived key
 ├── sdk/                  @aegis-protocol/sdk: the wallet's client as a library (EVM, Solana, Bitcoin signet, derivation)
 ├── deploy/               Node deployment (solc-js + viem), no Foundry required
 ├── model/                bounded model check of the CCHS state machine (runs in CI)
@@ -97,6 +98,9 @@ cd deploy && npm i && node deploy.mjs --compile-only
 # Wallet, then the checks CI runs: pinned vectors, index discipline, full life cycle in an EVM with costs
 cd wallet && npm i && npm run build
 npm run vectors && npm run index-discipline && npm run evm-flow && npm run btc
+
+# Browser extension (needs wallet/node_modules): writes extension/dist, load it unpacked
+cd extension && npm run build
 
 # SDK for integrators (same sources as the wallet): build, type-check, offline smoke
 cd sdk && npm i && npm run build && npm run smoke

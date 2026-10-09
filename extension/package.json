@@ -1,0 +1,12 @@
+{
+  "name": "aegis-extension",
+  "private": true,
+  "type": "module",
+  "description": "Aegis browser extension (Manifest V3): the wallet's Protect / Spend panels behind a password, gas paid by the mnemonic's own key.",
+  "scripts": {
+    "icons": "node scripts/icons.mjs",
+    "typecheck": "cd ../wallet && npx tsc --noEmit -p ../extension/tsconfig.json",
+    "build": "npm run icons && cd ../wallet && npx vite build --config ../extension/vite.config.ts",
+    "dev": "cd ../wallet && npx vite --config ../extension/vite.config.ts --port 5174"
+  }
+}
