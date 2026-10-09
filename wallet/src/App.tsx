@@ -114,7 +114,16 @@ export default function App() {
 
   useEffect(() => {
     const els = document.querySelectorAll<HTMLElement>(".fade");
-    const io = new IntersectionObserver((entries) => entries.forEach((e) => e.isIntersecting && e.target.classList.add("in")), { threshold: 0.08 });
+    if (!("IntersectionObserver" in window)) { els.forEach((el) => el.classList.add("in")); return; }
+    // Threshold 0: a wrapper taller than the viewport (the Protect card on a
+    // phone is ~12 000 px) never reaches any positive ratio and would stay
+    // invisible; the first visible pixel is enough to reveal it.
+    const io = new IntersectionObserver((entries) => entries.forEach((e) => {
+      // Already scrolled past (anchor jump, restored scroll position) counts as seen.
+      if (!e.isIntersecting && e.boundingClientRect.bottom >= 0) return;
+      e.target.classList.add("in");
+      io.unobserve(e.target);
+    }), { threshold: 0, rootMargin: "0px 0px 10% 0px" });
     els.forEach((el) => io.observe(el));
     return () => io.disconnect();
   }, []);
