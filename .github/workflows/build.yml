@@ -241,6 +241,13 @@ jobs:
       - name: Build the program (SBF)
         run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml -- --locked
       - run: ls -l target/deploy/aegis_account.so
+      # The ELF that is deployed (devnet today): `solana program deploy` of this
+      # artifact with the program keypair of AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: aegis_account-sbf-${{ github.sha }}
+          path: solana/target/deploy/aegis_account.so
+          if-no-files-found: error
       # Replays cchs-c-20.json through the built .so in the BanksClient runtime
       # (create, cache_subtree, execute x5 incl. the skip ops, recover), prints
       # the compute units and bytes per instruction as a markdown table (also

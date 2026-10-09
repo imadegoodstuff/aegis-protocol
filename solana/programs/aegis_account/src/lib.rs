@@ -59,7 +59,7 @@ const _: () = assert!(N == 24);
 
 // Placeholder program id (valid 32-byte key); replace with the deployed
 // keypair's public key before deployment (`anchor keys sync`).
-declare_id!("4Zto6EPTKp6p8VwMRCUKg28BhNjXDcpHMvEisRherJsr");
+declare_id!("AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr");
 
 pub const ACCOUNT_SEED: &[u8] = b"cchs";
 pub const CACHE_SEED: &[u8] = b"cache";

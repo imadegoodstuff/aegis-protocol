@@ -6,8 +6,13 @@ solana_version = "2.3.6"
 seeds = false
 skip-lint = false
 
+# One program id on every cluster: the keypair that owns it is kept off the
+# repository; devnet holds the deployed program, mainnet-beta does not yet.
 [programs.localnet]
-aegis_account = "4Zto6EPTKp6p8VwMRCUKg28BhNjXDcpHMvEisRherJsr"
+aegis_account = "AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr"
+
+[programs.devnet]
+aegis_account = "AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr"
 
 [registry]
 url = "https://api.apr.dev"
