@@ -40,7 +40,7 @@ The Lean proofs cover the transition system only: the hash is an abstraction ("a
 
 ### 3.1 Automated scanners (2026-10-09, `main`)
 
-Five off-the-shelf scanners were run over `evm/src` (13 files, ~1 500 lines; Solidity 0.8.28, via-ir) and, for PostQuant, over every JavaScript, Rust, Go, Java and Python source in the repository. None of them is an audit; the table records what each one reported and what we make of it. Raw outputs are not committed; the public reports are linked.
+Six off-the-shelf scanners were run over `evm/src` (13 files, ~1 500 lines; Solidity 0.8.28, via-ir) and, for PostQuant, over every JavaScript, Rust, Go, Java and Python source in the repository. None of them is an audit; the table records what each one reported and what we make of it. The web reports are linked; the Aderyn report is committed under `audit/` and is reproducible from the `audit` workflow (`.github/workflows/audit.yml`, run by hand).
 
 | Tool | Run | Headline | Reading |
 |---|---|---|---|
@@ -48,6 +48,7 @@ Five off-the-shelf scanners were run over `evm/src` (13 files, ~1 500 lines; Sol
 | MIESC 6.0.0 | local, 32 of its 50 adapters available (Slither, Semgrep, Solhint, Wake, SMTChecker, solcmc, pattern and ML detectors; no Mythril, Foundry or LLM backends) | 114 findings after its ML severity re-weighting | Its "critical" bucket is Slither's `assembly`, `reentrancy-events` and `calls-loop` re-labelled, plus two pattern detectors firing on "external call before state update" in `UpgradeHelper.upgrade` and `AegisCCHSFactory.deployAndMove`. SMTChecker and solcmc produced no counterexample. Nothing beyond the Slither set. |
 | PostQuant | local, source only | grade C+; 1 critical, 7 informational | The critical is ECDSA in `core/src/lib.rs` (`ecdsa_sign_eth`), which is the secp256k1 half of the hybrid `AegisAccountV2` and exists so that account can be reached from a classical wallet; the CCHS path has no ECDSA. The informational items are SHA-256 uses, which the tool itself classifies as quantum-safe. The grade is driven by the one ECDSA symbol. |
 | [Audit Forge](https://auditforge.org/r/181317fd-76dd-4992-91b8-a7939e57c09d) | web, repository mode, entry `evm/src/AegisCCHSFactory.sol` | 100/100, 0 critical/high/medium/low, 4 informational | Only Mythril, Semgrep and Solhint completed; Slither and Aderyn failed because repository mode fetches the entry file alone and the relative imports were not resolved. Treat as three engines over the factory and its transitive sources, not six. |
+| Aderyn 0.6.8 | GitHub Actions, `evm/src` only, [`audit/aderyn-2026-10-09.md`](audit/aderyn-2026-10-09.md) | 5 High (21 instances), 10 Low; no Medium | Every High is triaged below; none is a loss of funds. Four of the five are already in the Slither set under other names. |
 | [SolidityScan QuickScan](https://solidityscan.com/qs-report/eeaa23c580a482b3eeafc73ca5ec159d/c76e1c4771f84d75/2c22791fa8419b88) | web, repository mode, `main`, `.sol` only | security score 53.20/100, threat score 68/100; 590 findings: 7 critical, 8 high, 56 medium, 51 low, 356 informational, 112 gas | Per-instance locations are behind a paywall; only the category counts are public. The categories are assessed below. |
 
 **Why the SolidityScan score is low.** The score is a weighted count of pattern matches per line of code, with no notion of what the contract is for. Three properties of an account contract are penalised by construction:
@@ -67,6 +68,18 @@ The remaining high and medium categories, by name: ABSENCE OF NONCE IN SIGNATURE
 | `reentrancy-eth` | `AegisAccount.finalizeEmergencyExit` (legacy V1 account, not CCHS) | ETH reaches GUARDIAN before `exitTimestamp` is cleared. A re-entering guardian sees a zero balance and tokens already moved; the only effect is a second nonce increment. Would be fixed by moving the state writes above the transfers. |
 | `incorrect-equality` ×3 | `bal == 0`, `exitTimestamp == 0` | Sentinel comparisons; false positive. |
 | `uninitialized-local` | `moved` in `finalizeEmergencyExit` | Defaults to zero and is only incremented; false positive. |
+
+**Aderyn High, triaged.**
+
+| Finding | Site | Assessment |
+|---|---|---|
+| H-1 `abi.encodePacked` hash collision ×3 | `predict` in the three factories | `keccak256(abi.encodePacked(creationCode, abi.encode(args)))` is the CREATE2 init-code hash by definition; the salt packs fixed-width fields only. The chain computes the same concatenation. |
+| H-2 ETH transferred without address checks ×5 | `execute`, `executeFirst`, `executeBatch`, `UpgradeHelper.upgrade` | By design (item 1 above): the recipient is chosen by the CCHS signer, and the signature is verified before the call. |
+| H-3 assembly shift parameter order ×6 | `vendor/SphincsC13Asm.sol` | Yul `shl(x, y)` is `y << x`; `shl(128, idxTree0)` is the intended order for the SPHINCS+ ADRS layout. False positive. (The Foundry tests of this vendored verifier are negative only; a positive reference-vector test is still owed.) |
+| H-4 state change after external call ×4 | legacy `AegisAccount` / `AegisAccountV2`, not CCHS | Three of the four are `VERIFIER.verify`, a view call to an immutable verifier address set in the constructor. The fourth is the `finalizeEmergencyExit` ordering already noted under Slither `reentrancy-eth`. |
+| H-5 Yul block contains `return` ×3 | `vendor/SphincsC13Asm.sol` | The verifier is a single assembly block whose early `return(0x00, 0x20)` writes `false`; nothing follows the block. Intentional. |
+
+Of the Low findings, `ecrecover` malleability (L-1) is in the legacy ECDSA path of `AegisAccount`, which CCHS accounts do not use; the unsafe ERC-20 call (L-7) in `deployAndMove` checks both the call status and the optional boolean return; the return-bomb sites (L-6) are the forwarding calls whose gas is the signer's own transaction gas.
 
 What these tools cannot see is the part that matters for a hash-based signature: whether the WOTS+ chain and Merkle arithmetic is correct and whether the index discipline holds. That is what the Lean proofs, the model checks, the Foundry tests and the cross-implementation fixtures above are for, and what the audit scope in §5 asks a human to check.
 
