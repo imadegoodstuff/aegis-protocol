@@ -2,7 +2,7 @@
 
 Aegis separates a chain-agnostic core (seed → CCHS master, SLH-DSA seed, secp256k1 and ed25519 keys; standard address derivation for 23 chains) from per-chain adapters that implement the account contract in the chain's native language.
 
-The CCHS verifier (`CCHS.spec.md` §5) requires only SHA-256, byte concatenation, integer shifts, and 32-byte storage. Every adapter implements the same byte-level algorithm, verified against the same fixture vectors. Keys are per chain (`CCHS.spec.md` §3): the client derives a separate tree for each chain, so a signature belongs to exactly one chain's account, and the chain ID bound inside the digest makes it non-replayable as well.
+The CCHS verifier (`CCHS.spec.md` §5) requires only SHA-256, byte concatenation, integer shifts, and 32-byte storage. Every adapter implements the same byte-level algorithm, verified against the same fixture vectors, including the 16-byte public seed of the key tree (`pkSeed`, `CCHS.spec.md` §2.1) that fills the last 16 bytes of every ADRS and is stored next to the roots. Keys are per chain (`CCHS.spec.md` §3): the client derives a separate tree for each chain, so a signature belongs to exactly one chain's account, and the chain ID bound inside the digest makes it non-replayable as well.
 
 ## Matrix
 
@@ -30,9 +30,9 @@ Address derivation for all 23 supported chains is implemented and produces stand
 
 ## Shared Rust core
 
-`cchs-core/` is a `no_std`, dependency-free crate implementing the whole CCHS-S-20 verifier (ADRS, WOTS+ chain completion, leaf compression, Merkle path, cache state machine, recovery) over an injected SHA-256. Its test suite (`cargo test -p cchs-core --features std`, CI job `cchs-core`) replays `evm/test/fixtures/cchs-s-20.json`: first-in-subtree with top layer, two cached signatures, tampered chain value / auth path / message, and the recovery rotation. The CosmWasm and NEAR adapters depend on it by path and add only their chain digest, storage and call dispatch.
+`cchs-core/` is a `no_std`, dependency-free crate implementing the whole CCHS-S-20 verifier (seeded ADRS, WOTS+ chain completion, leaf compression, Merkle path, cache state machine, recovery with seed rotation) over an injected SHA-256. Its test suite (`cargo test -p cchs-core --features std`, CI job `cchs-core`) replays `evm/test/fixtures/cchs-s-20.json`: first-in-subtree with top layer, two cached signatures, tampered chain value / auth path / message, and the recovery rotation. The CosmWasm and NEAR adapters depend on it by path and add only their chain digest, storage and call dispatch.
 
-The same crate carries a second parameter set in `cchs_core::compact`: **CCHS-C-20** — n = 24 (SHA-256 truncated to 24 bytes), w = 256, 24 message chains + 2 checksum chains (LEN = 26), the same two layers of height 10, recovery tree of height 8 and the same 32-byte ADRS. One layer is 26 × 24 + 10 × 24 = 864 bytes, which is what lets a bottom-layer signature fit a 1 232-byte Solana packet. Besides the S-20-shaped API (`verify_layer`, `wots_leaf`, `root_from_path`, `CchsState::execute_verify`, `recover_verify`) it exposes `bottom_root(idx, m, l0)` and `verify_top_layer(root, tree_idx, r0, l1)` so a host can fill the subtree cache in one transaction and execute in another. Test vectors: `evm/test/fixtures/cchs-c-20.json`, replayed by `cchs-core/tests/vectors_compact.rs` (same CI job). Client: `wallet/src/aegis/cchsCompact.ts`. The Solana adapter uses this set; key derivation is domain-separated (`cchs/sk/c`), so one key yields independent S-20, K-20 and C-20 trees. The key itself is per chain (`HKDF-SHA256(master, "aegis/cchs/chain/v1" ‖ tag)`, tag `0x00 ‖ chainId` for EVM chains and `0x01 ‖ label` otherwise, CCHS.spec.md §3): no one-time leaf exists on two chains, which the chain id in the digest alone would not guarantee.
+The same crate carries a second parameter set in `cchs_core::compact`: **CCHS-C-20** — n = 24 (SHA-256 truncated to 24 bytes), w = 256, 24 message chains + 2 checksum chains (LEN = 26), the same two layers of height 10, recovery tree of height 8 and the same 32-byte seeded ADRS. One layer is 26 × 24 + 10 × 24 = 864 bytes, which is what lets a bottom-layer signature fit a 1 232-byte Solana packet. Besides the S-20-shaped API (`verify_layer`, `wots_leaf`, `root_from_path`, `CchsState::execute_verify`, `recover_verify`) it exposes `bottom_root(seed, idx, m, l0)` and `verify_top_layer(seed, root, tree_idx, r0, l1)` so a host can fill the subtree cache in one transaction and execute in another. Test vectors: `evm/test/fixtures/cchs-c-20.json`, replayed by `cchs-core/tests/vectors_compact.rs` (same CI job). Client: `wallet/src/aegis/cchsCompact.ts`. The Solana adapter uses this set; key derivation is domain-separated (`cchs/sk/c`), so one key yields independent S-20, K-20 and C-20 trees. The key itself is per chain (`HKDF-SHA256(master, "aegis/cchs/chain/v1" ‖ tag)`, tag `0x00 ‖ chainId` for EVM chains and `0x01 ‖ label` otherwise, CCHS.spec.md §3): no one-time leaf exists on two chains, which the chain id in the digest alone would not guarantee.
 
 Per-chain digests (the EVM chain id is replaced by a chain tag):
 
@@ -46,7 +46,7 @@ Per-chain digests (the EVM chain id is replaced by a chain tag):
 | Starknet | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "starknet" ‖ contract_address(32 BE) ‖ nonce BE ‖ idx BE ‖ sha256(for each call: to(32) ‖ selector(32) ‖ calldata_len u32 BE ‖ calldata[i](32)…))` (Cairo, `cairo/`) |
 | TON | CCHS-S-20 | `sha256("AEGIS_CCHS_V1" ‖ "ton" ‖ address_hash(32) ‖ nonce BE ‖ idx BE ‖ cell_hash(action))`, `action = { mode:uint8 msg:^Cell }` (FunC, `ton/`) |
 
-Solana's recovery digest is likewise truncated: `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "solana" ‖ account(32) ‖ rec_nonce BE ‖ new_root(24) ‖ new_rec_root(24))[0..24)`.
+Every recovery digest ends with the 16-byte seed of the new key tree (`‖ new_seed`), after `new_rec_root`. Solana's is likewise truncated: `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "solana" ‖ account(32) ‖ rec_nonce BE ‖ new_root(24) ‖ new_rec_root(24) ‖ new_pk_seed(16))[0..24)`.
 
 ## What a scaffold contains
 
@@ -57,15 +57,15 @@ Each remaining non-EVM directory compiles and defines the account's storage layo
 Every adapter exposes the following semantics (names vary by language):
 
 ```
-constructor(root, recRoot)
+constructor(root, recRoot, pkSeed)
 execute(target, value, data, idx, l0)              # subtree already cached
 executeFirst(target, value, data, idx, l0, l1)     # registers the subtree; l1 ignored if already cached
-recover(newRoot, newRecRoot, wots, auth)
+recover(newRoot, newRecRoot, newSeed, wots, auth)
 digestAt(idx, target, value, data) → bytes32
 needsTopLayerAt(idx) → bool
 ```
 
-State: `root`, `recRoot`, `epoch`, `nextIdx`, `nonce`, `recNonce`, `cachedRoot[(epoch, treeIdx)]`.
+State: `root`, `recRoot`, `pkSeed`, `epoch`, `nextIdx`, `nonce`, `recNonce`, `cachedRoot[(epoch, treeIdx)]`.
 
 Index rule, identical on every chain: `idx ≥ nextIdx` is required, `nextIdx` becomes `idx + 1`, lower leaves are abandoned forever. The EVM contracts keep that counter and the nonce *per lane* (16 lanes by the top four bits of `idx`, `CCHS.spec.md` §4.3 rule 4), so devices owning different lanes sign concurrently; the other adapters still keep one counter and one nonce for the whole tree, which is the single-lane case of the same rule, and a multi-device client on those chains must route signing through one device until they adopt lanes. `idx` is part of the digest, so only the key holder can skip. A jump into a subtree that is not cached needs the top layer (`executeFirst`); the same index can never be accepted twice (CCHS.spec.md §4.3, §6 C5). Every adapter in this file (EVM/TRON, Starknet, Solana, CosmWasm, NEAR, Aptos, Sui, TON) implements the explicit `idx` argument with `digestAt` / `needsTopLayerAt` views and a fixture-driven test for index reuse; the rejection code is named in each directory's README (`IndexUsed`, `E_INDEX_USED`, exit code 207 on TON).
 

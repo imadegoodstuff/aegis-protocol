@@ -115,9 +115,10 @@ ok(toHex(epochKey(c1, 1).master) !== toHex(epochKey(c8453, 1).master), 'epoch ke
   const shared = sA.l0.wots.filter((x, i) => toHex(x) === toHex(sB.l0.wots[i])).length;
   ok(shared === 0, `leaf 0 of chain 1 and leaf 0 of chain 8453 share no chain value (${shared} of ${sA.l0.wots.length} equal)`);
   ok(toHex(sk(c1, 0, 0n, 0, 0, 'K')) !== toHex(sk(c8453, 0, 0n, 0, 0, 'K')), 'their WOTS+ secret keys differ: two one-time keys, one message each');
-  const accepts = (pub: { root: Uint8Array; recRoot: Uint8Array }, m: Uint8Array, s: any) => { try { cchsK.verify(pub, 0, m, s); return true; } catch { return false; } };
+  const accepts = (pub: { root: Uint8Array; recRoot: Uint8Array; seed: Uint8Array }, m: Uint8Array, s: any) => { try { cchsK.verify(pub, 0, m, s); return true; } catch { return false; } };
   ok(accepts(pubA, mA, sA) && accepts(pubB, mB, sB), 'each signature verifies under its own chain root');
   ok(!accepts(pubA, mB, sB) && !accepts(pubB, mA, sA), 'neither root accepts the other chain\'s signature');
+  ok(toHex(pubA.seed) !== toHex(pubB.seed), 'the two trees carry different public seeds: no hash position is shared between them');
 }
 
 if (failures) { console.log(`${failures} check(s) failed`); process.exit(1); }

@@ -21,7 +21,10 @@
 //!                              ‖ len(args) u32 BE ‖ args ‖ deposit u128 BE))
 //! Recovery digest:
 //!   sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id)
-//!          ‖ rec_nonce u64 BE ‖ new_root ‖ new_rec_root)
+//!          ‖ rec_nonce u64 BE ‖ new_root ‖ new_rec_root ‖ new_seed(16))
+//!
+//! `seed` is the 16-byte public seed of the key tree (last 16 bytes of every
+//! ADRS, spec §2.2); it is stored next to the roots and rotated with them.
 //!
 //! The variable-length fields of the inner call hash are length-prefixed so
 //! that `(receiver_id, method, args)` cannot be re-split into a different call
@@ -36,7 +39,7 @@ use near_sdk::json_types::{Base64VecU8, U128, U64};
 use near_sdk::store::LookupMap;
 use near_sdk::{env, near, AccountId, Gas, NearToken, PanicOnDefault, Promise};
 
-use cchs_core::{CchsState, LayerSig, Sha256, H, LEN, REC_H};
+use cchs_core::{CchsState, LayerSig, Seed, Sha256, H, LEN, REC_H, SEED_BYTES};
 
 pub const DOMAIN_EXECUTE: &[u8] = b"AEGIS_CCHS_V1";
 pub const DOMAIN_RECOVER: &[u8] = b"AEGIS_CCHS_RECOVER_V1";
@@ -81,6 +84,7 @@ pub struct LayerSigArg {
 pub struct StateView {
     pub root: Base64VecU8,
     pub rec_root: Base64VecU8,
+    pub seed: Base64VecU8,
     pub epoch: U64,
     pub next_idx: U64,
     pub nonce: U64,
@@ -94,6 +98,8 @@ pub struct StateView {
 pub struct AegisCchs {
     root: [u8; 32],
     rec_root: [u8; 32],
+    /// Public seed of the current key tree (in every ADRS).
+    seed: Seed,
     epoch: u64,
     /// Lowest leaf index still available; every leaf below it is consumed
     /// or abandoned.
@@ -106,15 +112,18 @@ pub struct AegisCchs {
 
 #[near]
 impl AegisCchs {
-    /// Deploy-time initializer. `root` and `rec_root` are 32-byte base64.
+    /// Deploy-time initializer. `root` and `rec_root` are 32-byte base64,
+    /// `seed` is the 16-byte public seed of the key tree.
     #[init]
-    pub fn new(root: Base64VecU8, rec_root: Base64VecU8) -> Self {
+    pub fn new(root: Base64VecU8, rec_root: Base64VecU8, seed: Base64VecU8) -> Self {
         let root = b32(&root.0, "root");
         let rec_root = b32(&rec_root.0, "rec_root");
-        let st = CchsState::new(root, rec_root).unwrap_or_else(|e| env::panic_str(e.as_str()));
+        let seed = b16(&seed.0, "seed");
+        let st = CchsState::new(root, rec_root, seed).unwrap_or_else(|e| env::panic_str(e.as_str()));
         Self {
             root: st.root,
             rec_root: st.rec_root,
+            seed: st.seed,
             epoch: 0,
             next_idx: 0,
             nonce: 0,
@@ -183,25 +192,26 @@ impl AegisCchs {
         )
     }
 
-    /// Rotate both roots, authorized by the recovery tree at leaf
-    /// `rec_nonce`. Resets `next_idx` and bumps `epoch`, which logically
-    /// clears the subtree cache.
+    /// Rotate the public key (both roots and the seed), authorized by the
+    /// recovery tree at leaf `rec_nonce`. Resets `next_idx` and bumps
+    /// `epoch`, which logically clears the subtree cache.
     pub fn recover(
         &mut self,
         #[serializer(borsh)] new_root: [u8; 32],
         #[serializer(borsh)] new_rec_root: [u8; 32],
+        #[serializer(borsh)] new_seed: [u8; 16],
         #[serializer(borsh)] wots: Vec<[u8; 32]>,
         #[serializer(borsh)] auth: Vec<[u8; 32]>,
     ) {
         let mut state = self.state();
         let mut h = NearSha256::default();
-        let digest = recover_digest(&mut h, state.rec_nonce, &new_root, &new_rec_root);
+        let digest = recover_digest(&mut h, state.rec_nonce, &new_root, &new_rec_root, &new_seed);
 
         let w = wots_arr(&wots);
         check_auth(&auth, REC_H);
 
         let epoch = state
-            .recover_verify(&mut h, &digest, new_root, new_rec_root, &w, &auth)
+            .recover_verify(&mut h, &digest, new_root, new_rec_root, new_seed, &w, &auth)
             .unwrap_or_else(|e| env::panic_str(e.as_str()));
         self.store(&state);
         near_sdk::log!("recovered epoch={}", epoch);
@@ -213,6 +223,7 @@ impl AegisCchs {
         StateView {
             root: Base64VecU8(self.root.to_vec()),
             rec_root: Base64VecU8(self.rec_root.to_vec()),
+            seed: Base64VecU8(self.seed.to_vec()),
             epoch: U64(self.epoch),
             next_idx: U64(self.next_idx),
             nonce: U64(self.nonce),
@@ -258,13 +269,19 @@ impl AegisCchs {
     }
 
     /// Digest the client must sign for the next `recover`.
-    pub fn next_recovery_digest(&self, new_root: Base64VecU8, new_rec_root: Base64VecU8) -> Base64VecU8 {
+    pub fn next_recovery_digest(
+        &self,
+        new_root: Base64VecU8,
+        new_rec_root: Base64VecU8,
+        new_seed: Base64VecU8,
+    ) -> Base64VecU8 {
         let mut h = NearSha256::default();
         let d = recover_digest(
             &mut h,
             self.rec_nonce,
             &b32(&new_root.0, "new_root"),
             &b32(&new_rec_root.0, "new_rec_root"),
+            &b16(&new_seed.0, "new_seed"),
         );
         Base64VecU8(d.to_vec())
     }
@@ -275,6 +292,7 @@ impl AegisCchs {
         CchsState {
             root: self.root,
             rec_root: self.rec_root,
+            seed: self.seed,
             epoch: self.epoch,
             next_idx: self.next_idx,
             nonce: self.nonce,
@@ -285,6 +303,7 @@ impl AegisCchs {
     fn store(&mut self, s: &CchsState) {
         self.root = s.root;
         self.rec_root = s.rec_root;
+        self.seed = s.seed;
         self.epoch = s.epoch;
         self.next_idx = s.next_idx;
         self.nonce = s.nonce;
@@ -326,8 +345,14 @@ pub fn execute_digest(
     h.finish()
 }
 
-/// `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id) ‖ rec_nonce BE ‖ new_root ‖ new_rec_root)`
-pub fn recover_digest(h: &mut NearSha256, rec_nonce: u64, new_root: &[u8; 32], new_rec_root: &[u8; 32]) -> [u8; 32] {
+/// `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id) ‖ rec_nonce BE ‖ new_root ‖ new_rec_root ‖ new_seed)`
+pub fn recover_digest(
+    h: &mut NearSha256,
+    rec_nonce: u64,
+    new_root: &[u8; 32],
+    new_rec_root: &[u8; 32],
+    new_seed: &Seed,
+) -> [u8; 32] {
     let self_id = account_id_hash(h);
     h.update(DOMAIN_RECOVER);
     h.update(CHAIN_TAG);
@@ -335,6 +360,7 @@ pub fn recover_digest(h: &mut NearSha256, rec_nonce: u64, new_root: &[u8; 32], n
     h.update(&rec_nonce.to_be_bytes());
     h.update(new_root);
     h.update(new_rec_root);
+    h.update(new_seed);
     h.finish()
 }
 
@@ -350,6 +376,15 @@ fn b32(v: &[u8], what: &str) -> [u8; 32] {
         env::panic_str(&format!("{what}: expected 32 bytes, got {}", v.len()));
     }
     let mut out = [0u8; 32];
+    out.copy_from_slice(v);
+    out
+}
+
+fn b16(v: &[u8], what: &str) -> Seed {
+    if v.len() != SEED_BYTES {
+        env::panic_str(&format!("{what}: expected {SEED_BYTES} bytes, got {}", v.len()));
+    }
+    let mut out = [0u8; SEED_BYTES];
     out.copy_from_slice(v);
     out
 }
@@ -387,7 +422,11 @@ mod tests {
             .predecessor_account_id("relayer.near".parse().unwrap())
             .build();
         testing_env!(ctx);
-        AegisCchs::new(Base64VecU8(vec![0x11u8; 32]), Base64VecU8(vec![0x22u8; 32]))
+        AegisCchs::new(
+            Base64VecU8(vec![0x11u8; 32]),
+            Base64VecU8(vec![0x22u8; 32]),
+            Base64VecU8(vec![0x33u8; 16]),
+        )
     }
 
     fn zero_layer(height: usize) -> LayerSigArg {

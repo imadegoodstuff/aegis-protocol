@@ -1,6 +1,6 @@
 // TRON address prediction for the CCHS factory and accounts.
 //
-//   node predict.mjs account --factory <T...|41..|0x..> --root 0x.. --rec-root 0x.. [--variant K|S]
+//   node predict.mjs account --factory <T...|41..|0x..> --root 0x.. --rec-root 0x.. --seed 0x.. [--variant K|S]
 //   node predict.mjs factory --deployer <T...|41..|0x..> --salt 0x..
 //   node predict.mjs factory-from-tx --txid <hex32> --owner <T...|41..|0x..>
 //   node predict.mjs to-base58 <41..|0x..>        node predict.mjs to-hex <T...>
@@ -16,8 +16,8 @@
 // "factory-from-tx" to recompute that one after the fact.
 //
 // Account salt and init code mirror AegisCCHSFactory._salt / predict:
-//   salt     = keccak256(root || recRoot || variantByte)   (0x01 = S, 0x00 = K)
-//   initCode = creationCode || abi.encode(root, recRoot)
+//   salt     = keccak256(root || recRoot || seed16 || variantByte)   (0x01 = S, 0x00 = K)
+//   initCode = creationCode || abi.encode(root, recRoot, seed)      (seed: bytes16, left-aligned word)
 //
 // Reads tron/artifacts/cchs-tvm.json (run build.mjs first). keccak256 comes
 // from the viem copy in deploy/node_modules; sha256 and base58 are local.
@@ -128,17 +128,18 @@ export function tronCreateFromTx(txid32, owner20) {
   return keccak(concat(txid32, owner21)).subarray(12);
 }
 
-export function accountSalt(root32, recRoot32, variant) {
-  return keccak(concat(root32, recRoot32, Uint8Array.of(variant === "S" ? 1 : 0)));
+export function accountSalt(root32, recRoot32, seed16, variant) {
+  return keccak(concat(root32, recRoot32, seed16, Uint8Array.of(variant === "S" ? 1 : 0)));
 }
 
-export function accountInitCode(artifact, root32, recRoot32, variant) {
+export function accountInitCode(artifact, root32, recRoot32, seed16, variant) {
   const creation = hexToBytes(variant === "S" ? artifact.account.S.bytecode : artifact.account.K.bytecode);
-  return concat(creation, root32, recRoot32); // abi.encode(bytes32, bytes32) is the two words back to back
+  const seedWord = new Uint8Array(32); seedWord.set(seed16, 0); // abi.encode(bytes16): left-aligned in its word
+  return concat(creation, root32, recRoot32, seedWord);
 }
 
-export function predictAccount(artifact, factory20, root32, recRoot32, variant) {
-  return tronCreate2(factory20, accountSalt(root32, recRoot32, variant), accountInitCode(artifact, root32, recRoot32, variant));
+export function predictAccount(artifact, factory20, root32, recRoot32, seed16, variant) {
+  return tronCreate2(factory20, accountSalt(root32, recRoot32, seed16, variant), accountInitCode(artifact, root32, recRoot32, seed16, variant));
 }
 
 function loadArtifact() {
@@ -198,11 +199,13 @@ function main() {
     const factory20 = parseAddress20(arg(args, "--factory"));
     const root = hexToBytes(arg(args, "--root"));
     const rec = hexToBytes(arg(args, "--rec-root"));
+    const seed = hexToBytes(arg(args, "--seed"));
     const variant = (arg(args, "--variant", false) || "K").toUpperCase();
     if (root.length !== 32 || rec.length !== 32) throw new Error("root and rec-root must be 32 bytes");
+    if (seed.length !== 16) throw new Error("seed must be 16 bytes");
     if (variant !== "K" && variant !== "S") throw new Error("variant must be K or S");
-    addr20 = predictAccount(artifact, factory20, root, rec, variant);
-    console.log(`variant   CCHS-${variant}-20   salt ${bytesToHex(accountSalt(root, rec, variant))}`);
+    addr20 = predictAccount(artifact, factory20, root, rec, seed, variant);
+    console.log(`variant   CCHS-${variant}-20   salt ${bytesToHex(accountSalt(root, rec, seed, variant))}`);
   } else if (cmd === "factory") {
     const artifact = loadArtifact();
     const deployer20 = parseAddress20(arg(args, "--deployer"));

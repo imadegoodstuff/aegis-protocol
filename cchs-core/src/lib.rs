@@ -81,8 +81,18 @@ impl Sha256 for sha2::Sha256 {
 
 // ------------------------------------------------------------------- ADRS
 
-/// `ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ pad(16 zero)`
-pub fn adrs(layer: u8, tree_idx: u64, typ: u8, leaf_idx: u32, chain_idx: u8, step: u8) -> [u8; 32] {
+/// Bytes of the per-tree public seed carried in every ADRS.
+pub const SEED_BYTES: usize = 16;
+/// The public seed of a key tree: part of the public key, stored with the
+/// roots, and the last 16 bytes of every ADRS.
+pub type Seed = [u8; SEED_BYTES];
+
+/// `ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ pkSeed(16)`
+///
+/// The seed makes every hash call of one tree a different function from the
+/// same position in any other tree (another account, chain or epoch), which
+/// the multi-target security argument needs (spec §2.2, §5.5).
+pub fn adrs(seed: &Seed, layer: u8, tree_idx: u64, typ: u8, leaf_idx: u32, chain_idx: u8, step: u8) -> [u8; 32] {
     let mut a = [0u8; 32];
     a[0] = layer;
     a[1..9].copy_from_slice(&tree_idx.to_be_bytes());
@@ -90,6 +100,7 @@ pub fn adrs(layer: u8, tree_idx: u64, typ: u8, leaf_idx: u32, chain_idx: u8, ste
     a[10..14].copy_from_slice(&leaf_idx.to_be_bytes());
     a[14] = chain_idx;
     a[15] = step;
+    a[16..].copy_from_slice(seed);
     a
 }
 
@@ -123,6 +134,7 @@ pub fn digits(msg: &[u8; 32]) -> [u8; LEN] {
 /// accumulates the leaf so no 2176-byte buffer is needed.
 pub fn wots_leaf<S: Sha256>(
     h: &mut S,
+    seed: &Seed,
     layer: u8,
     tree_idx: u64,
     leaf_idx: u32,
@@ -131,9 +143,9 @@ pub fn wots_leaf<S: Sha256>(
 ) -> [u8; 32] {
     let d = digits(msg);
     let mut leaf = S::default();
-    leaf.update(&adrs(layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0));
+    leaf.update(&adrs(seed, layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0));
 
-    let mut a = adrs(layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
+    let mut a = adrs(seed, layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
     let last_step = (W - 1) as u8;
     for c in 0..LEN {
         let mut x = wots[c];
@@ -171,6 +183,7 @@ pub fn node<S: Sha256>(h: &mut S, a: &[u8; 32], cur: &[u8; 32], sib: &[u8; 32], 
 /// At level `k` the node ADRS uses `leafIdx = pos >> 1` and `chainIdx = k`.
 pub fn root_from_path<S: Sha256>(
     h: &mut S,
+    seed: &Seed,
     layer: u8,
     tree_idx: u64,
     leaf: [u8; 32],
@@ -180,7 +193,7 @@ pub fn root_from_path<S: Sha256>(
     let mut r = leaf;
     let mut pos = leaf_idx;
     for (k, sib) in auth.iter().enumerate() {
-        let a = adrs(layer, tree_idx, TYPE_NODE, pos >> 1, k as u8, 0);
+        let a = adrs(seed, layer, tree_idx, TYPE_NODE, pos >> 1, k as u8, 0);
         r = node(h, &a, &r, sib, (pos & 1) == 1);
         pos >>= 1;
     }
@@ -195,6 +208,7 @@ pub fn root_from_path<S: Sha256>(
 /// return [`CchsError::BadLength`] instead of panicking).
 pub fn verify_layer<S: Sha256>(
     h: &mut S,
+    seed: &Seed,
     layer: u8,
     tree_idx: u64,
     leaf_idx: u32,
@@ -203,8 +217,8 @@ pub fn verify_layer<S: Sha256>(
     auth: &[[u8; 32]],
     height: usize,
 ) -> [u8; 32] {
-    let leaf = wots_leaf(h, layer, tree_idx, leaf_idx, msg, wots);
-    root_from_path(h, layer, tree_idx, leaf, leaf_idx, &auth[..height])
+    let leaf = wots_leaf(h, seed, layer, tree_idx, leaf_idx, msg, wots);
+    root_from_path(h, seed, layer, tree_idx, leaf, leaf_idx, &auth[..height])
 }
 
 // ------------------------------------------------------------------ state
@@ -285,6 +299,8 @@ pub struct ExecuteOutcome {
 pub struct CchsState {
     pub root: [u8; 32],
     pub rec_root: [u8; 32],
+    /// Public seed of the current key tree (every ADRS carries it).
+    pub seed: Seed,
     pub epoch: u64,
     /// Lowest leaf index still available: every leaf below it is consumed
     /// or abandoned. The signer picks any `idx >= next_idx`.
@@ -295,11 +311,11 @@ pub struct CchsState {
 
 impl CchsState {
     /// Fresh account. Rejects all-zero roots.
-    pub fn new(root: [u8; 32], rec_root: [u8; 32]) -> Result<Self, CchsError> {
+    pub fn new(root: [u8; 32], rec_root: [u8; 32], seed: Seed) -> Result<Self, CchsError> {
         if root == [0u8; 32] || rec_root == [0u8; 32] {
             return Err(CchsError::ZeroRoot);
         }
-        Ok(CchsState { root, rec_root, epoch: 0, next_idx: 0, nonce: 0, rec_nonce: 0 })
+        Ok(CchsState { root, rec_root, seed, epoch: 0, next_idx: 0, nonce: 0, rec_nonce: 0 })
     }
 
     /// Bottom tree index of the lowest still-available leaf (`next_idx`).
@@ -359,7 +375,7 @@ impl CchsState {
         let tree_idx = idx >> H;
         let leaf_idx = (idx & (LEAVES - 1)) as u32;
 
-        let r0 = verify_layer(h, LAYER_BOTTOM, tree_idx, leaf_idx, msg, l0.wots, l0.auth, H);
+        let r0 = verify_layer(h, &self.seed, LAYER_BOTTOM, tree_idx, leaf_idx, msg, l0.wots, l0.auth, H);
 
         let cache_write = match normalize_cached(cached) {
             Some(c) => {
@@ -375,7 +391,7 @@ impl CchsState {
                     return Err(CchsError::BadLength);
                 }
                 // Top layer: tree 0, leaf = bottom tree index, message = R_0.
-                let r1 = verify_layer(h, LAYER_TOP, 0, tree_idx as u32, &r0, l1.wots, l1.auth, H);
+                let r1 = verify_layer(h, &self.seed, LAYER_TOP, 0, tree_idx as u32, &r0, l1.wots, l1.auth, H);
                 if r1 != self.root {
                     return Err(CchsError::BadTopRoot);
                 }
@@ -389,15 +405,18 @@ impl CchsState {
     }
 
     /// Verify a recovery signature on `msg` under `rec_root` at leaf
-    /// `rec_nonce` (layer `0xFF`, tree 0, height 8). On success installs the
-    /// new roots, resets `next_idx`, bumps `epoch` (which logically clears
-    /// the subtree cache) and `rec_nonce`. Returns the new epoch.
+    /// `rec_nonce` (layer `0xFF`, tree 0, height 8, hashed with the current
+    /// seed). On success installs the new public key (roots and seed), resets
+    /// `next_idx`, bumps `epoch` (which logically clears the subtree cache)
+    /// and `rec_nonce`. Returns the new epoch. The host must bind `new_seed`
+    /// into `msg` together with the new roots.
     pub fn recover_verify<S: Sha256>(
         &mut self,
         h: &mut S,
         msg: &[u8; 32],
         new_root: [u8; 32],
         new_rec_root: [u8; 32],
+        new_seed: Seed,
         wots: &[[u8; 32]; LEN],
         auth: &[[u8; 32]],
     ) -> Result<u64, CchsError> {
@@ -411,12 +430,13 @@ impl CchsState {
         if auth.len() < REC_H {
             return Err(CchsError::BadLength);
         }
-        let r = verify_layer(h, LAYER_RECOVERY, 0, rn as u32, msg, wots, auth, REC_H);
+        let r = verify_layer(h, &self.seed, LAYER_RECOVERY, 0, rn as u32, msg, wots, auth, REC_H);
         if r != self.rec_root {
             return Err(CchsError::BadRecovery);
         }
         self.root = new_root;
         self.rec_root = new_rec_root;
+        self.seed = new_seed;
         self.next_idx = 0;
         self.epoch = self.epoch.wrapping_add(1);
         self.rec_nonce = rn + 1;
@@ -439,14 +459,15 @@ mod tests {
 
     #[test]
     fn adrs_layout() {
-        let a = adrs(0x01, 0x0102030405060708, 0x02, 0x0A0B0C0D, 0x21, 0x0E);
+        let seed: Seed = core::array::from_fn(|i| 0xA0 + i as u8);
+        let a = adrs(&seed, 0x01, 0x0102030405060708, 0x02, 0x0A0B0C0D, 0x21, 0x0E);
         assert_eq!(a[0], 0x01);
         assert_eq!(&a[1..9], &[1, 2, 3, 4, 5, 6, 7, 8]);
         assert_eq!(a[9], 0x02);
         assert_eq!(&a[10..14], &[0x0A, 0x0B, 0x0C, 0x0D]);
         assert_eq!(a[14], 0x21);
         assert_eq!(a[15], 0x0E);
-        assert_eq!(&a[16..], &[0u8; 16]);
+        assert_eq!(&a[16..], &seed);
     }
 
     #[test]
@@ -469,8 +490,8 @@ mod tests {
 
     #[test]
     fn state_rejects_zero_roots() {
-        assert_eq!(CchsState::new([0u8; 32], [1u8; 32]), Err(CchsError::ZeroRoot));
-        assert_eq!(CchsState::new([1u8; 32], [0u8; 32]), Err(CchsError::ZeroRoot));
-        assert!(CchsState::new([1u8; 32], [2u8; 32]).is_ok());
+        assert_eq!(CchsState::new([0u8; 32], [1u8; 32], [0u8; 16]), Err(CchsError::ZeroRoot));
+        assert_eq!(CchsState::new([1u8; 32], [0u8; 32], [0u8; 16]), Err(CchsError::ZeroRoot));
+        assert!(CchsState::new([1u8; 32], [2u8; 32], [0u8; 16]).is_ok());
     }
 }

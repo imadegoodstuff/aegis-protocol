@@ -59,19 +59,19 @@ for (const variant of ['S', 'K'] as const) {
   const master = chainKey({ master: new Uint8Array(32).fill(0x42) }, evmChainTag(1));
   const cache = new Map<string, cchs.Tree>();
   const pub = c.keygen(master, cache);
-  const root = cchs.toHex(pub.root) as Hex, recRoot = cchs.toHex(pub.recRoot) as Hex;
+  const root = cchs.toHex(pub.root) as Hex, recRoot = cchs.toHex(pub.recRoot) as Hex, seed = cchs.toHex(pub.seed) as Hex;
 
   // 2. predict offline, create through the factory, check idempotence
-  const offline = predictAccount(root, recRoot, variant);
-  const pr = await send(factory, encode(fabi, 'predict', [root, recRoot, variant === 'S']));
+  const offline = predictAccount(root, recRoot, seed, variant);
+  const pr = await send(factory, encode(fabi, 'predict', [root, recRoot, seed, variant === 'S']));
   const onchainPredicted = decode(fabi, 'predict', pr.ret) as string;
   if (onchainPredicted.toLowerCase() !== offline.toLowerCase()) fail(`${set} offline prediction ${offline} != factory ${onchainPredicted}`);
-  const dep = await send(factory, encode(fabi, 'deploy', [root, recRoot, variant === 'S']), 5n * 10n ** 18n);
+  const dep = await send(factory, encode(fabi, 'deploy', [root, recRoot, seed, variant === 'S']), 5n * 10n ** 18n);
   if (!dep.ok) throw new Error(`${set} deploy failed ${dep.err}`);
   const account = Address.fromString(decode(fabi, 'deploy', dep.ret) as string);
   if (account.toString().toLowerCase() !== offline.toLowerCase()) fail(`${set} deployed ${account} != predicted ${offline}`);
   rows.push({ set, step: 'create + fund account (factory.deploy)', calldata: dep.calldata, exec: dep.exec, total: dep.total });
-  const again = await send(factory, encode(fabi, 'deploy', [root, recRoot, variant === 'S']));
+  const again = await send(factory, encode(fabi, 'deploy', [root, recRoot, seed, variant === 'S']));
   if (!again.ok || (decode(fabi, 'deploy', again.ret) as string).toLowerCase() !== offline.toLowerCase()) fail(`${set} deploy is not idempotent`);
   if (await balance(account) !== 5n * 10n ** 18n) fail(`${set} account not funded`);
 
@@ -147,17 +147,18 @@ for (const variant of ['S', 'K'] as const) {
   const next = epochKey(master, 1);
   const nextCache = new Map<string, cchs.Tree>();
   const nextPub = c.keygen(next, nextCache);
-  const rm = c.recoveryDigest({ chainId: 1n, account: hexToBytes(account.toString()), recNonce: BigInt(recNonce), newRoot: nextPub.root, newRecRoot: nextPub.recRoot });
+  const rm = c.recoveryDigest({ chainId: 1n, account: hexToBytes(account.toString()), recNonce: BigInt(recNonce), newRoot: nextPub.root, newRecRoot: nextPub.recRoot, newSeed: nextPub.seed });
   const rs = c.signRecovery(master, recNonce, rm, cache);
-  const rot = await send(account, encode(abi, 'recover', [cchs.toHex(nextPub.root), cchs.toHex(nextPub.recRoot), rs.wots.map(cchs.toHex), rs.auth.map(cchs.toHex)]));
+  const rot = await send(account, encode(abi, 'recover', [cchs.toHex(nextPub.root), cchs.toHex(nextPub.recRoot), cchs.toHex(nextPub.seed), rs.wots.map(cchs.toHex), rs.auth.map(cchs.toHex)]));
   if (!rot.ok) fail(`${set} rotation rejected: ${rot.err}`);
   rows.push({ set, step: 'key rotation (recover)', calldata: rot.calldata, exec: rot.exec, total: rot.total });
   if (Number(await view('epoch')) !== 1 || Number(await view('nextIdx', [0])) !== 0 || Number(await view('nextIdx', [1])) !== laneFirst(1) || Number(await view('nonce', [1])) !== 0) fail(`${set} epoch/lanes after rotation`);
   if ((await view('root')) !== cchs.toHex(nextPub.root)) fail(`${set} root not rotated`);
+  if ((await view('pkSeed') as string).toLowerCase() !== cchs.toHex(nextPub.seed)) fail(`${set} pkSeed not rotated`);
   // old keys are dead, even at a fresh index with their top layer
   if ((await spend({ record: false })).ok) fail(`${set} OLD EPOCH KEY ACCEPTED AFTER ROTATION`);
   // replaying the same rotation under the new epoch must fail (recNonce moved)
-  if ((await send(account, encode(abi, 'recover', [cchs.toHex(nextPub.root), cchs.toHex(nextPub.recRoot), rs.wots.map(cchs.toHex), rs.auth.map(cchs.toHex)]))).ok) fail(`${set} ROTATION REPLAYED`);
+  if ((await send(account, encode(abi, 'recover', [cchs.toHex(nextPub.root), cchs.toHex(nextPub.recRoot), cchs.toHex(nextPub.seed), rs.wots.map(cchs.toHex), rs.auth.map(cchs.toHex)]))).ok) fail(`${set} ROTATION REPLAYED`);
 
   // 7. spend under epoch 1 (fresh index space: first signature carries the top layer), then withdraw everything
   signed = {};

@@ -29,9 +29,13 @@ const u32 = (n) => { const b = Buffer.alloc(4); b.writeUInt32BE(n); return b; };
 // Mirrors wallet/src/aegis/cchs.ts (keygen, sign, auth path).
 const W = 16, LEN = 67, H = 10, REC_H = 8;
 const master = hex(fx.master);
+// Public seed of the key tree: HKDF(master, "cchs/pkseed")[0..16), last 16 bytes of every ADRS.
+const seed = Buffer.from(hkdfSync('sha256', master, Buffer.alloc(0), Buffer.from(fx.seedInfo), 16));
+assert.ok(seed.equals(hex(fx.seed)), 'seed derivation reproduces the fixture seed');
+const SEED = big(seed);
 
 function adrs(layer, treeIdx, typ, leafIdx, chainIdx, step) {
-  return Buffer.concat([Buffer.from([layer]), u64(treeIdx), Buffer.from([typ]), u32(leafIdx), Buffer.from([chainIdx, step]), Buffer.alloc(16)]);
+  return Buffer.concat([Buffer.from([layer]), u64(treeIdx), Buffer.from([typ]), u32(leafIdx), Buffer.from([chainIdx, step]), seed]);
 }
 function digits(m) {
   const d = []; let csum = 0;
@@ -98,7 +102,7 @@ async function setup(root, recRoot) {
   const r = await compile();
   const code = Cell.fromBoc(Buffer.from(r.codeBoc, 'base64'))[0];
   const data = beginCell()
-    .storeUint(big(root), 256).storeUint(big(recRoot), 256)
+    .storeUint(big(root), 256).storeUint(big(recRoot), 256).storeUint(SEED, 128)
     .storeUint(0, 64).storeUint(0, 64).storeUint(0, 64).storeUint(0, 64)
     .storeBit(0)
     .endCell();
@@ -116,7 +120,7 @@ async function setup(root, recRoot) {
   };
   const state = async () => {
     const { rd } = await get('get_account_state');
-    return { root: rd.readBigNumber(), recRoot: rd.readBigNumber(), epoch: rd.readBigNumber(), nextIdx: rd.readBigNumber(), nonce: rd.readBigNumber(), recNonce: rd.readBigNumber() };
+    return { root: rd.readBigNumber(), recRoot: rd.readBigNumber(), seed: rd.readBigNumber(), epoch: rd.readBigNumber(), nextIdx: rd.readBigNumber(), nonce: rd.readBigNumber(), recNonce: rd.readBigNumber() };
   };
   const send = async (body) => {
     const r = await relayer.send({ to: address, value: toNano('1'), body, bounce: true });
@@ -134,29 +138,32 @@ test('compute_layer_root reproduces fixture roots', async () => {
   const h = await setup(hex(fx.root), hex(fx.recRoot));
   const op1 = fx.ops[1], op0 = fx.ops[0], rec = fx.recovery;
 
-  let g = await h.get('compute_layer_root', [int(0n), int(0n), int(1n), int(BigInt(H)), int(big(hex(op1.digest))), cell(layerStream(op1.l0.wots.map(hex), op1.l0.auth.map(hex)))]);
+  let g = await h.get('compute_layer_root', [int(SEED), int(0n), int(0n), int(1n), int(BigInt(H)), int(big(hex(op1.digest))), cell(layerStream(op1.l0.wots.map(hex), op1.l0.auth.map(hex)))]);
   assert.equal(g.rd.readBigNumber(), big(hex(fx.bottomRoot0)), 'bottom layer (ops[1])');
 
-  g = await h.get('compute_layer_root', [int(1n), int(0n), int(0n), int(BigInt(H)), int(big(hex(fx.bottomRoot0))), cell(layerStream(op0.l1.wots.map(hex), op0.l1.auth.map(hex)))]);
+  g = await h.get('compute_layer_root', [int(SEED), int(1n), int(0n), int(0n), int(BigInt(H)), int(big(hex(fx.bottomRoot0))), cell(layerStream(op0.l1.wots.map(hex), op0.l1.auth.map(hex)))]);
   assert.equal(g.rd.readBigNumber(), big(hex(fx.root)), 'top layer (ops[0])');
 
-  g = await h.get('compute_layer_root', [int(0xffn), int(0n), int(0n), int(BigInt(REC_H)), int(big(hex(rec.digest))), cell(layerStream(rec.wots.map(hex), rec.auth.map(hex)))]);
+  g = await h.get('compute_layer_root', [int(SEED), int(0xffn), int(0n), int(0n), int(BigInt(REC_H)), int(big(hex(rec.digest))), cell(layerStream(rec.wots.map(hex), rec.auth.map(hex)))]);
   assert.equal(g.rd.readBigNumber(), big(hex(fx.recRoot)), 'recovery tree');
 
   // A tampered chain value changes the root.
   const tampered = op1.l0.wots.map(hex); tampered[0] = sha(tampered[0]);
-  g = await h.get('compute_layer_root', [int(0n), int(0n), int(1n), int(BigInt(H)), int(big(hex(op1.digest))), cell(layerStream(tampered, op1.l0.auth.map(hex)))]);
+  g = await h.get('compute_layer_root', [int(SEED), int(0n), int(0n), int(1n), int(BigInt(H)), int(big(hex(op1.digest))), cell(layerStream(tampered, op1.l0.auth.map(hex)))]);
+  assert.notEqual(g.rd.readBigNumber(), big(hex(fx.bottomRoot0)), 'tampered chain value');
+  // The same signature under a different public seed reaches a different root.
+  g = await h.get('compute_layer_root', [int(SEED ^ 1n), int(0n), int(0n), int(1n), int(BigInt(H)), int(big(hex(op1.digest))), cell(layerStream(op1.l0.wots.map(hex), op1.l0.auth.map(hex)))]);
   assert.notEqual(g.rd.readBigNumber(), big(hex(fx.bottomRoot0)));
 
   // Signer-chosen index vectors: leaf 5 of subtree 0, leaf 0 of subtree 1 and
   // the top-layer signature on bottomRoot1 at top leaf 1.
   const [s5, s1024] = fx.skip.ops;
   assert.equal(s5.idx, 5); assert.equal(s1024.idx, 1024);
-  g = await h.get('compute_layer_root', [int(0n), int(0n), int(5n), int(BigInt(H)), int(big(hex(s5.digest))), cell(layerStream(s5.l0.wots.map(hex), s5.l0.auth.map(hex)))]);
+  g = await h.get('compute_layer_root', [int(SEED), int(0n), int(0n), int(5n), int(BigInt(H)), int(big(hex(s5.digest))), cell(layerStream(s5.l0.wots.map(hex), s5.l0.auth.map(hex)))]);
   assert.equal(g.rd.readBigNumber(), big(hex(fx.bottomRoot0)), 'bottom layer (skip.ops[0], leaf 5)');
-  g = await h.get('compute_layer_root', [int(0n), int(1n), int(0n), int(BigInt(H)), int(big(hex(s1024.digest))), cell(layerStream(s1024.l0.wots.map(hex), s1024.l0.auth.map(hex)))]);
+  g = await h.get('compute_layer_root', [int(SEED), int(0n), int(1n), int(0n), int(BigInt(H)), int(big(hex(s1024.digest))), cell(layerStream(s1024.l0.wots.map(hex), s1024.l0.auth.map(hex)))]);
   assert.equal(g.rd.readBigNumber(), big(hex(fx.bottomRoot1)), 'bottom layer (skip.ops[1], subtree 1)');
-  g = await h.get('compute_layer_root', [int(1n), int(0n), int(1n), int(BigInt(H)), int(big(hex(fx.bottomRoot1))), cell(layerStream(s1024.l1.wots.map(hex), s1024.l1.auth.map(hex)))]);
+  g = await h.get('compute_layer_root', [int(SEED), int(1n), int(0n), int(1n), int(BigInt(H)), int(big(hex(fx.bottomRoot1))), cell(layerStream(s1024.l1.wots.map(hex), s1024.l1.auth.map(hex)))]);
   assert.equal(g.rd.readBigNumber(), big(hex(fx.root)), 'top layer (skip.ops[1])');
 });
 
@@ -228,10 +235,10 @@ test('execute and recover with client-generated signatures', async () => {
 
   // Recovery rotates roots, resets the index space and bumps the epoch.
   s = await h.state();
-  const newRoot = hex(fx.recovery.newRoot), newRecRoot = hex(fx.recovery.newRecRoot);
-  const mr = sha(Buffer.from('AEGIS_CCHS_RECOVER_V1'), Buffer.from('ton'), h.address.hash, u64(s.recNonce), newRoot, newRecRoot);
-  assert.equal((await h.get('get_recovery_digest', [int(big(newRoot)), int(big(newRecRoot))])).rd.readBigNumber(), big(mr));
-  const recBody = beginCell().storeUint(OP_RECOVER, 32).storeUint(0, 64).storeUint(big(newRoot), 256).storeUint(big(newRecRoot), 256)
+  const newRoot = hex(fx.recovery.newRoot), newRecRoot = hex(fx.recovery.newRecRoot), newSeed = hex(fx.recovery.newSeed);
+  const mr = sha(Buffer.from('AEGIS_CCHS_RECOVER_V1'), Buffer.from('ton'), h.address.hash, u64(s.recNonce), newRoot, newRecRoot, newSeed);
+  assert.equal((await h.get('get_recovery_digest', [int(big(newRoot)), int(big(newRecRoot)), int(big(newSeed))])).rd.readBigNumber(), big(mr));
+  const recBody = beginCell().storeUint(OP_RECOVER, 32).storeUint(0, 64).storeUint(big(newRoot), 256).storeUint(big(newRecRoot), 256).storeUint(big(newSeed), 128)
     .storeRef(layerStream(wotsSign(0xff, 0, Number(s.recNonce), mr), authPath(rec, Number(s.recNonce))))
     .endCell();
   r = await h.send(recBody);
@@ -240,6 +247,7 @@ test('execute and recover with client-generated signatures', async () => {
   s = await h.state();
   assert.equal(s.root, big(newRoot));
   assert.equal(s.recRoot, big(newRecRoot));
+  assert.equal(s.seed, big(newSeed), 'seed rotated with the roots');
   assert.deepEqual([s.nextIdx, s.epoch, s.recNonce, s.nonce], [0n, 1n, 1n, 2n]);
 
   // Old key material no longer authorizes anything.

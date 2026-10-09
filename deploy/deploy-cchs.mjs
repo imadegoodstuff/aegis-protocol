@@ -93,10 +93,10 @@ export function factoryAddressFor(initCode) {
 }
 
 /** Mirrors AegisCCHSFactory.predict. */
-export function predictAccount(artifact, root, recRoot, sha256Variant) {
+export function predictAccount(artifact, root, recRoot, seed, sha256Variant) {
   const creation = sha256Variant ? artifact.account.S.creationCode : artifact.account.K.creationCode;
-  const initCode = concatHex([creation, encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], [root, recRoot])]);
-  const salt = keccak256(concatHex([root, recRoot, sha256Variant ? "0x01" : "0x00"]));
+  const initCode = concatHex([creation, encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes16" }], [root, recRoot, seed])]);
+  const salt = keccak256(concatHex([root, recRoot, seed, sha256Variant ? "0x01" : "0x00"]));
   return getContractAddress({ opcode: "CREATE2", from: artifact.factory.address, salt, bytecode: initCode });
 }
 

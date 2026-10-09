@@ -19,7 +19,10 @@
 //!          ‖ idx u64 BE ‖ sha256(to_json_binary(msgs)))
 //! Recovery digest:
 //!   sha256("AEGIS_CCHS_RECOVER_V1" ‖ "cosmwasm" ‖ contract_address_utf8
-//!          ‖ rec_nonce u64 BE ‖ new_root ‖ new_rec_root)
+//!          ‖ rec_nonce u64 BE ‖ new_root ‖ new_rec_root ‖ new_seed(16))
+//!
+//! `seed` is the 16-byte public seed of the key tree (last 16 bytes of every
+//! ADRS, spec §2.2); it is stored next to the roots and rotated with them.
 //!
 //! `contract_address_utf8` is the bech32 string of `env.contract.address`,
 //! which also binds the chain prefix (`osmo1…`, `neutron1…`, …).
@@ -34,7 +37,7 @@ use cosmwasm_std::{
 use cw_storage_plus::{Item, Map};
 use thiserror::Error;
 
-use cchs_core::{CchsError, CchsState, LayerSig, Sha256 as CchsHash, H, LEN, REC_H};
+use cchs_core::{CchsError, CchsState, LayerSig, Seed, Sha256 as CchsHash, H, LEN, REC_H, SEED_BYTES};
 
 /// Hasher type: pure-Rust SHA-256 (compiles to wasm, no host function needed).
 type Hasher = sha2::Sha256;
@@ -55,6 +58,8 @@ pub struct State {
     pub root: Binary,
     /// Recovery tree root (32 bytes, single layer, height 8).
     pub rec_root: Binary,
+    /// Public seed of the current key tree (16 bytes, in every ADRS).
+    pub seed: Binary,
     /// Increments on every recovery; namespaces the cache.
     pub epoch: u64,
     /// Lowest leaf index still available in [0, 2^20); every leaf below it
@@ -80,6 +85,8 @@ pub struct LayerSigMsg {
 pub struct InstantiateMsg {
     pub root: Binary,
     pub rec_root: Binary,
+    /// 16-byte public seed of the key tree.
+    pub seed: Binary,
 }
 
 #[cw_serde]
@@ -95,10 +102,12 @@ pub enum ExecuteMsg {
         l1: Option<LayerSigMsg>,
         msgs: Vec<CosmosMsg>,
     },
-    /// Rotate both roots, authorized by the recovery tree at leaf `rec_nonce`.
+    /// Rotate the public key (both roots and the seed), authorized by the
+    /// recovery tree at leaf `rec_nonce`.
     Recover {
         new_root: Binary,
         new_rec_root: Binary,
+        new_seed: Binary,
         wots: Vec<Binary>,
         auth: Vec<Binary>,
     },
@@ -119,7 +128,7 @@ pub enum QueryMsg {
     DigestAt { idx: u64, msgs: Vec<CosmosMsg> },
     /// Digest the client must sign for the next `Recover`.
     #[returns(Binary)]
-    NextRecoveryDigest { new_root: Binary, new_rec_root: Binary },
+    NextRecoveryDigest { new_root: Binary, new_rec_root: Binary, new_seed: Binary },
     /// Whether an `Execute` at leaf `next_idx` must include the top layer.
     #[returns(bool)]
     NeedsTopLayer {},
@@ -178,12 +187,14 @@ pub fn instantiate(
 ) -> Result<Response, ContractError> {
     let root = b32(&msg.root)?;
     let rec_root = b32(&msg.rec_root)?;
-    let state = CchsState::new(root, rec_root)?;
+    let seed = b16(&msg.seed)?;
+    let state = CchsState::new(root, rec_root, seed)?;
     STATE.save(deps.storage, &to_stored(&state))?;
     Ok(Response::new()
         .add_attribute("action", "instantiate")
         .add_attribute("root", msg.root.to_base64())
-        .add_attribute("rec_root", msg.rec_root.to_base64()))
+        .add_attribute("rec_root", msg.rec_root.to_base64())
+        .add_attribute("seed", msg.seed.to_base64()))
 }
 
 #[entry_point]
@@ -195,8 +206,8 @@ pub fn execute(
 ) -> Result<Response, ContractError> {
     match msg {
         ExecuteMsg::Execute { idx, l0, l1, msgs } => exec_execute(deps, env, idx, l0, l1, msgs),
-        ExecuteMsg::Recover { new_root, new_rec_root, wots, auth } => {
-            exec_recover(deps, env, new_root, new_rec_root, wots, auth)
+        ExecuteMsg::Recover { new_root, new_rec_root, new_seed, wots, auth } => {
+            exec_recover(deps, env, new_root, new_rec_root, new_seed, wots, auth)
         }
     }
 }
@@ -215,9 +226,9 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let d = execute_digest(&env, st.nonce, idx, &msgs)?;
             to_json_binary(&Binary::from(d.to_vec()))
         }
-        QueryMsg::NextRecoveryDigest { new_root, new_rec_root } => {
+        QueryMsg::NextRecoveryDigest { new_root, new_rec_root, new_seed } => {
             let st = STATE.load(deps.storage)?;
-            let d = recover_digest(&env, st.rec_nonce, new_root.as_slice(), new_rec_root.as_slice());
+            let d = recover_digest(&env, st.rec_nonce, new_root.as_slice(), new_rec_root.as_slice(), new_seed.as_slice());
             to_json_binary(&Binary::from(d.to_vec()))
         }
         QueryMsg::NeedsTopLayer {} => {
@@ -290,6 +301,7 @@ fn exec_recover(
     env: Env,
     new_root: Binary,
     new_rec_root: Binary,
+    new_seed: Binary,
     wots: Vec<Binary>,
     auth: Vec<Binary>,
 ) -> Result<Response, ContractError> {
@@ -298,20 +310,29 @@ fn exec_recover(
 
     let new_root_b = b32(&new_root)?;
     let new_rec_root_b = b32(&new_rec_root)?;
+    let new_seed_b = b16(&new_seed)?;
     let layer = parse_layer(&LayerSigMsg { wots, auth }, REC_H)?;
 
-    let digest = recover_digest(&env, state.rec_nonce, &new_root_b, &new_rec_root_b);
+    let digest = recover_digest(&env, state.rec_nonce, &new_root_b, &new_rec_root_b, &new_seed_b);
 
     let mut h = Hasher::default();
-    let epoch =
-        state.recover_verify(&mut h, &digest, new_root_b, new_rec_root_b, &layer.wots, &layer.auth)?;
+    let epoch = state.recover_verify(
+        &mut h,
+        &digest,
+        new_root_b,
+        new_rec_root_b,
+        new_seed_b,
+        &layer.wots,
+        &layer.auth,
+    )?;
     STATE.save(deps.storage, &to_stored(&state))?;
 
     Ok(Response::new()
         .add_attribute("action", "recover")
         .add_attribute("epoch", epoch.to_string())
         .add_attribute("root", new_root.to_base64())
-        .add_attribute("rec_root", new_rec_root.to_base64()))
+        .add_attribute("rec_root", new_rec_root.to_base64())
+        .add_attribute("seed", new_seed.to_base64()))
 }
 
 // ---------------------------------------------------------------- digests
@@ -332,8 +353,14 @@ pub fn execute_digest(env: &Env, nonce: u64, idx: u64, msgs: &[CosmosMsg]) -> St
     Ok(CchsHash::finish(&mut h))
 }
 
-/// `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "cosmwasm" ‖ contract_address ‖ rec_nonce BE ‖ new_root ‖ new_rec_root)`
-pub fn recover_digest(env: &Env, rec_nonce: u64, new_root: &[u8], new_rec_root: &[u8]) -> [u8; 32] {
+/// `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "cosmwasm" ‖ contract_address ‖ rec_nonce BE ‖ new_root ‖ new_rec_root ‖ new_seed)`
+pub fn recover_digest(
+    env: &Env,
+    rec_nonce: u64,
+    new_root: &[u8],
+    new_rec_root: &[u8],
+    new_seed: &[u8],
+) -> [u8; 32] {
     let mut h = Hasher::default();
     CchsHash::update(&mut h, DOMAIN_RECOVER);
     CchsHash::update(&mut h, CHAIN_TAG);
@@ -341,6 +368,7 @@ pub fn recover_digest(env: &Env, rec_nonce: u64, new_root: &[u8], new_rec_root: 
     CchsHash::update(&mut h, &rec_nonce.to_be_bytes());
     CchsHash::update(&mut h, new_root);
     CchsHash::update(&mut h, new_rec_root);
+    CchsHash::update(&mut h, new_seed);
     CchsHash::finish(&mut h)
 }
 
@@ -386,10 +414,21 @@ fn b32(b: &Binary) -> Result<[u8; 32], ContractError> {
     Ok(out)
 }
 
+fn b16(b: &Binary) -> Result<Seed, ContractError> {
+    let s = b.as_slice();
+    if s.len() != SEED_BYTES {
+        return Err(ContractError::BadLength { expected: SEED_BYTES, got: s.len() });
+    }
+    let mut out = [0u8; SEED_BYTES];
+    out.copy_from_slice(s);
+    Ok(out)
+}
+
 fn to_stored(s: &CchsState) -> State {
     State {
         root: Binary::from(s.root.to_vec()),
         rec_root: Binary::from(s.rec_root.to_vec()),
+        seed: Binary::from(s.seed.to_vec()),
         epoch: s.epoch,
         next_idx: s.next_idx,
         nonce: s.nonce,
@@ -401,6 +440,7 @@ fn from_stored(s: &State) -> Result<CchsState, ContractError> {
     Ok(CchsState {
         root: b32(&s.root)?,
         rec_root: b32(&s.rec_root)?,
+        seed: b16(&s.seed)?,
         epoch: s.epoch,
         next_idx: s.next_idx,
         nonce: s.nonce,
@@ -436,6 +476,7 @@ mod tests {
         let msg = InstantiateMsg {
             root: Binary::from(vec![0x11u8; 32]),
             rec_root: Binary::from(vec![0x22u8; 32]),
+            seed: Binary::from(vec![0x33u8; 16]),
         };
         instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
         (deps, env)

@@ -15,9 +15,9 @@ type Adapter = {
 const ADAPTERS: Adapter[] = [
   { id: "evm", name: "EVM × 12", family: "Solidity 0.8.37", set: "CCHS-K-20",
     addrStatus: "mainnet", pq: "contract",
-    address: "CREATE2(factory, keccak(root ‖ recRoot ‖ set), initCode)",
+    address: "CREATE2(factory, keccak(root ‖ recRoot ‖ pkSeed ‖ set), initCode)",
     hash: "keccak256 opcode (S-20: precompile 0x02)", storage: "mapping((epoch<<64)|treeIdx → bytes32)", path: "evm/src/AegisCCHSBase.sol",
-    blurb: "AegisCCHSBase holds all logic; AegisCCHS and AegisCCHSK bind the hash. The signer chooses the leaf index (monotonic, bound into the digest): execute for a cached subtree, executeFirst to register one. 20 Foundry tests per set plus factory tests driven by client-generated vectors, interop verified in an EVM. The factory lives at 0x7f86…817F on every chain; it is published nowhere yet, and the first Protect on a chain publishes it (no deployer key, no project funds)." },
+    blurb: "AegisCCHSBase holds all logic; AegisCCHS and AegisCCHSK bind the hash. The signer chooses the leaf index (monotonic, bound into the digest): execute for a cached subtree, executeFirst to register one. 20 Foundry tests per set plus factory tests driven by client-generated vectors, interop verified in an EVM. The factory lives at 0x5159…a2c6 on every chain; it is published nowhere yet, and the first Protect on a chain publishes it (no deployer key, no project funds)." },
   { id: "tron", name: "TRON", family: "TVM (Solidity)", set: "CCHS-K-20",
     addrStatus: "mainnet", pq: "contract",
     address: "base58check(0x41 ‖ keccak256(pk)[12:])",

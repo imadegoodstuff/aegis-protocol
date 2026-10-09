@@ -1,6 +1,6 @@
 // Replays the shared test vectors against the TypeScript client.
 //
-//   cchs-derivation.json  mnemonic -> seed -> master -> chain key -> sk(0,0,0,0) -> roots -> EVM account (S-20, K-20)
+//   cchs-derivation.json  mnemonic -> seed -> master -> chain key -> sk(0,0,0,0) -> roots, pkSeed -> EVM account (S-20, K-20)
 //   cchs-s-20.json        roots, bottom roots, every op digest and signature, recovery
 //   cchs-k-20.json        same for K-20
 //
@@ -44,8 +44,9 @@ const check = (what: string, got: string, want: string) => {
       check(`${name} ${v}-20 sk(0,0,0,0)`, cchs.toHex(cchs.sk(key, 0, 0n, 0, 0, v)), set.sk_0_0_0_0);
       check(`${name} ${v}-20 root`, cchs.toHex(pub.root), set.root);
       check(`${name} ${v}-20 recRoot`, cchs.toHex(pub.recRoot), set.recRoot);
+      check(`${name} ${v}-20 pkSeed`, cchs.toHex(pub.seed), set.seed);
       check(`${name} ${v}-20 bottomRoot0`, cchs.toHex(c.buildTree(key, 0, 0n, cchs.H).root), set.bottomRoot0);
-      if (set.evmAccount) check(`${name} ${v}-20 EVM account`, predictAccount(set.root, set.recRoot, v), set.evmAccount);
+      if (set.evmAccount) check(`${name} ${v}-20 EVM account`, predictAccount(set.root, set.recRoot, set.seed, v), set.evmAccount);
     }
   }
   // Trees of different chains are different trees: the first secret value already differs.
@@ -63,6 +64,7 @@ for (const v of ['S', 'K'] as const) {
   const pub = c.keygen(key, cache);
   check(`${v}-20 fixture root`, cchs.toHex(pub.root), f.root);
   check(`${v}-20 fixture recRoot`, cchs.toHex(pub.recRoot), f.recRoot);
+  check(`${v}-20 fixture pkSeed`, cchs.toHex(pub.seed), f.seed);
   check(`${v}-20 fixture bottomRoot0`, cchs.toHex(c.buildTree(key, 0, 0n, cchs.H).root), f.bottomRoot0);
   check(`${v}-20 fixture bottomRoot1`, cchs.toHex(c.buildTree(key, 0, 1n, cchs.H).root), f.bottomRoot1);
   const account = fromHex(f.account);
@@ -77,10 +79,17 @@ for (const v of ['S', 'K'] as const) {
     if (op.l1) check(`${v}-20 top layer idx ${op.idx}`, cchs.toHex(s.l1!.wots[0]), op.l1.wots[0]);
   }
   const r = f.recovery;
-  const rm = c.recoveryDigest({ chainId: BigInt(f.chainId), account, recNonce: BigInt(r.recNonce), newRoot: fromHex(r.newRoot), newRecRoot: fromHex(r.newRecRoot) });
+  const rm = c.recoveryDigest({ chainId: BigInt(f.chainId), account, recNonce: BigInt(r.recNonce), newRoot: fromHex(r.newRoot), newRecRoot: fromHex(r.newRecRoot), newSeed: fromHex(r.newSeed) });
   check(`${v}-20 recovery digest`, cchs.toHex(rm), r.digest);
   const rs = c.signRecovery(key, r.recNonce, rm, cache);
   check(`${v}-20 recovery signature`, cchs.toHex(rs.wots[0]), r.wots[0]);
+  check(`${v}-20 recovery signature verifies against recRoot`, c.verifyRecovery(pub, r.recNonce, rm, rs) ? 'ok' : 'bad', 'ok');
+  // Seeds separate trees: the same signature under another seed is a different (invalid) one.
+  const op0 = f.ops[0];
+  const sig0: cchs.CchsSignature = { idx: op0.idx, l0: { wots: op0.l0.wots.map(fromHex), auth: op0.l0.auth.map(fromHex) }, l1: { wots: op0.l1.wots.map(fromHex), auth: op0.l1.auth.map(fromHex) } };
+  check(`${v}-20 fixture op 0 verifies`, (() => { try { c.verify(pub, op0.idx, fromHex(op0.digest), sig0); return 'ok'; } catch { return 'bad'; } })(), 'ok');
+  const otherSeed = { ...pub, seed: pub.seed.map((b) => b ^ 0xff) };
+  check(`${v}-20 fixture op 0 rejected under a different pkSeed`, (() => { try { c.verify(otherSeed, op0.idx, fromHex(op0.digest), sig0); return 'accepted'; } catch { return 'rejected'; } })(), 'rejected');
 }
 
 if (failures) { console.log(`${failures} check(s) failed`); process.exit(1); }

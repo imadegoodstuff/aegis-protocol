@@ -64,13 +64,13 @@ Implementation: `wallet/src/aegis/derive.ts` (23 chains).
 Specified in `CCHS.spec.md`. Summary of the on-chain interface:
 
 ```solidity
-constructor(bytes32 root, bytes32 recRoot)
+constructor(bytes32 root, bytes32 recRoot, bytes16 pkSeed)
 
 function execute(address target, uint256 value, bytes data,
                  uint64 idx, LayerSig l0) returns (bytes)                 // subtree cached
 function executeFirst(address target, uint256 value, bytes data,
                  uint64 idx, LayerSig l0, LayerSig l1) returns (bytes)   // registers the subtree
-function recover(bytes32 newRoot, bytes32 newRecRoot,
+function recover(bytes32 newRoot, bytes32 newRecRoot, bytes16 newSeed,
                  bytes32[67] wots, bytes32[8] auth)
 
 function digestAt(uint64 idx, address target, uint256 value, bytes data) view returns (bytes32)
@@ -79,7 +79,7 @@ function nextIdx(uint8 lane) view returns (uint64)
 function nonce(uint8 lane) view returns (uint64)
 function laneOf(uint64 idx) pure returns (uint8)   // idx >> 16
 
-bytes32 root; bytes32 recRoot; uint64 epoch; uint64 recNonce;
+bytes32 root; bytes32 recRoot; bytes16 pkSeed; uint64 epoch; uint64 recNonce;
 mapping(uint256 => bytes32) cachedRoot;   // key = (epoch << 64) | bottomTreeIdx
 mapping(uint256 => uint256) _lane;        // key = (epoch << 8) | lane, value = nonce << 64 | nextIdx
 ```
@@ -88,7 +88,7 @@ mapping(uint256 => uint256) _lane;        // key = (epoch << 8) | lane, value = 
 
 Two contracts share this interface via `AegisCCHSBase`: `AegisCCHS` (`CCHS-S-20`, SHA-256) and `AegisCCHSK` (`CCHS-K-20`, keccak256, EVM default). Both: w = 16, 67 chains, two layers of height 10, 2^20 signatures, 256 recoveries.
 
-`AegisCCHSFactory.deploy(root, recRoot, sha256Variant)` creates either with CREATE2, `salt = keccak256(root ‖ recRoot ‖ variant)`; `predict(...)` returns the address before deployment. The factory is at the same address on every EVM chain; the roots are per chain (CCHS.spec.md §3 derives one key tree per chain, because a one-time leaf must never sign on two chains), so the account address is per chain too, and still predictable offline.
+`AegisCCHSFactory.deploy(root, recRoot, pkSeed, sha256Variant)` creates either with CREATE2, `salt = keccak256(root ‖ recRoot ‖ pkSeed ‖ variant)`; `predict(...)` returns the address before deployment. The factory is at the same address on every EVM chain; the roots are per chain (CCHS.spec.md §3 derives one key tree per chain, because a one-time leaf must never sign on two chains), so the account address is per chain too, and still predictable offline.
 
 No proxy, no `selfdestruct`, no setters, no owner.
 

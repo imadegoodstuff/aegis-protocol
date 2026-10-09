@@ -64,6 +64,7 @@ const TABS: Tab[] = [
 abstract contract AegisCCHSBase {
     bytes32 public root;      // top-layer tree root, rotated only by recover
     bytes32 public recRoot;   // recovery tree root (height 8)
+    bytes16 public pkSeed;    // public seed of the key tree, in every ADRS; rotated by recover
     uint64  public epoch;     // bumped by every recovery; namespaces cache and lanes
     /// key = (epoch << 64) | bottomTreeIdx
     mapping(uint256 => bytes32) public cachedRoot;
@@ -111,15 +112,16 @@ abstract contract AegisCCHSBase {
 
 /// Complete every WOTS+ chain from the signature value to its end and
 /// compress the 67 chain ends into the leaf: H(ADRS_leaf ‖ pk_0 ‖ … ‖ pk_66).
+/// \`seed\` is the tree's 16-byte public seed, the last 16 bytes of every ADRS.
 pub fn wots_leaf<S: Sha256>(
-    h: &mut S, layer: u8, tree_idx: u64, leaf_idx: u32,
+    h: &mut S, seed: &Seed, layer: u8, tree_idx: u64, leaf_idx: u32,
     msg: &[u8; 32], wots: &[[u8; 32]; LEN],
 ) -> [u8; 32] {
     let d = digits(msg);                       // 64 message + 3 checksum digits
     let mut leaf = S::default();
-    leaf.update(&adrs(layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0));
+    leaf.update(&adrs(seed, layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0));
 
-    let mut a = adrs(layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
+    let mut a = adrs(seed, layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
     for c in 0..LEN {
         let mut x = wots[c];
         a[14] = c as u8;
@@ -138,11 +140,11 @@ pub fn wots_leaf<S: Sha256>(
 /// Root of tree (layer, tree_idx) from a WOTS+ signature on \`msg\` and
 /// its authentication path. Equal to the cached root, or to \`root\`.
 pub fn verify_layer<S: Sha256>(
-    h: &mut S, layer: u8, tree_idx: u64, leaf_idx: u32,
+    h: &mut S, seed: &Seed, layer: u8, tree_idx: u64, leaf_idx: u32,
     msg: &[u8; 32], wots: &[[u8; 32]; LEN], auth: &[[u8; 32]], height: usize,
 ) -> [u8; 32] {
-    let leaf = wots_leaf(h, layer, tree_idx, leaf_idx, msg, wots);
-    root_from_path(h, layer, tree_idx, leaf, leaf_idx, &auth[..height])
+    let leaf = wots_leaf(h, seed, layer, tree_idx, leaf_idx, msg, wots);
+    root_from_path(h, seed, layer, tree_idx, leaf, leaf_idx, &auth[..height])
 }`,
   },
   {
@@ -155,6 +157,7 @@ pub mod AegisCCHS {
     struct Storage {
         root:        u256,
         rec_root:    u256,
+        seed:        u128,                     // public seed of the key tree
         epoch:       u64,
         next_idx:    u64,
         nonce:       u64,
@@ -213,11 +216,11 @@ export function chainKey(master: CchsKey, tag: Uint8Array): CchsKey {
   return { master: hkdf(sha256, master.master, undefined, info, 32) };
 }
 
-/** Mirrors AegisCCHSFactory.predict; no RPC needed. */
-export function predictAccount(root: Hex, recRoot: Hex, variant: Variant): Address {
+/** Mirrors AegisCCHSFactory.predict; no RPC needed. \`seed\` is the 16-byte public seed. */
+export function predictAccount(root: Hex, recRoot: Hex, seed: Hex, variant: Variant): Address {
   const initCode = concatHex([creationCode(variant), encodeAbiParameters(
-    [{ type: "bytes32" }, { type: "bytes32" }], [root, recRoot])]);
-  const salt = keccak256(concatHex([root, recRoot, variant === "S" ? "0x01" : "0x00"]));
+    [{ type: "bytes32" }, { type: "bytes32" }, { type: "bytes16" }], [root, recRoot, seed])]);
+  const salt = keccak256(concatHex([root, recRoot, seed, variant === "S" ? "0x01" : "0x00"]));
   return getContractAddress({ opcode: "CREATE2", from: FACTORY_ADDRESS, salt, bytecode: initCode });
 }`,
   },

@@ -76,7 +76,7 @@ bottom root that was so registered (`CCHS.spec.md` §6.2 C3, C4).
 
 | PDA | Seeds | Contents | Size |
 |---|---|---|---|
-| `CchsAccount` | `["cchs", initial_root(24)]` | `seed, root, rec_root` (24 B each), `epoch, next_idx, nonce, rec_nonce` (u64), `bump, vault_bump` | 8 + 106 = 114 B |
+| `CchsAccount` | `["cchs", initial_root(24)]` | `seed, root, rec_root` (24 B each; `seed` is the PDA seed = initial root), `pk_seed` (16 B, public seed of the current key tree), `epoch, next_idx, nonce, rec_nonce` (u64), `bump, vault_bump` | 8 + 122 = 130 B |
 | `SubtreeCache` | `["cache", account, epoch LE u64, tree_idx LE u64]` | `root` — verified bottom subtree root, zero = not cached | 8 + 24 = 32 B |
 | vault | `["vault", account]` | data-less system account; holds SOL / token authority | 0 |
 
@@ -86,7 +86,7 @@ without being deleted.
 ## Instructions
 
 ```
-create(root: [u8;24], rec_root: [u8;24])
+create(root: [u8;24], rec_root: [u8;24], pk_seed: [u8;16])
     accounts: account (init), payer (signer), system_program
 
 cache_subtree(tree_idx: u64, l1_wots: [[u8;24];26], l1_auth: [[u8;24];10], r0: [u8;24])
@@ -103,9 +103,9 @@ execute(idx: u64, l0_wots: [[u8;24];26], l0_auth: [[u8;24];10], ix_data: Vec<u8>
     effect:  next_idx = idx + 1, nonce += 1, then CPI target_program(ix_data) signed by
              the account PDA and the vault PDA wherever they appear
 
-recover(new_root: [u8;24], new_rec_root: [u8;24], wots: [[u8;24];26], auth: [[u8;24];8])
+recover(new_root: [u8;24], new_rec_root: [u8;24], new_pk_seed: [u8;16], wots: [[u8;24];26], auth: [[u8;24];8])
     accounts: account (mut)
-    effect:  root/rec_root replaced, next_idx = 0, epoch += 1, rec_nonce += 1
+    effect:  root/rec_root/pk_seed replaced, next_idx = 0, epoch += 1, rec_nonce += 1
 ```
 
 `idx` is bound into the digest and checked against `next_idx` before any
@@ -126,7 +126,7 @@ and for recovery
 
 ```
 M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "solana" ‖ account_pubkey(32) ‖ rec_nonce u64 BE
-               ‖ new_root(24) ‖ new_rec_root(24))[0..24)
+               ‖ new_root(24) ‖ new_rec_root(24) ‖ new_pk_seed(16))[0..24)
 ```
 
 `"solana"` replaces the EVM chain id, so a signature is never valid on another
@@ -136,7 +136,7 @@ chain. The `digest` fields of `cchs-c-20.json` are exactly these values for
 ## Layer verification (shared with every chain)
 
 ```
-ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ 16 zero bytes
+ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ pkSeed(16)
 F(adrs, x)   = sha256(adrs ‖ x)[0..24)                   type 0x00
 leaf         = sha256(adrs ‖ pk_0 ‖ … ‖ pk_25)[0..24)     type 0x01
 node         = sha256(adrs ‖ left ‖ right)[0..24)         type 0x02, leafIdx = pos >> 1, chainIdx = level
@@ -146,6 +146,10 @@ Layer 0: `treeIdx = idx >> 10`, `leafIdx = idx & 1023`, message `M`. Layer 1:
 `treeIdx = 0`, `leafIdx = idx >> 10`, message `R_0` (checked in
 `cache_subtree`). Recovery: layer `0xFF`, tree 0, `leafIdx = rec_nonce`,
 height 8.
+
+`pkSeed` (`pk_seed`) is the 16-byte public seed of the key tree (part of the public key,
+rotated by recovery, `CCHS.spec.md` §2.2): every hash call of one tree is a
+different function from the same position in any other tree.
 
 ## Byte budget
 

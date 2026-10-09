@@ -38,6 +38,7 @@ adapter.
 | `id` | `UID` | object id; bound into every digest |
 | `root` | `vector<u8>` (32) | top-layer tree root; rotated only by `recover` |
 | `rec_root` | `vector<u8>` (32) | recovery tree root (height 8) |
+| `seed` | `vector<u8>` (16) | public seed of the current key tree, last 16 bytes of every ADRS; rotated by `recover` |
 | `epoch` | `u64` | bumped on every recovery; namespaces the cache |
 | `next_idx` | `u64` | lowest leaf still accepted, in `[0, 2^20)`; becomes `idx + 1` after each execute |
 | `nonce` | `u64` | bound into every digest |
@@ -48,13 +49,13 @@ adapter.
 Entry functions:
 
 ```
-create(root, rec_root, ctx)                           -- shares the object; sender keeps nothing
+create(root, rec_root, seed, ctx)                     -- shares the object; sender keeps nothing
 deposit<T>(acct: &mut CchsAccount, coin: Coin<T>)     -- anyone may fund, any coin type
 execute_transfer<T>(acct: &mut CchsAccount, recipient, amount, idx: u64,
                  l0_wots: vector<vector<u8>>, l0_auth: vector<vector<u8>>,
                  has_l1: bool,
                  l1_wots: vector<vector<u8>>, l1_auth: vector<vector<u8>>, ctx)
-recover(acct: &mut CchsAccount, new_root, new_rec_root, wots, auth)
+recover(acct: &mut CchsAccount, new_root, new_rec_root, new_seed, wots, auth)
 ```
 
 `idx` is the leaf the signer chose: it must be `>= next_idx` (`EIndexUsed`
@@ -75,14 +76,15 @@ created with no balances; a transfer of a type never deposited aborts with
 
 Views: `asset_id<T>()`, `digest_at<T>(acct, idx, recipient, amount)` and
 `next_digest<T>(acct, recipient, amount)` (the same at `idx = next_idx`),
-`next_recovery_digest(acct, new_root, new_rec_root)`,
+`next_recovery_digest(acct, new_root, new_rec_root, new_seed)`,
 `needs_top_layer_at(acct, idx)` and `needs_top_layer(acct)` (at `next_idx`),
 `balance_value<T>(acct)`, plus getters for every counter and root.
 
 `l*_wots` is 67 × 32 bytes, `l*_auth` is 10 × 32 bytes (8 × 32 for recovery).
-`verify_layer(layer, tree_idx, leaf_idx, height, m, wots, auth)` and
-`merkle_root(...)` are public pure functions, byte-exact with
-`AegisCCHS._layerRoot`: ADRS layout, chain step `sha2_256(adrs ‖ x)`, leaf
+`verify_layer(seed, layer, tree_idx, leaf_idx, height, m, wots, auth)` and
+`merkle_root(seed, ...)` are public pure functions, byte-exact with
+`AegisCCHS._layerRoot`: ADRS layout (the 16-byte `seed` is the last 16 bytes
+of every ADRS, `CCHS.spec.md` §2.2), chain step `sha2_256(adrs ‖ x)`, leaf
 `sha2_256(adrs ‖ pk_0 ‖ … ‖ pk_66)`, node `sha2_256(adrs ‖ left ‖ right)`.
 
 ## Digest construction
@@ -96,7 +98,7 @@ asset   = sha2_256( 0x00 ‖ ascii(type_name::with_defining_ids<T>()) )
 action  = sha2_256( asset ‖ recipient(32) ‖ amount_u64_be )
 M       = sha2_256( "AEGIS_CCHS_V1" ‖ "sui" ‖ object_id(32) ‖ nonce_u64_be ‖ idx_u64_be ‖ action )
 
-M_rec   = sha2_256( "AEGIS_CCHS_RECOVER_V1" ‖ "sui" ‖ object_id(32) ‖ rec_nonce_u64_be ‖ new_root ‖ new_rec_root )
+M_rec   = sha2_256( "AEGIS_CCHS_RECOVER_V1" ‖ "sui" ‖ object_id(32) ‖ rec_nonce_u64_be ‖ new_root ‖ new_rec_root ‖ new_seed(16) )
 ```
 
 `object_id` is the 32-byte address of the shared `CchsAccount`. The type
@@ -112,16 +114,17 @@ asserted in the module tests and were recomputed independently.
 
 1. Require `idx >= next_idx` (`EIndexUsed`) and `idx < 2^20` (`EExhausted`);
    `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
-2. `r0 = verify_layer(0, tree_idx, leaf_idx, 10, M, l0_wots, l0_auth)`.
+2. `r0 = verify_layer(seed, 0, tree_idx, leaf_idx, 10, M, l0_wots, l0_auth)`.
 3. If `cached_root[(epoch, tree_idx)]` exists, require it equals `r0` and
    ignore `l1_*` even if `has_l1`. Otherwise require `has_l1`, compute
-   `r1 = verify_layer(1, 0, tree_idx, 10, r0, l1_wots, l1_auth)`, require
+   `r1 = verify_layer(seed, 1, 0, tree_idx, 10, r0, l1_wots, l1_auth)`, require
    `r1 == root`, and store `r0` in the cache.
 4. `next_idx = idx + 1`, `nonce += 1`, then split and transfer the coin.
 
 `recover` verifies layer `0xFF`, tree 0, leaf `rec_nonce`, height 8 against
-`rec_root`, then sets the new roots, resets `next_idx`, and bumps `epoch` and
-`rec_nonce`. Anyone may submit it.
+`rec_root` under the current `seed`, then sets the new roots and the new
+seed, resets `next_idx`, and bumps `epoch` and `rec_nonce`. Anyone may
+submit it.
 
 ## Deployment
 
@@ -173,7 +176,7 @@ Publish and `create` costs have not been measured on a live network.
 ### Using an account
 
 ```bash
-sui client call --package <PKG> --module aegis_account --function create --args <ROOT_HEX> <REC_ROOT_HEX> --gas-budget 10000000
+sui client call --package <PKG> --module aegis_account --function create --args <ROOT_HEX> <REC_ROOT_HEX> <SEED_HEX_16B> --gas-budget 10000000
 sui client call --package <PKG> --module aegis_account --function deposit --type-args 0x2::sui::SUI --args <ACCOUNT_ID> <COIN_ID> --gas-budget 10000000
 sui client call --package <PKG> --module aegis_account --function execute_transfer --type-args 0x2::sui::SUI \
   --args <ACCOUNT_ID> <TO> <AMOUNT> <IDX> '[...]' '[...]' true '[...]' '[...]' --gas-budget 50000000
@@ -193,13 +196,14 @@ Tests (`#[test]` in the module):
 
 - `test_adrs_layout` — ADRS byte layout.
 - `test_digits_fixture_op1` — base-16 digits and checksum for the fixture digest.
-- `test_layer0_fixture_op1_matches_bottom_root0` — `ops[1]` (cached path) recomputes `bottomRoot0`.
+- `test_layer0_fixture_op1_matches_bottom_root0` — `ops[1]` (cached path) recomputes `bottomRoot0` under the fixture seed.
+- `test_layer0_fixture_op1_under_other_seed_mismatches` — the same signature under another seed does not reach `bottomRoot0`.
 - `test_layer1_fixture_op0_matches_root` — `ops[0].l1` on `bottomRoot0` recomputes `root`.
 - `test_layer0_tampered_chain_fails` — a modified chain value changes the root.
 - `test_asset_id_and_digest_vectors` — SUI type name, asset id, transfer and recovery digests against independent vectors.
 - `test_create_deposit_execute_first_in_subtree` — created by one address, funded and spent by another; first transfer with top layer; recipient receives the `Coin<SUI>`.
 - `test_cached_second_op` — second transfer from the cached subtree (bottom layer only), index and nonce advance, no top layer needed.
-- `test_recover_rotates_roots_and_keeps_funds` — recovery rotates roots, bumps the epoch and resets the index while id and balance stay.
+- `test_recover_rotates_roots_and_keeps_funds` — recovery rotates roots and seed, bumps the epoch and resets the index while id and balance stay.
 - `test_replayed_signature_fails` — a used signature resubmitted at the next free leaf aborts with `EBadSubtreeRoot`.
 - `test_first_use_without_top_layer_fails` — first use of a subtree without `l1` aborts with `EMissingTopLayer`.
 - `test_wrong_amount_fails` — a signature for one amount submitted with another aborts with `EBadTopRoot`.
@@ -224,7 +228,8 @@ code (chain secrets derived from a tag; sibling nodes are the real neighbour
 leaf or tagged values), so they exercise signing and verification with the
 actual digest the module computes. Tree roots are precomputed constants
 because every unit test runs under the Sui computation cap and building three
-full trees (67 chains x 15 steps per leaf) inside one test exceeds it; the
+full trees (67 chains x 15 steps per leaf) inside one test exceeds it (the
+test trees use an all-zero seed, the fixture tests use the fixture seed); the
 `test_precomputed_*` tests rebuild one root each. For the same reason the
 index-discipline tests go through `test_apply`, a `#[test_only]` helper that
 runs the state transition of `execute_transfer` (index check, cache lookup or

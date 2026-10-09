@@ -21,10 +21,11 @@ src/test_vectors.cairo fixture vectors as u256 literals (test build only)
 
 | Function | Purpose |
 |---|---|
-| `adrs_words(layer, tree_idx, typ, leaf_idx, chain_idx, step)` | ADRS as the first four big-endian `u32` words (words 4..7 are zero) |
+| `adrs_words(layer, tree_idx, typ, leaf_idx, chain_idx, step)` | the first four big-endian `u32` words of the ADRS |
+| `seed_words(seed: u128)` | the last four words of the ADRS: the 16-byte public seed of the tree |
 | `digits(m: u256) -> Array<u32>` | 64 base-16 message digits + 3 checksum digits |
-| `wots_leaf(layer, tree_idx, leaf_idx, m, wots) -> [u32; 8]` | complete 67 chains, compress to the leaf |
-| `verify_layer(layer, tree_idx, leaf_idx, height, m, wots, auth) -> u256` | leaf + Merkle path → tree root |
+| `wots_leaf(seed, layer, tree_idx, leaf_idx, m, wots) -> [u32; 8]` | complete 67 chains, compress to the leaf |
+| `verify_layer(seed, layer, tree_idx, leaf_idx, height, m, wots, auth) -> u256` | leaf + Merkle path → tree root |
 | `u256_to_words` / `words_to_u256` | 32-byte value ⇄ eight big-endian `u32` words |
 
 32-byte values cross the API as `u256` (numeric value of the 32 bytes,
@@ -35,25 +36,26 @@ arguments are always `(0, 0)`.
 
 ### `AegisCCHS` contract
 
-Storage: `root: u256`, `rec_root: u256`, `epoch: u64`, `next_idx: u64`,
+Storage: `root: u256`, `rec_root: u256`, `seed: u128` (public seed of the
+current key tree, `CCHS.spec.md` §2.2), `epoch: u64`, `next_idx: u64`,
 `nonce: u64`, `rec_nonce: u64`, `cached_root: Map<(u64, u64), u256>` keyed by
 `(epoch, bottom_tree_idx)`.
 
 ```
-constructor(root: u256, rec_root: u256)
+constructor(root: u256, rec_root: u256, seed: u128)
 
 execute(calls: Array<Call>, idx: u64,                    // signer-chosen leaf, >= next_idx
         l0_wots: Array<u256>, l0_auth: Array<u256>,     // 67 + 10
         l1_wots: Array<u256>, l1_auth: Array<u256>)     // 67 + 10, or both empty
   -> Array<Span<felt252>>
 
-recover(new_root: u256, new_rec_root: u256,
+recover(new_root: u256, new_rec_root: u256, new_seed: u128,
         wots: Array<u256>, auth: Array<u256>)           // 67 + 8
 
 digest_at(idx, calls) -> u256       next_digest(calls) -> u256   (= digest_at(next_idx, calls))
 needs_top_layer_at(idx) -> bool     needs_top_layer() -> bool    (= needs_top_layer_at(next_idx))
-next_recovery_digest(new_root, new_rec_root) -> u256
-get_root / get_rec_root / get_epoch / get_next_idx / get_nonce / get_rec_nonce /
+next_recovery_digest(new_root, new_rec_root, new_seed) -> u256
+get_root / get_rec_root / get_seed / get_epoch / get_next_idx / get_nonce / get_rec_nonce /
 get_cached_root(epoch, tree_idx)
 ```
 
@@ -61,10 +63,10 @@ get_cached_root(epoch, tree_idx)
 
 1. `idx` is chosen by the signer: `idx >= next_idx` (`CCHS_INDEX_USED` otherwise)
    and `idx < 2^20` (`CCHS_EXHAUSTED`); `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
-2. `m = digest(idx, calls)`; `r0 = verify_layer(0, tree_idx, leaf_idx, 10, m, l0)`.
+2. `m = digest(idx, calls)`; `r0 = verify_layer(seed, 0, tree_idx, leaf_idx, 10, m, l0)`.
 3. If `cached_root[(epoch, tree_idx)] != 0` it must equal `r0`, and a supplied
    top layer is ignored. Otherwise `l1_wots` must be present
-   (`CCHS_MISSING_TOP_LAYER`), `verify_layer(1, 0, tree_idx, 10, r0, l1)` must
+   (`CCHS_MISSING_TOP_LAYER`), `verify_layer(seed, 1, 0, tree_idx, 10, r0, l1)` must
    equal `root`, and `r0` is cached.
 4. `next_idx = idx + 1` (every lower leaf is abandoned forever), `nonce += 1`,
    then `call_contract_syscall` for every call in order; results are returned.
@@ -73,7 +75,8 @@ Because `idx` is bound into the digest, only the key holder can skip leaves or
 jump to a later subtree; the index space is monotonic per epoch.
 
 `recover` verifies the recovery tree (layer `0xFF`, tree 0, leaf `rec_nonce`,
-height 8) against `rec_root`, then sets both roots, resets `next_idx` to 0 and
+height 8) against `rec_root` under the current `seed`, then sets both roots
+and the new seed, resets `next_idx` to 0 and
 increments `epoch` (which logically clears the cache) and `rec_nonce`.
 
 `Call` is `starknet::account::Call { to, selector, calldata: Span<felt252> }`.
@@ -88,7 +91,7 @@ M          = sha256( "AEGIS_CCHS_V1" ‖ "starknet" ‖ contract_address(32 BE)
                      ‖ nonce(8 BE) ‖ idx(8 BE) ‖ calls_hash(32) )
 
 M_rec      = sha256( "AEGIS_CCHS_RECOVER_V1" ‖ "starknet" ‖ contract_address(32 BE)
-                     ‖ rec_nonce(8 BE) ‖ new_root(32) ‖ new_rec_root(32) )
+                     ‖ rec_nonce(8 BE) ‖ new_root(32) ‖ new_rec_root(32) ‖ new_seed(16) )
 ```
 
 Felts (`to`, `selector`, calldata elements, the contract address) are encoded
@@ -115,12 +118,13 @@ Tests (`src/lib.cairo`, module `tests`):
 |---|---|
 | `digits_of_fixture_digest` | nibbles and checksum `0x1ae` of `ops[1].digest` |
 | `digits_all_zero_message` | checksum `960 = 0x3c0` for the zero message |
-| `adrs_layout` | byte positions of every ADRS field |
+| `adrs_layout` | byte positions of every ADRS field, including the seed words |
 | `u256_words_roundtrip` | word order of the `u256` ⇄ words conversion |
 | `verify_layer_bottom_fixture` | `ops[1]` (cached path) → `bottomRoot0` |
 | `verify_layer_top_fixture` | `ops[0].l1` on `bottomRoot0` at leaf 0 → `root` |
 | `verify_layer_recovery_fixture` | recovery vector, layer `0xFF`, height 8 → `recRoot` |
 | `verify_layer_rejects_tampered_chain` | a modified chain value changes the root |
+| `verify_layer_rejects_wrong_seed` | the fixture signature under another public seed does not reach `bottomRoot0` |
 | `skip_within_subtree_then_across_subtrees` | `skip.ops[0]` (idx 5, cached path) then `skip.ops[1]` (idx 1024 with top layer): `next_idx` 6 → 1025, `cached_root[(0, 1)] = bottomRoot1` |
 | `index_reuse_rejected`, `index_reuse_of_skipped_leaf_rejected` | `idx < next_idx` panics with `CCHS_INDEX_USED` |
 | `index_at_next_idx_allowed_and_capacity_bounded`, `index_at_capacity_rejected` | `idx = next_idx` and `2^20 - 1` accepted, `2^20` panics with `CCHS_EXHAUSTED` |

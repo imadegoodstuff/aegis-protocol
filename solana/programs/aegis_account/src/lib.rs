@@ -34,7 +34,11 @@
 //!          ‖ sha256(target_program(32) ‖ ix_data))[0..24)
 //! Recovery digest:
 //!   sha256("AEGIS_CCHS_RECOVER_V1" ‖ "solana" ‖ account(32) ‖ rec_nonce u64 BE
-//!          ‖ new_root(24) ‖ new_rec_root(24))[0..24)
+//!          ‖ new_root(24) ‖ new_rec_root(24) ‖ new_pk_seed(16))[0..24)
+//!
+//! `pk_seed` is the 16-byte public seed of the key tree (last 16 bytes of
+//! every ADRS, spec §2.2); it is stored next to the roots and rotated with
+//! them.
 //!
 //! Spec: ../../../../CCHS.spec.md
 
@@ -103,10 +107,16 @@ impl Sha256 for SolSha256 {
 pub mod aegis_account {
     use super::*;
 
-    /// Create the account PDA with its top-layer root and recovery root
-    /// (24 bytes each). Instruction data: 8 + 24 + 24 = 56 bytes.
-    pub fn create(ctx: Context<Create>, root: [u8; 24], rec_root: [u8; 24]) -> Result<()> {
-        let state = CchsState::new(root, rec_root).map_err(map_err)?;
+    /// Create the account PDA with its top-layer root, recovery root
+    /// (24 bytes each) and 16-byte public seed. Instruction data:
+    /// 8 + 24 + 24 + 16 = 72 bytes.
+    pub fn create(
+        ctx: Context<Create>,
+        root: [u8; 24],
+        rec_root: [u8; 24],
+        pk_seed: [u8; 16],
+    ) -> Result<()> {
+        let state = CchsState::new(root, rec_root, pk_seed).map_err(map_err)?;
         let account_key = ctx.accounts.account.key();
         let (_, vault_bump) =
             Pubkey::find_program_address(&[VAULT_SEED, account_key.as_ref()], ctx.program_id);
@@ -116,7 +126,7 @@ pub mod aegis_account {
         store_state(acc, &state);
         acc.bump = ctx.bumps.account;
         acc.vault_bump = vault_bump;
-        emit!(Initialized { account: account_key, root, rec_root });
+        emit!(Initialized { account: account_key, root, rec_root, pk_seed });
         Ok(())
     }
 
@@ -140,7 +150,7 @@ pub mod aegis_account {
         let acc = &ctx.accounts.account;
 
         let mut h = SolSha256::default();
-        verify_top_layer(&mut h, &acc.root, tree_idx, &r0, LayerSig { wots: &l1_wots, auth: &l1_auth })
+        verify_top_layer(&mut h, &acc.pk_seed, &acc.root, tree_idx, &r0, LayerSig { wots: &l1_wots, auth: &l1_auth })
             .map_err(map_err)?;
 
         let cache = &mut ctx.accounts.cache;
@@ -223,14 +233,16 @@ pub mod aegis_account {
         Ok(())
     }
 
-    /// Rotate `root` and `rec_root`, authorized by the recovery tree
-    /// (layer 0xFF, height 8, leaf `rec_nonce`). Resets `next_idx` and bumps
-    /// `epoch`, which invalidates every existing `SubtreeCache` PDA.
-    /// Instruction data: 8 + 24 + 24 + 624 + 192 = 872 bytes.
+    /// Rotate `root`, `rec_root` and `pk_seed`, authorized by the recovery
+    /// tree (layer 0xFF, height 8, leaf `rec_nonce`, hashed with the current
+    /// seed). Resets `next_idx` and bumps `epoch`, which invalidates every
+    /// existing `SubtreeCache` PDA.
+    /// Instruction data: 8 + 24 + 24 + 16 + 624 + 192 = 888 bytes.
     pub fn recover(
         ctx: Context<Recover>,
         new_root: [u8; 24],
         new_rec_root: [u8; 24],
+        new_pk_seed: [u8; 16],
         wots: [[u8; 24]; 26],
         auth: [[u8; 24]; 8],
     ) -> Result<()> {
@@ -238,15 +250,15 @@ pub mod aegis_account {
         let acc = &mut ctx.accounts.account;
 
         let mut h = SolSha256::default();
-        let msg = recover_digest(&mut h, &account_key, acc.rec_nonce, &new_root, &new_rec_root);
+        let msg = recover_digest(&mut h, &account_key, acc.rec_nonce, &new_root, &new_rec_root, &new_pk_seed);
 
         let mut state = load_state(acc);
         let epoch = state
-            .recover_verify(&mut h, &msg, new_root, new_rec_root, &wots, &auth)
+            .recover_verify(&mut h, &msg, new_root, new_rec_root, new_pk_seed, &wots, &auth)
             .map_err(map_err)?;
         store_state(acc, &state);
 
-        emit!(Recovered { account: account_key, epoch, new_root, new_rec_root });
+        emit!(Recovered { account: account_key, epoch, new_root, new_rec_root, new_pk_seed });
         Ok(())
     }
 }
@@ -281,13 +293,14 @@ pub fn execute_digest(
     truncate(h.finish())
 }
 
-/// `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "solana" ‖ account ‖ rec_nonce BE ‖ new_root ‖ new_rec_root)[0..24)`
+/// `sha256("AEGIS_CCHS_RECOVER_V1" ‖ "solana" ‖ account ‖ rec_nonce BE ‖ new_root ‖ new_rec_root ‖ new_pk_seed)[0..24)`
 pub fn recover_digest(
     h: &mut SolSha256,
     account: &Pubkey,
     rec_nonce: u64,
     new_root: &Hash,
     new_rec_root: &Hash,
+    new_pk_seed: &[u8; 16],
 ) -> Hash {
     h.update(DOMAIN_RECOVER);
     h.update(CHAIN_TAG);
@@ -295,6 +308,7 @@ pub fn recover_digest(
     h.update(&rec_nonce.to_be_bytes());
     h.update(new_root);
     h.update(new_rec_root);
+    h.update(new_pk_seed);
     truncate(h.finish())
 }
 
@@ -304,6 +318,7 @@ fn load_state(a: &CchsAccount) -> CchsState {
     CchsState {
         root: a.root,
         rec_root: a.rec_root,
+        seed: a.pk_seed,
         epoch: a.epoch,
         next_idx: a.next_idx,
         nonce: a.nonce,
@@ -314,6 +329,7 @@ fn load_state(a: &CchsAccount) -> CchsState {
 fn store_state(a: &mut CchsAccount, s: &CchsState) {
     a.root = s.root;
     a.rec_root = s.rec_root;
+    a.pk_seed = s.seed;
     a.epoch = s.epoch;
     a.next_idx = s.next_idx;
     a.nonce = s.nonce;
@@ -336,7 +352,7 @@ fn map_err(e: CchsError) -> anchor_lang::error::Error {
 // --------------------------------------------------------------- accounts
 
 #[derive(Accounts)]
-#[instruction(root: [u8; 24], rec_root: [u8; 24])]
+#[instruction(root: [u8; 24], rec_root: [u8; 24], pk_seed: [u8; 16])]
 pub struct Create<'info> {
     #[account(
         init,
@@ -430,6 +446,9 @@ pub struct CchsAccount {
     pub root: [u8; 24],
     /// Recovery tree root (single layer, height 8).
     pub rec_root: [u8; 24],
+    /// Public seed of the current key tree (last 16 bytes of every ADRS).
+    /// Rotated together with the roots by `recover`.
+    pub pk_seed: [u8; 16],
     /// Increments on every recovery; namespaces the cache PDAs.
     pub epoch: u64,
     /// Lowest leaf index still available in [0, 2^20); every leaf below it
@@ -457,6 +476,7 @@ pub struct Initialized {
     pub account: Pubkey,
     pub root: [u8; 24],
     pub rec_root: [u8; 24],
+    pub pk_seed: [u8; 16],
 }
 
 #[event]
@@ -480,6 +500,7 @@ pub struct Recovered {
     pub epoch: u64,
     pub new_root: [u8; 24],
     pub new_rec_root: [u8; 24],
+    pub new_pk_seed: [u8; 16],
 }
 
 // ----------------------------------------------------------------- errors
@@ -543,6 +564,14 @@ mod tests {
         out
     }
 
+    /// Public seed of the fixture key tree.
+    fn seed(f: &Value) -> [u8; 16] {
+        let bytes = hex_bytes(f["seed"].as_str().expect("seed"));
+        let mut out = [0u8; 16];
+        out.copy_from_slice(&bytes);
+        out
+    }
+
     struct Layer {
         wots: [Hash; LEN],
         auth: [Hash; H],
@@ -595,6 +624,7 @@ mod tests {
 
     /// Mirrors the `cache_subtree` handler.
     fn cache_subtree(
+        seed: &[u8; 16],
         root: &Hash,
         caches: &mut Caches,
         tree_idx: u64,
@@ -605,7 +635,7 @@ mod tests {
             return Err(AegisError::ZeroRoot);
         }
         let mut h = SolSha256::default();
-        verify_top_layer(&mut h, root, tree_idx, &r0, l1.sig()).map_err(core_err)?;
+        verify_top_layer(&mut h, seed, root, tree_idx, &r0, l1.sig()).map_err(core_err)?;
         let slot = caches.root(tree_idx);
         if !(slot == ZERO || slot == r0) {
             return Err(AegisError::CacheConflict);
@@ -660,10 +690,10 @@ mod tests {
     fn after_first_op(f: &Value) -> (CchsState, Caches, Hash) {
         let root = b24(&f["root"]);
         let bottom0 = b24(&f["bottomRoot0"]);
-        let mut state = CchsState::new(root, b24(&f["recRoot"])).unwrap();
+        let mut state = CchsState::new(root, b24(&f["recRoot"]), seed(f)).unwrap();
         let mut caches = Caches::default();
         let op0 = Op::from_json(&f["ops"][0]);
-        cache_subtree(&root, &mut caches, 0, op0.l1.as_ref().unwrap(), bottom0).unwrap();
+        cache_subtree(&seed(&f), &root, &mut caches, 0, op0.l1.as_ref().unwrap(), bottom0).unwrap();
         let r0 = execute(&mut state, &caches, op0.idx, &op0.digest, &op0.l0).unwrap();
         assert_eq!(r0, bottom0);
         assert_eq!(state.next_idx, 1);
@@ -710,10 +740,10 @@ mod tests {
 
         // The client computes r0 for subtree 1 from the bottom layer...
         let mut h = SolSha256::default();
-        let r0 = bottom_root(&mut h, op1024.idx, &op1024.digest, op1024.l0.sig()).unwrap();
+        let r0 = bottom_root(&mut h, &seed(&f), op1024.idx, &op1024.digest, op1024.l0.sig()).unwrap();
         assert_eq!(r0, bottom1, "bottom root of subtree 1 equals bottomRoot1");
         // ...registers it with the top layer, then executes on the cached path.
-        cache_subtree(&root, &mut caches, 1, l1, bottom1).expect("cache fill for subtree 1");
+        cache_subtree(&seed(&f), &root, &mut caches, 1, l1, bottom1).expect("cache fill for subtree 1");
         assert_eq!(caches.root(1), bottom1);
         let r0 = execute(&mut state, &caches, op1024.idx, &op1024.digest, &op1024.l0).expect("execute at leaf 1024");
         assert_eq!(r0, bottom1);
@@ -772,7 +802,7 @@ mod tests {
         let root = b24(&f["root"]);
         let (mut state, mut caches, bottom0) = after_first_op(&f);
         let op0 = Op::from_json(&f["ops"][0]);
-        cache_subtree(&root, &mut caches, 0, op0.l1.as_ref().unwrap(), bottom0).expect("idempotent");
+        cache_subtree(&seed(&f), &root, &mut caches, 0, op0.l1.as_ref().unwrap(), bottom0).expect("idempotent");
         assert_eq!(caches.root(0), bottom0);
 
         let op1 = Op::from_json(&f["ops"][1]);
@@ -783,7 +813,7 @@ mod tests {
         // pass the top layer anyway).
         let mut other = bottom0;
         other[0] ^= 1;
-        match cache_subtree(&root, &mut caches, 0, op0.l1.as_ref().unwrap(), other) {
+        match cache_subtree(&seed(&f), &root, &mut caches, 0, op0.l1.as_ref().unwrap(), other) {
             Err(e) => assert_eq!(err_code(e), err_code(AegisError::BadTopRoot)),
             Ok(()) => panic!("wrong root registered"),
         }

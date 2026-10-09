@@ -44,6 +44,13 @@ abstract contract AegisCCHSBase {
     uint64  public epoch;
     /// @notice Next unused recovery leaf in [0, 256).
     uint64  public recNonce;
+    /// @notice Public seed of the current key tree, carried in the last 16 bytes
+    ///         of every ADRS. It makes each hash call of this tree a different
+    ///         function from the same position in any other tree (another
+    ///         account, chain or epoch), which the multi-target security
+    ///         argument needs (spec §2.2, §5.5). Packed with `epoch` and
+    ///         `recNonce` in one slot, so reading it costs nothing extra.
+    bytes16 public pkSeed;
 
     /// @dev key = (epoch << 64) | bottomTreeIdx
     mapping(uint256 => bytes32) public cachedRoot;
@@ -62,7 +69,7 @@ abstract contract AegisCCHSBase {
     // --------------------------------------------------------------- events
     event Executed(uint64 indexed idx, address indexed target, uint256 value);
     event SubtreeCached(uint64 indexed epoch, uint64 indexed treeIdx, bytes32 subtreeRoot);
-    event Recovered(uint64 indexed newEpoch, bytes32 newRoot, bytes32 newRecRoot);
+    event Recovered(uint64 indexed newEpoch, bytes32 newRoot, bytes32 newRecRoot, bytes16 newSeed);
 
     // --------------------------------------------------------------- errors
     error Exhausted();
@@ -78,11 +85,12 @@ abstract contract AegisCCHSBase {
     // --------------------------------------------------------------- init
     /// @dev Called by the constructor of the concrete contract or by a factory
     ///      using a minimal-proxy pattern. Storage is zero before init.
-    function _init(bytes32 _root, bytes32 _recRoot) internal {
+    function _init(bytes32 _root, bytes32 _recRoot, bytes16 _seed) internal {
         if (root != bytes32(0)) revert AlreadyInitialized();
         if (_root == bytes32(0) || _recRoot == bytes32(0)) revert ZeroRoot();
         root    = _root;
         recRoot = _recRoot;
+        pkSeed  = _seed;
     }
 
     receive() external payable {}
@@ -117,8 +125,10 @@ abstract contract AegisCCHSBase {
     function _hash(bytes memory data) internal view virtual returns (bytes32);
 
     /// @dev From a WOTS+ signature on `m`, complete every chain to its end and
-    ///      compress the 67 chain ends into the leaf hash. Hot path.
+    ///      compress the 67 chain ends into the leaf hash. Hot path. `seed` is
+    ///      the tree's public seed as the low 128 bits of a word.
     function _wotsLeaf(
+        uint256 seed,
         uint8 layer,
         uint64 treeIdx,
         uint32 leafIdx,
@@ -217,12 +227,14 @@ abstract contract AegisCCHSBase {
 
     // ============================================================ recovery
 
-    /// @notice Rotate `root` and `recRoot`, authorized by the recovery tree.
-    ///         Bumps `epoch`, which opens fresh lanes (every `nextIdx` back to
-    ///         the start of its lane, every nonce 0) and logically clears the cache.
+    /// @notice Rotate the public key (`root`, `recRoot`, `pkSeed`), authorized
+    ///         by the recovery tree of the current epoch. Bumps `epoch`, which
+    ///         opens fresh lanes (every `nextIdx` back to the start of its lane,
+    ///         every nonce 0) and logically clears the cache.
     function recover(
         bytes32 newRoot,
         bytes32 newRecRoot,
+        bytes16 newSeed,
         bytes32[67] calldata wots,
         bytes32[8]  calldata auth
     ) external {
@@ -237,26 +249,29 @@ abstract contract AegisCCHSBase {
                 address(this),
                 rn,
                 newRoot,
-                newRecRoot
+                newRecRoot,
+                newSeed
             )
         );
 
-        // layer id 0xFF marks the recovery tree in ADRS.
-        bytes32 r = _wotsLeaf(0xFF, 0, uint32(rn), m, wots);
+        // layer id 0xFF marks the recovery tree in ADRS; the tree was built with the current seed.
+        uint256 seed = uint256(uint128(pkSeed));
+        bytes32 r = _wotsLeaf(seed, 0xFF, 0, uint32(rn), m, wots);
         uint32 pos = uint32(rn);
         for (uint256 k = 0; k < REC_H; ++k) {
-            r = _node(_adrs(0xFF, 0, 0x02, uint32(pos >> 1), uint8(k), 0), r, auth[k], pos & 1);
+            r = _node(_adrs(seed, 0xFF, 0, 0x02, uint32(pos >> 1), uint8(k), 0), r, auth[k], pos & 1);
             pos >>= 1;
         }
         if (r != recRoot) revert BadRecovery();
 
         root    = newRoot;
         recRoot = newRecRoot;
+        pkSeed  = newSeed;
         unchecked {
             epoch    += 1;
             recNonce  = rn + 1;
         }
-        emit Recovered(epoch, newRoot, newRecRoot);
+        emit Recovered(epoch, newRoot, newRecRoot, newSeed);
     }
 
     // ============================================================ internals
@@ -299,10 +314,11 @@ abstract contract AegisCCHSBase {
         bytes32 m,
         LayerSig calldata s
     ) internal view returns (bytes32 r) {
-        r = _wotsLeaf(layer, treeIdx, leafIdx, m, s.wots);
+        uint256 seed = uint256(uint128(pkSeed));
+        r = _wotsLeaf(seed, layer, treeIdx, leafIdx, m, s.wots);
         uint32 pos = leafIdx;
         for (uint256 k = 0; k < H; ++k) {
-            r = _node(_adrs(layer, treeIdx, 0x02, uint32(pos >> 1), uint8(k), 0), r, s.auth[k], pos & 1);
+            r = _node(_adrs(seed, layer, treeIdx, 0x02, uint32(pos >> 1), uint8(k), 0), r, s.auth[k], pos & 1);
             pos >>= 1;
         }
     }
@@ -324,8 +340,10 @@ abstract contract AegisCCHSBase {
         d[66] = uint8(csum & 0x0f);
     }
 
-    /// @dev ADRS = layer(1) ‖ treeIdx(8) ‖ type(1) ‖ leafIdx(4) ‖ chainIdx(1) ‖ step(1) ‖ pad(16)
+    /// @dev ADRS = layer(1) ‖ treeIdx(8) ‖ type(1) ‖ leafIdx(4) ‖ chainIdx(1) ‖ step(1) ‖ pkSeed(16).
+    ///      `seed` is the public seed in the low 128 bits of a word.
     function _adrs(
+        uint256 seed,
         uint8 layer,
         uint64 treeIdx,
         uint8 typ,
@@ -339,7 +357,8 @@ abstract contract AegisCCHSBase {
             (uint256(typ)      << 176) |
             (uint256(leafIdx)  << 144) |
             (uint256(chainIdx) << 136) |
-            (uint256(step)     << 128)
+            (uint256(step)     << 128) |
+            seed
         );
     }
 

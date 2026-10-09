@@ -65,11 +65,11 @@ export const FACTORY_INIT_CODE = artifacts.factory.initCode as Hex;
 /** Calldata that publishes the factory through the proxy. Anyone may send it; the result is the same address. */
 export const FACTORY_PUBLISH_DATA: Hex = concatHex([FACTORY_SALT, FACTORY_INIT_CODE]);
 
-/** Mirrors AegisCCHSFactory.predict; no RPC needed. */
-export function predictAccount(root: Hex, recRoot: Hex, variant: Variant): Address {
+/** Mirrors AegisCCHSFactory.predict; no RPC needed. `seed` is the 16-byte public seed (`bytes16`). */
+export function predictAccount(root: Hex, recRoot: Hex, seed: Hex, variant: Variant): Address {
   const creation = (variant === 'S' ? artifacts.account.S.creationCode : artifacts.account.K.creationCode) as Hex;
-  const initCode = concatHex([creation, encodeAbiParameters([{ type: 'bytes32' }, { type: 'bytes32' }], [root, recRoot])]);
-  const salt = keccak256(concatHex([root, recRoot, variant === 'S' ? '0x01' : '0x00']));
+  const initCode = concatHex([creation, encodeAbiParameters([{ type: 'bytes32' }, { type: 'bytes32' }, { type: 'bytes16' }], [root, recRoot, seed])]);
+  const salt = keccak256(concatHex([root, recRoot, seed, variant === 'S' ? '0x01' : '0x00']));
   return getContractAddress({ opcode: 'CREATE2', from: FACTORY_ADDRESS, salt, bytecode: initCode });
 }
 
@@ -187,6 +187,8 @@ export interface ChainIdentity {
   key: CchsKey;
   root: Hex;
   recRoot: Hex;
+  /** 16-byte public seed of the epoch-0 tree (part of the public key; constructor argument). */
+  seed: Hex;
   address: Address;
   /** Trees built so far for this chain's epoch-0 key, as used by `sign`. */
   trees: Map<string, Tree>;
@@ -208,6 +210,6 @@ export async function deriveChainIdentity(master: CchsKey, chainId: number, pool
   const trees = new Map<string, Tree>();
   const t0 = performance.now();
   const pub = await pool.keygen(key, 'K', trees, { firstSubtree: false });
-  const root = toHex(pub.root) as Hex, recRoot = toHex(pub.recRoot) as Hex;
-  return { chainId, key, root, recRoot, address: predictAccount(root, recRoot, 'K'), trees, tookMs: performance.now() - t0 };
+  const root = toHex(pub.root) as Hex, recRoot = toHex(pub.recRoot) as Hex, seed = toHex(pub.seed) as Hex;
+  return { chainId, key, root, recRoot, seed, address: predictAccount(root, recRoot, seed, 'K'), trees, tookMs: performance.now() - t0 };
 }

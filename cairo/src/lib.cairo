@@ -84,8 +84,9 @@ pub mod cchs {
 
     // ------------------------------------------------------------------ ADRS
 
-    /// ADRS = layer(1) ‖ treeIdx(8) ‖ type(1) ‖ leafIdx(4) ‖ chainIdx(1) ‖ step(1) ‖ pad(16).
-    /// Returns the first four big-endian words; words 4..7 are always zero.
+    /// ADRS = layer(1) ‖ treeIdx(8) ‖ type(1) ‖ leafIdx(4) ‖ chainIdx(1) ‖ step(1) ‖ pkSeed(16).
+    /// Returns the first four big-endian words; words 4..7 are the public
+    /// seed of the key tree (`seed_words`).
     pub fn adrs_words(
         layer: u32, tree_idx: u64, typ: u32, leaf_idx: u32, chain_idx: u32, step: u32,
     ) -> (u32, u32, u32, u32) {
@@ -102,6 +103,22 @@ pub mod cchs {
         // bytes 12..15: leafIdx[2..4] ‖ chainIdx ‖ step
         let w3: u32 = (leaf_idx % 0x10000) * 0x10000 + chain_idx * 0x100 + step;
         (w0, w1, w2, w3)
+    }
+
+    /// The 16-byte public seed (big-endian numeric value) as ADRS words 4..7.
+    pub fn seed_words(seed: u128) -> Array<u32> {
+        let mut out: Array<u32> = array![];
+        append_u128_words(ref out, seed);
+        out
+    }
+
+    /// First four ADRS words followed by the seed words.
+    fn adrs_full(a0: u32, a1: u32, a2: u32, a3: u32, seed: Span<u32>) -> Array<u32> {
+        let mut out: Array<u32> = array![a0, a1, a2, a3];
+        for w in seed {
+            out.append(*w);
+        };
+        out
     }
 
     // ---------------------------------------------------------------- digits
@@ -135,8 +152,8 @@ pub mod cchs {
     // ---------------------------------------------------------------- hashing
 
     /// F(ADRS, x) = sha256(ADRS ‖ x), 64-byte input.
-    fn chain_step(a0: u32, a1: u32, a2: u32, a3: u32, x: Span<u32>) -> [u32; 8] {
-        let mut input: Array<u32> = array![a0, a1, a2, a3, 0, 0, 0, 0];
+    fn chain_step(a0: u32, a1: u32, a2: u32, a3: u32, seed: Span<u32>, x: Span<u32>) -> [u32; 8] {
+        let mut input: Array<u32> = adrs_full(a0, a1, a2, a3, seed);
         for w in x {
             input.append(*w);
         };
@@ -144,8 +161,10 @@ pub mod cchs {
     }
 
     /// T_node(ADRS, l, r) = sha256(ADRS ‖ l ‖ r), 96-byte input.
-    fn node_hash(a0: u32, a1: u32, a2: u32, a3: u32, left: Span<u32>, right: Span<u32>) -> [u32; 8] {
-        let mut input: Array<u32> = array![a0, a1, a2, a3, 0, 0, 0, 0];
+    fn node_hash(
+        a0: u32, a1: u32, a2: u32, a3: u32, seed: Span<u32>, left: Span<u32>, right: Span<u32>,
+    ) -> [u32; 8] {
+        let mut input: Array<u32> = adrs_full(a0, a1, a2, a3, seed);
         for w in left {
             input.append(*w);
         };
@@ -158,11 +177,13 @@ pub mod cchs {
     /// From a WOTS+ signature on `m`, complete every chain to its end and
     /// compress the 67 chain ends into the leaf:
     /// leaf = sha256(ADRS_leaf ‖ pk_0 ‖ … ‖ pk_66), 2176-byte input.
-    pub fn wots_leaf(layer: u32, tree_idx: u64, leaf_idx: u32, m: u256, wots: Span<u256>) -> [u32; 8] {
+    pub fn wots_leaf(
+        seed: Span<u32>, layer: u32, tree_idx: u64, leaf_idx: u32, m: u256, wots: Span<u256>,
+    ) -> [u32; 8] {
         assert(wots.len() == LEN, 'CCHS_WOTS_LEN');
         let d = digits(m);
         let (la0, la1, la2, la3) = adrs_words(layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0);
-        let mut buf: Array<u32> = array![la0, la1, la2, la3, 0, 0, 0, 0];
+        let mut buf: Array<u32> = adrs_full(la0, la1, la2, la3, seed);
         let mut c: u32 = 0;
         while c < LEN {
             let start_words = u256_to_words(*wots.at(c));
@@ -170,7 +191,7 @@ pub mod cchs {
             let mut s: u32 = *d.at(c);
             while s < W - 1 {
                 let (a0, a1, a2, a3) = adrs_words(layer, tree_idx, TYPE_CHAIN, leaf_idx, c, s);
-                let h = chain_step(a0, a1, a2, a3, x);
+                let h = chain_step(a0, a1, a2, a3, seed, x);
                 x = h.span();
                 s += 1;
             };
@@ -183,8 +204,10 @@ pub mod cchs {
     }
 
     /// Recompute the root of tree (`layer`, `tree_idx`) of height `height`
-    /// from a WOTS+ signature on `m` at `leaf_idx` and its authentication path.
+    /// from a WOTS+ signature on `m` at `leaf_idx` and its authentication path,
+    /// hashing under the public seed `seed`.
     pub fn verify_layer(
+        seed: u128,
         layer: u32,
         tree_idx: u64,
         leaf_idx: u32,
@@ -194,7 +217,9 @@ pub mod cchs {
         auth: Span<u256>,
     ) -> u256 {
         assert(auth.len() == height, 'CCHS_AUTH_LEN');
-        let leaf = wots_leaf(layer, tree_idx, leaf_idx, m, wots);
+        let seed_arr = seed_words(seed);
+        let sw: Span<u32> = seed_arr.span();
+        let leaf = wots_leaf(sw, layer, tree_idx, leaf_idx, m, wots);
         let mut node: Span<u32> = leaf.span();
         let mut pos: u32 = leaf_idx;
         let mut k: u32 = 0;
@@ -203,9 +228,9 @@ pub mod cchs {
             let sib_words = u256_to_words(*auth.at(k));
             let sib: Span<u32> = sib_words.span();
             let h = if pos % 2 == 0 {
-                node_hash(a0, a1, a2, a3, node, sib)
+                node_hash(a0, a1, a2, a3, sw, node, sib)
             } else {
-                node_hash(a0, a1, a2, a3, sib, node)
+                node_hash(a0, a1, a2, a3, sw, sib, node)
             };
             node = h.span();
             pos = pos / 2;
@@ -236,9 +261,15 @@ pub trait IAegisCCHS<TState> {
         l1_auth: Array<u256>,
     ) -> Array<Span<felt252>>;
 
-    /// Rotate `root` and `rec_root`, authorized by the recovery tree.
+    /// Rotate the public key (`root`, `rec_root`, `seed`), authorized by the
+    /// recovery tree under the current seed.
     fn recover(
-        ref self: TState, new_root: u256, new_rec_root: u256, wots: Array<u256>, auth: Array<u256>,
+        ref self: TState,
+        new_root: u256,
+        new_rec_root: u256,
+        new_seed: u128,
+        wots: Array<u256>,
+        auth: Array<u256>,
     );
 
     /// Digest the client must sign for an `execute` of `calls` at leaf `idx`
@@ -247,7 +278,9 @@ pub trait IAegisCCHS<TState> {
     /// Digest for an `execute` at `next_idx`.
     fn next_digest(self: @TState, calls: Array<Call>) -> u256;
     /// Digest the client must sign for the next `recover`.
-    fn next_recovery_digest(self: @TState, new_root: u256, new_rec_root: u256) -> u256;
+    fn next_recovery_digest(
+        self: @TState, new_root: u256, new_rec_root: u256, new_seed: u128,
+    ) -> u256;
     /// Whether an `execute` at leaf `idx` must include the top-layer proof.
     fn needs_top_layer_at(self: @TState, idx: u64) -> bool;
     /// Whether an `execute` at `next_idx` must include the top-layer proof.
@@ -255,6 +288,8 @@ pub trait IAegisCCHS<TState> {
 
     fn get_root(self: @TState) -> u256;
     fn get_rec_root(self: @TState) -> u256;
+    /// 16-byte public seed of the current key tree (big-endian numeric value).
+    fn get_seed(self: @TState) -> u128;
     fn get_epoch(self: @TState) -> u64;
     fn get_next_idx(self: @TState) -> u64;
     fn get_nonce(self: @TState) -> u64;
@@ -283,6 +318,8 @@ pub mod AegisCCHS {
         pub(crate) root: u256,
         /// Recovery tree root (single layer, height 8).
         pub(crate) rec_root: u256,
+        /// Public seed of the current key tree (last 16 bytes of every ADRS).
+        pub(crate) seed: u128,
         /// Increments on every recovery; namespaces `cached_root`.
         pub(crate) epoch: u64,
         /// Next unused leaf index in [0, 2^20). Advances to `idx + 1` on
@@ -326,6 +363,7 @@ pub mod AegisCCHS {
         new_epoch: u64,
         new_root: u256,
         new_rec_root: u256,
+        new_seed: u128,
     }
 
     pub mod errors {
@@ -339,10 +377,11 @@ pub mod AegisCCHS {
     }
 
     #[constructor]
-    fn constructor(ref self: ContractState, root: u256, rec_root: u256) {
+    fn constructor(ref self: ContractState, root: u256, rec_root: u256, seed: u128) {
         assert(root != 0 && rec_root != 0, errors::ZERO_ROOT);
         self.root.write(root);
         self.rec_root.write(rec_root);
+        self.seed.write(seed);
     }
 
     #[abi(embed_v0)]
@@ -381,6 +420,7 @@ pub mod AegisCCHS {
             ref self: ContractState,
             new_root: u256,
             new_rec_root: u256,
+            new_seed: u128,
             wots: Array<u256>,
             auth: Array<u256>,
         ) {
@@ -388,20 +428,30 @@ pub mod AegisCCHS {
             let rn = self.rec_nonce.read();
             assert(rn < cchs::REC_CAPACITY, errors::EXHAUSTED);
 
-            let m = self.recovery_digest(rn, new_root, new_rec_root);
+            let m = self.recovery_digest(rn, new_root, new_rec_root, new_seed);
             let leaf_idx: u32 = rn.try_into().unwrap();
+            // The recovery tree belongs to the current key: verified under the
+            // current seed; the new seed only takes effect afterwards.
             let r = cchs::verify_layer(
-                cchs::LAYER_RECOVERY, 0, leaf_idx, cchs::REC_H, m, wots.span(), auth.span(),
+                self.seed.read(),
+                cchs::LAYER_RECOVERY,
+                0,
+                leaf_idx,
+                cchs::REC_H,
+                m,
+                wots.span(),
+                auth.span(),
             );
             assert(r == self.rec_root.read(), errors::BAD_RECOVERY);
 
             let new_epoch = self.epoch.read() + 1;
             self.root.write(new_root);
             self.rec_root.write(new_rec_root);
+            self.seed.write(new_seed);
             self.next_idx.write(0);
             self.epoch.write(new_epoch);
             self.rec_nonce.write(rn + 1);
-            self.emit(Recovered { new_epoch, new_root, new_rec_root });
+            self.emit(Recovered { new_epoch, new_root, new_rec_root, new_seed });
         }
 
         fn digest_at(self: @ContractState, idx: u64, calls: Array<Call>) -> u256 {
@@ -412,8 +462,10 @@ pub mod AegisCCHS {
             self.execute_digest(self.next_idx.read(), calls.span())
         }
 
-        fn next_recovery_digest(self: @ContractState, new_root: u256, new_rec_root: u256) -> u256 {
-            self.recovery_digest(self.rec_nonce.read(), new_root, new_rec_root)
+        fn next_recovery_digest(
+            self: @ContractState, new_root: u256, new_rec_root: u256, new_seed: u128,
+        ) -> u256 {
+            self.recovery_digest(self.rec_nonce.read(), new_root, new_rec_root, new_seed)
         }
 
         fn needs_top_layer_at(self: @ContractState, idx: u64) -> bool {
@@ -430,6 +482,9 @@ pub mod AegisCCHS {
         }
         fn get_rec_root(self: @ContractState) -> u256 {
             self.rec_root.read()
+        }
+        fn get_seed(self: @ContractState) -> u128 {
+            self.seed.read()
         }
         fn get_epoch(self: @ContractState) -> u64 {
             self.epoch.read()
@@ -480,7 +535,8 @@ pub mod AegisCCHS {
         ) {
             let tree_idx: u64 = idx / cchs::LEAVES;
             let leaf_idx: u32 = (idx % cchs::LEAVES).try_into().unwrap();
-            let r0 = cchs::verify_layer(0, tree_idx, leaf_idx, cchs::H, m, l0_wots, l0_auth);
+            let seed = self.seed.read();
+            let r0 = cchs::verify_layer(seed, 0, tree_idx, leaf_idx, cchs::H, m, l0_wots, l0_auth);
 
             let epoch = self.epoch.read();
             let cached = self.cached_root.read((epoch, tree_idx));
@@ -491,7 +547,7 @@ pub mod AegisCCHS {
             assert(l1_wots.len() == cchs::LEN, errors::MISSING_TOP_LAYER);
             // Top layer: tree 0, leaf = tree_idx, message = r0.
             let top_leaf: u32 = tree_idx.try_into().unwrap();
-            let r1 = cchs::verify_layer(1, 0, top_leaf, cchs::H, r0, l1_wots, l1_auth);
+            let r1 = cchs::verify_layer(seed, 1, 0, top_leaf, cchs::H, r0, l1_wots, l1_auth);
             assert(r1 == self.root.read(), errors::BAD_TOP_ROOT);
             self.cached_root.write((epoch, tree_idx), r0);
             self.emit(SubtreeCached { epoch, tree_idx, subtree_root: r0 });
@@ -524,9 +580,10 @@ pub mod AegisCCHS {
             cchs::words_to_u256(compute_sha256_byte_array(@ba).span())
         }
 
-        /// M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "starknet" ‖ this(32) ‖ recNonce(8) ‖ newRoot(32) ‖ newRecRoot(32))
+        /// M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "starknet" ‖ this(32) ‖ recNonce(8)
+        ///                ‖ newRoot(32) ‖ newRecRoot(32) ‖ newSeed(16))
         fn recovery_digest(
-            self: @ContractState, rec_nonce: u64, new_root: u256, new_rec_root: u256,
+            self: @ContractState, rec_nonce: u64, new_root: u256, new_rec_root: u256, new_seed: u128,
         ) -> u256 {
             let mut ba: ByteArray = "";
             ba.append_word('AEGIS_CCHS_RECOVER_V1', 21);
@@ -536,6 +593,7 @@ pub mod AegisCCHS {
             ba.append_word(rec_nonce.into(), 8);
             append_u256_be(ref ba, new_root);
             append_u256_be(ref ba, new_rec_root);
+            ba.append_word(new_seed.into(), 16);
             cchs::words_to_u256(compute_sha256_byte_array(@ba).span())
         }
     }
@@ -596,6 +654,12 @@ mod tests {
         assert(w1 == 0x04050607, 'w1');
         assert(w2 == 0x08020a0b, 'w2');
         assert(w3 == 0x0c0d110e, 'w3');
+        // Seed words: 16 bytes big-endian as ADRS words 4..7.
+        let s = cchs::seed_words(0x0102030405060708090a0b0c0d0e0f10_u128);
+        assert(*s.at(0) == 0x01020304, 's0');
+        assert(*s.at(1) == 0x05060708, 's1');
+        assert(*s.at(2) == 0x090a0b0c, 's2');
+        assert(*s.at(3) == 0x0d0e0f10, 's3');
     }
 
     #[test]
@@ -613,16 +677,26 @@ mod tests {
     #[test]
     fn verify_layer_bottom_fixture() {
         let r0 = cchs::verify_layer(
-            0, 0, 1, cchs::H, v::OP1_DIGEST, v::op1_l0_wots().span(), v::op1_l0_auth().span(),
+            v::SEED, 0, 0, 1, cchs::H, v::OP1_DIGEST, v::op1_l0_wots().span(), v::op1_l0_auth().span(),
         );
         assert(r0 == v::BOTTOM_ROOT_0, 'bottom root mismatch');
+    }
+
+    /// The same signature hashed under a different public seed reaches a
+    /// different root: the seed separates every tree's hash functions.
+    #[test]
+    fn verify_layer_rejects_wrong_seed() {
+        let r0 = cchs::verify_layer(
+            v::SEED + 1, 0, 0, 1, cchs::H, v::OP1_DIGEST, v::op1_l0_wots().span(), v::op1_l0_auth().span(),
+        );
+        assert(r0 != v::BOTTOM_ROOT_0, 'seed ignored');
     }
 
     /// ops[0] top layer: layer 1, tree 0, leaf 0, message = bottomRoot0 -> root.
     #[test]
     fn verify_layer_top_fixture() {
         let r1 = cchs::verify_layer(
-            1, 0, 0, cchs::H, v::BOTTOM_ROOT_0, v::op0_l1_wots().span(), v::op0_l1_auth().span(),
+            v::SEED, 1, 0, 0, cchs::H, v::BOTTOM_ROOT_0, v::op0_l1_wots().span(), v::op0_l1_auth().span(),
         );
         assert(r1 == v::ROOT, 'top root mismatch');
     }
@@ -631,6 +705,7 @@ mod tests {
     #[test]
     fn verify_layer_recovery_fixture() {
         let r = cchs::verify_layer(
+            v::SEED,
             cchs::LAYER_RECOVERY,
             0,
             0,
@@ -652,7 +727,7 @@ mod tests {
             tampered.append(*x);
         };
         let r0 = cchs::verify_layer(
-            0, 0, 1, cchs::H, v::OP1_DIGEST, tampered.span(), v::op1_l0_auth().span(),
+            v::SEED, 0, 0, 1, cchs::H, v::OP1_DIGEST, tampered.span(), v::op1_l0_auth().span(),
         );
         assert(r0 != v::BOTTOM_ROOT_0, 'tamper accepted');
     }
@@ -679,6 +754,7 @@ mod tests {
         let mut s = AegisCCHS::contract_state_for_testing();
         s.root.write(v::ROOT);
         s.rec_root.write(v::REC_ROOT);
+        s.seed.write(v::SEED);
         s.cached_root.write((0, 0), v::BOTTOM_ROOT_0);
         s.next_idx.write(1);
         s.nonce.write(1);

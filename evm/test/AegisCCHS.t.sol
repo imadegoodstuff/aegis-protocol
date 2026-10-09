@@ -23,6 +23,7 @@ abstract contract CCHSVectorTest is Test {
     // storage slots in AegisCCHS
     uint256 constant SLOT_ROOT    = 0;
     uint256 constant SLOT_RECROOT = 1;
+    uint256 constant SLOT_META    = 2;   // epoch(8) | recNonce(8) | pkSeed(16), low to high
 
     function _fixture() internal pure virtual returns (string memory);
     function _runtime() internal pure virtual returns (bytes memory);
@@ -37,12 +38,20 @@ abstract contract CCHSVectorTest is Test {
         vm.etch(acct, _runtime());
         vm.store(acct, bytes32(SLOT_ROOT),    vm.parseJsonBytes32(json, ".root"));
         vm.store(acct, bytes32(SLOT_RECROOT), vm.parseJsonBytes32(json, ".recRoot"));
+        vm.store(acct, bytes32(SLOT_META),    bytes32(uint256(uint128(_seed())) << 128));
         a = AegisCCHSBase(payable(acct));
         vm.deal(acct, 100 ether);
 
         assertEq(a.root(),    vm.parseJsonBytes32(json, ".root"));
         assertEq(a.recRoot(), vm.parseJsonBytes32(json, ".recRoot"));
+        assertEq(bytes32(a.pkSeed()), bytes32(_seed()));
+        assertEq(a.epoch(), 0);
+        assertEq(a.recNonce(), 0);
         assertEq(a.nextIdx(0), 0);
+    }
+
+    function _seed() internal view returns (bytes16) {
+        return bytes16(vm.parseJsonBytes(json, ".seed"));
     }
 
     // ------------------------------------------------------------ helpers
@@ -308,9 +317,10 @@ abstract contract CCHSVectorTest is Test {
 
     // --------------------------------------------------------- recovery
 
-    function _recovery() internal view returns (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) {
+    function _recovery() internal view returns (bytes32 newRoot, bytes32 newRec, bytes16 newSeed, bytes32[67] memory w, bytes32[8] memory p) {
         newRoot = vm.parseJsonBytes32(json, ".recovery.newRoot");
         newRec  = vm.parseJsonBytes32(json, ".recovery.newRecRoot");
+        newSeed = bytes16(vm.parseJsonBytes(json, ".recovery.newSeed"));
         bytes32[] memory ww = vm.parseJsonBytes32Array(json, ".recovery.wots");
         bytes32[] memory pp = vm.parseJsonBytes32Array(json, ".recovery.auth");
         for (uint256 i; i < 67; ++i) w[i] = ww[i];
@@ -319,10 +329,11 @@ abstract contract CCHSVectorTest is Test {
 
     function test_recoverRotatesRootsAndBumpsEpoch() public {
         _exec(0);
-        (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
-        a.recover(newRoot, newRec, w, p);
+        (bytes32 newRoot, bytes32 newRec, bytes16 newSeed, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
+        a.recover(newRoot, newRec, newSeed, w, p);
         assertEq(a.root(), newRoot);
         assertEq(a.recRoot(), newRec);
+        assertEq(bytes32(a.pkSeed()), bytes32(newSeed));
         assertEq(a.epoch(), 1);
         assertEq(a.nextIdx(0), 0);
         assertEq(a.nonce(0), 0);
@@ -335,32 +346,48 @@ abstract contract CCHSVectorTest is Test {
         (uint64 i, AegisCCHSBase.LayerSig memory l0, AegisCCHSBase.LayerSig memory l1) = _laneOp();
         a.executeFirst(target, value, "", i, l0, l1);
         _exec(0);
-        (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
-        a.recover(newRoot, newRec, w, p);
+        (bytes32 newRoot, bytes32 newRec, bytes16 newSeed, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
+        a.recover(newRoot, newRec, newSeed, w, p);
         assertEq(a.nextIdx(1), i);
         assertEq(a.nonce(1), 0);
         assertEq(a.nextIdx(0), 0);
     }
 
     function test_revert_oldKeyAfterRecovery() public {
-        (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
-        a.recover(newRoot, newRec, w, p);
+        (bytes32 newRoot, bytes32 newRec, bytes16 newSeed, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
+        a.recover(newRoot, newRec, newSeed, w, p);
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
         vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
         a.executeFirst(target, value, "", 0, l0, l1);
     }
 
     function test_revert_recoverWrongRoots() public {
-        (, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
+        (, bytes32 newRec, bytes16 newSeed, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
         vm.expectRevert(AegisCCHSBase.BadRecovery.selector);
-        a.recover(keccak256("other"), newRec, w, p);
+        a.recover(keccak256("other"), newRec, newSeed, w, p);
+    }
+
+    /// The new seed is bound into the recovery message: swapping it invalidates the signature.
+    function test_revert_recoverWrongSeed() public {
+        (bytes32 newRoot, bytes32 newRec, , bytes32[67] memory w, bytes32[8] memory p) = _recovery();
+        vm.expectRevert(AegisCCHSBase.BadRecovery.selector);
+        a.recover(newRoot, newRec, bytes16(keccak256("other seed")), w, p);
+    }
+
+    /// Every hash is tweaked with the stored seed: the same signature under
+    /// another seed recomputes to another root and is rejected.
+    function test_revert_signatureUnderDifferentSeed() public {
+        vm.store(acct, bytes32(SLOT_META), bytes32(uint256(uint128(bytes16(keccak256("other seed")))) << 128));
+        (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
+        vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
+        a.executeFirst(target, value, "", 0, l0, l1);
     }
 
     function test_revert_recoverReplay() public {
-        (bytes32 newRoot, bytes32 newRec, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
-        a.recover(newRoot, newRec, w, p);
+        (bytes32 newRoot, bytes32 newRec, bytes16 newSeed, bytes32[67] memory w, bytes32[8] memory p) = _recovery();
+        a.recover(newRoot, newRec, newSeed, w, p);
         vm.expectRevert(AegisCCHSBase.BadRecovery.selector);
-        a.recover(newRoot, newRec, w, p);
+        a.recover(newRoot, newRec, newSeed, w, p);
     }
 }
 
@@ -383,54 +410,66 @@ contract AegisCCHSFactoryTest is Test {
     AegisCCHSFactory f;
     bytes32 constant ROOT = keccak256("root");
     bytes32 constant REC  = keccak256("rec");
+    bytes16 constant SEED = bytes16(keccak256("seed"));
 
     function setUp() public { f = new AegisCCHSFactory(); }
 
     function test_predictMatchesDeploy_S() public {
-        address p = f.predict(ROOT, REC, true);
-        address d = f.deploy(ROOT, REC, true);
+        address p = f.predict(ROOT, REC, SEED, true);
+        address d = f.deploy(ROOT, REC, SEED, true);
         assertEq(d, p);
         assertEq(AegisCCHS(payable(d)).root(), ROOT);
         assertEq(AegisCCHS(payable(d)).recRoot(), REC);
+        assertEq(bytes32(AegisCCHS(payable(d)).pkSeed()), bytes32(SEED));
         assertEq(keccak256(bytes(AegisCCHS(payable(d)).VERSION())), keccak256("cchs-s-20/1.0.0"));
     }
 
     function test_predictMatchesDeploy_K() public {
-        address p = f.predict(ROOT, REC, false);
-        address d = f.deploy(ROOT, REC, false);
+        address p = f.predict(ROOT, REC, SEED, false);
+        address d = f.deploy(ROOT, REC, SEED, false);
         assertEq(d, p);
         assertEq(keccak256(bytes(AegisCCHSK(payable(d)).VERSION())), keccak256("cchs-k-20/1.0.0"));
     }
 
     function test_variantsGetDistinctAddresses() public view {
-        assertTrue(f.predict(ROOT, REC, true) != f.predict(ROOT, REC, false));
+        assertTrue(f.predict(ROOT, REC, SEED, true) != f.predict(ROOT, REC, SEED, false));
+    }
+
+    /// The seed is part of the public key: a different seed is a different account.
+    function test_seedIsPartOfTheAddress() public {
+        bytes16 other = bytes16(keccak256("seed2"));
+        assertTrue(f.predict(ROOT, REC, SEED, false) != f.predict(ROOT, REC, other, false));
+        address a1 = f.deploy(ROOT, REC, SEED, false);
+        address a2 = f.deploy(ROOT, REC, other, false);
+        assertTrue(a1 != a2);
+        assertEq(bytes32(AegisCCHSK(payable(a2)).pkSeed()), bytes32(other));
     }
 
     function test_deployIsIdempotent() public {
-        address a1 = f.deploy(ROOT, REC, false);
-        address a2 = f.deploy(ROOT, REC, false);
+        address a1 = f.deploy(ROOT, REC, SEED, false);
+        address a2 = f.deploy(ROOT, REC, SEED, false);
         assertEq(a1, a2);
     }
 
     function test_revert_zeroRoot() public {
         vm.expectRevert(AegisCCHSBase.ZeroRoot.selector);
-        f.deploy(bytes32(0), REC, false);
+        f.deploy(bytes32(0), REC, SEED, false);
     }
 
-    /// Same factory address + same (root, recRoot) => same account address on every chain.
+    /// Same factory address + same (root, recRoot, seed) => same account address on every chain.
     function test_addressIndependentOfChainId() public {
-        address p1 = f.predict(ROOT, REC, false);
+        address p1 = f.predict(ROOT, REC, SEED, false);
         vm.chainId(56);
-        address p2 = f.predict(ROOT, REC, false);
+        address p2 = f.predict(ROOT, REC, SEED, false);
         assertEq(p1, p2);
     }
 
     function test_deployForwardsValue() public {
         vm.deal(address(this), 3 ether);
-        address a = f.deploy{value: 1 ether}(ROOT, REC, false);
+        address a = f.deploy{value: 1 ether}(ROOT, REC, SEED, false);
         assertEq(a.balance, 1 ether);
         // funding an already-deployed account through the same call
-        f.deploy{value: 2 ether}(ROOT, REC, false);
+        f.deploy{value: 2 ether}(ROOT, REC, SEED, false);
         assertEq(a.balance, 3 ether);
         assertEq(address(f).balance, 0);
     }
@@ -442,7 +481,7 @@ contract AegisCCHSFactoryTest is Test {
         address[] memory toks = new address[](1);
         toks[0] = address(t);
         vm.deal(address(this), 1 ether);
-        address a = f.deployAndMove{value: 0.5 ether}(ROOT, REC, false, toks);
+        address a = f.deployAndMove{value: 0.5 ether}(ROOT, REC, SEED, false, toks);
         assertEq(t.balanceOf(a), 500);
         assertEq(t.balanceOf(address(this)), 0);
         assertEq(a.balance, 0.5 ether);
@@ -454,12 +493,12 @@ contract AegisCCHSFactoryTest is Test {
         address[] memory toks = new address[](1);
         toks[0] = address(t);
         vm.expectRevert(abi.encodeWithSelector(AegisCCHSFactory.TokenTransferFailed.selector, address(t)));
-        f.deployAndMove(ROOT, REC, false, toks);
+        f.deployAndMove(ROOT, REC, SEED, false, toks);
     }
 
     /// The account accepts ERC-721 and ERC-1155 safe transfers (any asset can be held).
     function test_accountAcceptsSafeTransfers() public {
-        address a = f.deploy(ROOT, REC, false);
+        address a = f.deploy(ROOT, REC, SEED, false);
         MockNft nft = new MockNft();
         nft.mint(address(this), 7);
         nft.safeTransferFrom(address(this), a, 7);

@@ -42,7 +42,7 @@ function LiveTicker() {
       <span className="dot" />
       <span className="k">set</span><span className="v">CCHS-K-20</span>
       <span className="sep">·</span>
-      <span className="k">gas</span><span className="v num">173 K</span>
+      <span className="k">gas</span><span className="v num">177 K</span>
       <span className="sep">·</span>
       <span className="v num">{clock}</span>
     </div>
@@ -176,7 +176,7 @@ export default function App() {
               <p className="hero-sub fade d2">
                 CCHS turns a smart contract's memory into part of the signature. The verifier checks
                 the upper tree layer once per subtree, caches the result on chain, and the next 1 023
-                signatures carry only the bottom layer: 2.5 KB, ~173 K gas end to end, no elliptic curves, no lattices,
+                signatures carry only the bottom layer: 2.5 KB, ~177 K gas end to end, no elliptic curves, no lattices,
                 no trusted setup. One mnemonic, an independent key tree and account on every EVM chain.
               </p>
               <div className="hero-ctas fade d3">
@@ -360,7 +360,7 @@ export default function App() {
             {[
               { h: "No owner, no upgrade",            p: "AegisCCHSBase has no setters, no proxy, no delegatecall, no selfdestruct. Storage is roots, counters and the cache." },
               { h: "Same bytecode on every chain",    p: "The factory is built with fixed compiler settings and published through the deterministic-deployment proxy. Compare runtime hashes across explorers." },
-              { h: "Address is a pure function",      p: "account = CREATE2(factory, keccak(root ‖ recRoot ‖ set), keccak(initCode ‖ roots)). The wallet computes it offline; the factory's predict() must agree." },
+              { h: "Address is a pure function",      p: "account = CREATE2(factory, keccak(root ‖ recRoot ‖ pkSeed ‖ set), keccak(initCode ‖ roots ‖ pkSeed)). The wallet computes it offline; the factory's predict() must agree." },
               { h: "Signatures are hash chains",      p: "execute() calls only keccak256 or the SHA-256 precompile. There is no ecrecover and no pairing anywhere in the account." },
               { h: "Test vectors are shared",         p: "evm/test/fixtures/cchs-*.json drive the Solidity tests and every other port. Regenerate them from the TypeScript client and diff." },
               { h: "Attacks are tests",               p: "Front-run, replay, tampered chain value, tampered path, cache poisoning, old key after recovery: each is a Foundry test that must revert." },

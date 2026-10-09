@@ -83,6 +83,13 @@ fn b24(v: &Value) -> Hash {
     out
 }
 
+fn seed16(v: &Value) -> [u8; 16] {
+    let bytes = hex_bytes(v.as_str().expect("hex string"));
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&bytes);
+    out
+}
+
 fn hashes(v: &Value) -> Vec<Hash> {
     v.as_array().expect("array").iter().map(b24).collect()
 }
@@ -103,15 +110,17 @@ type HmacSha256 = Hmac<Sha256>;
 
 struct SigningKey {
     prk: [u8; 32],
+    /// Public seed of the key tree (last 16 bytes of every ADRS).
+    seed: [u8; 16],
 }
 
 impl SigningKey {
-    fn from_master(master: &[u8]) -> Self {
+    fn from_master(master: &[u8], seed: [u8; 16]) -> Self {
         let mut mac = HmacSha256::new_from_slice(&[0u8; 32]).unwrap();
         mac.update(master);
         let mut prk = [0u8; 32];
         prk.copy_from_slice(&mac.finalize().into_bytes());
-        SigningKey { prk }
+        SigningKey { prk, seed }
     }
 
     fn sk(&self, layer: u8, tree_idx: u64, leaf_idx: u32, chain_idx: u8) -> Hash {
@@ -131,7 +140,7 @@ impl SigningKey {
     fn wots_sign(&self, layer: u8, tree_idx: u64, leaf_idx: u32, msg: &Hash) -> [Hash; LEN] {
         let d = digits(msg);
         let mut out = [[0u8; N]; LEN];
-        let mut a = adrs(layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
+        let mut a = adrs(&self.seed, layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
         for c in 0..LEN {
             a[14] = c as u8;
             let mut x = self.sk(layer, tree_idx, leaf_idx, c as u8);
@@ -176,6 +185,7 @@ fn push_layer(data: &mut Vec<u8>, wots: &[Hash], auth: &[Hash]) {
 struct State {
     root: Hash,
     rec_root: Hash,
+    pk_seed: [u8; 16],
     epoch: u64,
     next_idx: u64,
     nonce: u64,
@@ -183,14 +193,16 @@ struct State {
 }
 
 fn parse_state(data: &[u8]) -> State {
-    assert!(data.len() >= 8 + 106, "account too short: {}", data.len());
+    assert!(data.len() >= 8 + 122, "account too short: {}", data.len());
     let h = |o: usize| {
         let mut x = [0u8; N];
         x.copy_from_slice(&data[o..o + N]);
         x
     };
     let u = |o: usize| u64::from_le_bytes(data[o..o + 8].try_into().unwrap());
-    State { root: h(32), rec_root: h(56), epoch: u(80), next_idx: u(88), nonce: u(96), rec_nonce: u(104) }
+    let mut pk_seed = [0u8; 16];
+    pk_seed.copy_from_slice(&data[80..96]);
+    State { root: h(32), rec_root: h(56), pk_seed, epoch: u(96), next_idx: u(104), nonce: u(112), rec_nonce: u(120) }
 }
 
 // ------------------------------------------------------------- harness
@@ -288,7 +300,8 @@ async fn compute_units_per_instruction() {
     let payer = h.ctx.payer.pubkey();
 
     // ---- fixture values
-    let key = SigningKey::from_master(&hex_bytes(fx["master"].as_str().unwrap()));
+    let seed = seed16(&fx["seed"]);
+    let key = SigningKey::from_master(&hex_bytes(fx["master"].as_str().unwrap()), seed);
     assert_eq!(fx["skInfo"].as_str().unwrap(), "cchs/sk/c");
     let root = b24(&fx["root"]);
     let rec_root = b24(&fx["recRoot"]);
@@ -296,6 +309,7 @@ async fn compute_units_per_instruction() {
     let bottom1 = b24(&fx["bottomRoot1"]);
     let new_root = b24(&fx["recovery"]["newRoot"]);
     let new_rec_root = b24(&fx["recovery"]["newRecRoot"]);
+    let new_seed = seed16(&fx["recovery"]["newSeed"]);
 
     // ---- PDAs
     let (account, _) = Pubkey::find_program_address(&[ACCOUNT_SEED, &root], &program_id);
@@ -312,6 +326,7 @@ async fn compute_units_per_instruction() {
     let mut data = discriminator("create").to_vec();
     data.extend_from_slice(&root);
     data.extend_from_slice(&rec_root);
+    data.extend_from_slice(&seed);
     h.send(
         "create",
         None,
@@ -327,7 +342,7 @@ async fn compute_units_per_instruction() {
     )
     .await;
     let st = h.state(&account).await;
-    assert_eq!((st.root, st.rec_root, st.epoch, st.next_idx, st.nonce), (root, rec_root, 0, 0, 0));
+    assert_eq!((st.root, st.rec_root, st.pk_seed, st.epoch, st.next_idx, st.nonce), (root, rec_root, seed, 0, 0, 0));
 
     // Fund the vault so the executed inner instruction (a SOL transfer from
     // the vault to the payer) has something to move. Not part of the table.
@@ -349,7 +364,7 @@ async fn compute_units_per_instruction() {
         let auth = hashes(&l1["auth"]);
         assert_eq!((wots.len(), auth.len()), (LEN, H));
         let mut sh = SolSha256::default();
-        verify_top_layer(&mut sh, &root, tree_idx, &r0, LayerSig { wots: &wots_array(&wots), auth: &auth })
+        verify_top_layer(&mut sh, &seed, &root, tree_idx, &r0, LayerSig { wots: &wots_array(&wots), auth: &auth })
             .expect("fixture top layer reaches root");
         let mut data = discriminator("cache_subtree").to_vec();
         data.extend_from_slice(&tree_idx.to_le_bytes());
@@ -382,7 +397,7 @@ async fn compute_units_per_instruction() {
         let mut sh = SolSha256::default();
         let msg = execute_digest(&mut sh, &pk18(&account), nonce, idx, &pk18(&system_program::id()), &transfer_data);
         let wots = key.wots_sign(LAYER_BOTTOM, idx >> H, (idx & 1023) as u32, &msg);
-        let r0 = bottom_root(&mut sh, idx, &msg, LayerSig { wots: &wots, auth: &auth })
+        let r0 = bottom_root(&mut sh, &seed, idx, &msg, LayerSig { wots: &wots, auth: &auth })
             .expect("bottom layer");
         assert_eq!(r0, expect_root, "re-signed leaf {idx} reaches the fixture bottom root");
         let mut data = discriminator("execute").to_vec();
@@ -439,13 +454,14 @@ async fn compute_units_per_instruction() {
         let auth = hashes(&rec["auth"]);
         assert_eq!(auth.len(), REC_H);
         let mut sh = SolSha256::default();
-        let msg = recover_digest(&mut sh, &pk18(&account), 0, &new_root, &new_rec_root);
+        let msg = recover_digest(&mut sh, &pk18(&account), 0, &new_root, &new_rec_root, &new_seed);
         let wots = key.wots_sign(LAYER_RECOVERY, 0, 0, &msg);
-        let r = verify_layer(&mut sh, LAYER_RECOVERY, 0, 0, &msg, &wots, &auth, REC_H);
+        let r = verify_layer(&mut sh, &seed, LAYER_RECOVERY, 0, 0, &msg, &wots, &auth, REC_H);
         assert_eq!(r, rec_root, "re-signed recovery leaf reaches recRoot");
         let mut data = discriminator("recover").to_vec();
         data.extend_from_slice(&new_root);
         data.extend_from_slice(&new_rec_root);
+        data.extend_from_slice(&new_seed);
         push_layer(&mut data, &wots, &auth);
         let ix = Instruction {
             program_id,
@@ -456,8 +472,8 @@ async fn compute_units_per_instruction() {
     }
     let st = h.state(&account).await;
     assert_eq!(
-        (st.root, st.rec_root, st.epoch, st.next_idx, st.nonce, st.rec_nonce),
-        (new_root, new_rec_root, 1, 0, nonce, 1)
+        (st.root, st.rec_root, st.pk_seed, st.epoch, st.next_idx, st.nonce, st.rec_nonce),
+        (new_root, new_rec_root, new_seed, 1, 0, nonce, 1)
     );
 
     // ---- report

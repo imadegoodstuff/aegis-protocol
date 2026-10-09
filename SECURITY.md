@@ -4,11 +4,11 @@ Aegis has **not** been audited. Nothing in this repository is deployed on a main
 
 ## 1. Claims
 
-1. **Unforgeability.** Without the master secret, producing a signature that an Aegis account accepts for a message of the attacker's choosing requires a (second) preimage or collision on the underlying hash at the cost given in `CCHS.spec.md` §5.5 (S-20 / K-20: AES-192 yardstick or better under either accounting; C-20: see the two-level label there).
+1. **Unforgeability.** Without the master secret, producing a signature that an Aegis account accepts for a message of the attacker's choosing requires a (second) preimage or collision on the underlying hash at the cost given in `CCHS.spec.md` §5.5 (S-20 / K-20: AES-192 yardstick or better under either accounting; C-20: see the two-level label there). The cost does not decrease with the number of accounts attacked at once: every hash call of a key tree carries the tree's 16-byte public seed (`pkSeed`, `CCHS.spec.md` §2.1), so no two trees share a hash function at any position.
 2. **One-time-key discipline.** No WOTS+ leaf of any epoch ever signs two different messages, under crashes, dropped or reordered transactions, backup restores, several devices and several chains, provided the client follows `CCHS.spec.md` §3 (one key tree per chain) and §4.3, and the verifier §5.
-3. **Replay resistance.** A valid signature is bound to `(chainId, account, epoch, idx, target, value, data)`; it is accepted at most once by one account on one chain.
+3. **Replay resistance.** A valid signature is bound to `(chainId, account, epoch, idx, target, value, data)` and, through the seed in every hash, to its own key tree; it is accepted at most once by one account on one chain.
 4. **Cache soundness.** A cached bottom-subtree root is only ever accepted for the `(epoch, treeIdx)` it was proven for, and the proof bound it to the root current at that time.
-5. **Recovery.** The holder of the master can move the account to a new root (same master, next epoch; or a fresh master) using a one-time key that is never used for spending, and the previous root is dead afterwards.
+5. **Recovery.** The holder of the master can move the account to a new public key (`root`, `recRoot`, `pkSeed`; same master, next epoch; or a fresh master) using a one-time key that is never used for spending, and the previous root is dead afterwards.
 6. **Lane independence (EVM contracts).** The index space is split into 16 lanes with independent on-chain `nextIdx` and `nonce`; an accepted operation in one lane changes the verifier's verdict on no signature made for another lane (`CCHS.spec.md` §6, LI). Devices that own distinct lanes therefore sign concurrently without coordination. Which device owns which lane is a client assignment and is not checked on chain.
 
 Not claimed: anonymity, resistance to a compromised client device while it holds the master, anything about the chains' own cryptography (account addresses derived with ECDSA/Ed25519 are not post-quantum, and the wallet labels them as such), or availability under censorship.
@@ -33,14 +33,15 @@ Not claimed: anonymity, resistance to a compromised client device while it holds
 | Full life cycle with costs | create → first → cached → skip → second lane → rotation → old root rejected → withdraw, in an EVM | `wallet/scripts/evm-flow.mts` | yes |
 | Cross-implementation agreement | shared fixtures replayed by Solidity, Rust, Cairo, FunC, Move, TypeScript | `evm/test/fixtures/`, each chain directory | yes |
 | Key derivation is pinned | mnemonic → master → roots → addresses vector | `evm/test/fixtures/cchs-derivation.json`, `wallet/scripts/check-vectors.mts` | yes |
-| Hash security numbers | hand analysis, two accountings | `CCHS.spec.md` §5.5 | n/a |
+| Hash security numbers | hand analysis, two accountings; multi-user term removed by `pkSeed` | `CCHS.spec.md` §5.5 | n/a |
+| Per-tree seed is enforced by every verifier | fixture signatures replayed under another seed are rejected (Foundry, Rust, Cairo, FunC, Move tests) | each chain directory | yes |
 
 The Lean proofs cover the transition system only: the hash is an abstraction ("a signature over other inputs matches nothing") and the WOTS+ two-message exposure enters as a hypothesis, not a theorem. Bounded model checks explore every state up to the stated bounds and additionally exercise an explicit adversary and seeded bugs; they are not proofs. The hash-level analysis is a derivation from published bounds, not a machine-checked reduction.
 
 ## 4. Known gaps
 
 - No independent audit of any component.
-- No machine-checked proof of the cryptographic reductions (the Lean proofs stop at the hash); no written reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` (C-20).
+- No machine-checked proof of the cryptographic reductions (the Lean proofs stop at the hash); no written reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` (C-20). The multi-user term of that analysis is closed by construction (`pkSeed`); the single-tree constants are not written down.
 - No mainnet deployment; gas figures come from a local EVM and Solana compute units from the `solana-program-test` runtime in CI, not from a public cluster.
 - The wallet is a reference implementation: browser `localStorage` for the index record and the device lane, no hardware-key support; lane assignment between devices is a user action that the protocol cannot check.
 - Side channels in the client's hash chains (timing of WOTS+ chain lengths) are not addressed; the signer runs in a browser or a user's own process.

@@ -10,7 +10,8 @@
     "vectors": "tsx scripts/check-vectors.mts",
     "evm-flow": "tsx scripts/evm-flow.mts",
     "index-discipline": "tsx scripts/check-index-discipline.mts",
-    "btc": "tsx scripts/check-btc.mts"
+    "btc": "tsx scripts/check-btc.mts",
+    "gen-fixtures": "tsx scripts/gen-fixtures.mts"
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",

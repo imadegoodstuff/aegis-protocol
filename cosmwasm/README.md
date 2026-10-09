@@ -40,7 +40,7 @@ entries.
 
 ```jsonc
 // instantiate
-{ "root": "<base64 32B>", "rec_root": "<base64 32B>" }
+{ "root": "<base64 32B>", "rec_root": "<base64 32B>", "seed": "<base64 16B>" }
 
 // execute
 { "execute": {
@@ -50,14 +50,14 @@ entries.
     "msgs": [ /* CosmosMsg[] */ ] } }
 
 { "recover": {
-    "new_root": "<base64 32B>", "new_rec_root": "<base64 32B>",
+    "new_root": "<base64 32B>", "new_rec_root": "<base64 32B>", "new_seed": "<base64 16B>",
     "wots": ["<base64 32B>" × 67], "auth": ["<base64 32B>" × 8] } }
 
 // query
 { "state": {} }
 { "next_digest": { "msgs": [ ... ] } }                        → base64 32B (idx = next_idx)
 { "digest_at": { "idx": 5, "msgs": [ ... ] } }                → base64 32B
-{ "next_recovery_digest": { "new_root": "...", "new_rec_root": "..." } }
+{ "next_recovery_digest": { "new_root": "...", "new_rec_root": "...", "new_seed": "..." } }
 { "needs_top_layer": {} }                                     → bool (idx = next_idx)
 { "needs_top_layer_at": { "idx": 1024 } }                     → bool
 ```
@@ -72,7 +72,7 @@ M = sha256("AEGIS_CCHS_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ nonce u6
            ‖ sha256(to_json_binary(msgs)))
 
 M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ rec_nonce u64 BE
-               ‖ new_root ‖ new_rec_root)
+               ‖ new_root ‖ new_rec_root ‖ new_seed)
 ```
 
 `contract_address_utf8` is the bech32 string of `env.contract.address`
@@ -83,7 +83,7 @@ query to obtain the exact bytes rather than re-serializing client-side.
 ## Layer verification (shared with every chain)
 
 ```
-ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ 16 zero bytes
+ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ pkSeed(16)
 F(adrs, x)   = sha256(adrs ‖ x)                      type 0x00
 leaf         = sha256(adrs ‖ pk_0 ‖ … ‖ pk_66)        type 0x01
 node         = sha256(adrs ‖ left ‖ right)            type 0x02, leafIdx = pos >> 1, chainIdx = level
@@ -93,6 +93,10 @@ Layer 0: `treeIdx = idx >> 10`, `leafIdx = idx & 1023`, message `M`. Layer 1:
 `treeIdx = 0`, `leafIdx = idx >> 10`, message `R_0`; required unless
 `cache[(epoch, idx >> 10)]` already holds `R_0`. Recovery: layer `0xFF`,
 tree 0, `leafIdx = rec_nonce`, height 8.
+
+`pkSeed` is the 16-byte public seed of the key tree (part of the public key,
+rotated by recovery, `CCHS.spec.md` §2.2): every hash call of one tree is a
+different function from the same position in any other tree.
 
 ## Build
 

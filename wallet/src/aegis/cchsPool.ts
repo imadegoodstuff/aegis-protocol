@@ -75,7 +75,7 @@ export class CchsPool {
 
   async tree(key: CchsKey, variant: PoolVariant, layer: number, treeIdx: bigint, height: number): Promise<Tree> {
     const [c, leaves] = await Promise.all([variant === 'C' ? fastCompact() : fastCchs(variant), this.leaves(key, variant, layer, treeIdx, 1 << height)]);
-    return c.buildTreeFromLeaves(layer, treeIdx, leaves);
+    return c.buildTreeFromLeaves(c.seedOf(key), layer, treeIdx, leaves);
   }
 
   /**
@@ -93,7 +93,8 @@ export class CchsPool {
     ]);
     cache?.set('1/0', top); cache?.set('ff/0', rec);
     if (bottom0) cache?.set('0/0', bottom0);
-    return { root: top.root, recRoot: rec.root, tookMs: performance.now() - t0 };
+    const c = variant === 'C' ? await fastCompact() : await fastCchs(variant);
+    return { root: top.root, recRoot: rec.root, seed: c.seedOf(key).slice(), tookMs: performance.now() - t0 };
   }
 
   terminate(): void {

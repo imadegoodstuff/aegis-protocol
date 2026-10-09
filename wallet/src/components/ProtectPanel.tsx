@@ -246,8 +246,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       }
       set({ phase: "confirm", step: movable.length ? `create account · move ${movable.length} token${movable.length > 1 ? "s" : ""}${value > 0n ? ` + ${amount} ${chain.nativeCurrency.symbol}` : ""}` : "create account" });
       tx = movable.length
-        ? await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deployAndMove", args: [ci.root, ci.recRoot, false, movable], value, chain, account: w.account })
-        : await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deploy", args: [ci.root, ci.recRoot, false], value, chain, account: w.account });
+        ? await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deployAndMove", args: [ci.root, ci.recRoot, ci.seed, false, movable], value, chain, account: w.account })
+        : await wc.writeContract({ address: FACTORY_ADDRESS, abi: FACTORY_ABI, functionName: "deploy", args: [ci.root, ci.recRoot, ci.seed, false], value, chain, account: w.account });
       set({ phase: "pending", tx });
       await pub.waitForTransactionReceipt({ hash: tx });
       set({ phase: "done", tx });
@@ -261,26 +261,33 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   // Keys and trees per (chain, epoch). Epoch 0 is the chain's tree derived at
   // load; later epochs are derived on demand from the chain key and checked
   // against the roots the chain holds before any signature is made with them.
-  const epochTrees = useRef<Map<string, { key: CchsKey; trees: Map<string, Tree>; root: Hex; recRoot: Hex }>>(new Map());
-  async function epochKeys(chainId: number, epoch: number, onchainRoot: Hex, onchainRecRoot: Hex) {
+  type EpochKeys = { key: CchsKey; trees: Map<string, Tree>; root: Hex; recRoot: Hex; seed: Hex };
+  const epochTrees = useRef<Map<string, EpochKeys>>(new Map());
+  async function epochKeys(chainId: number, epoch: number, onchain: { root: Hex; recRoot: Hex; seed: Hex }) {
     const ci = chainIdentity(chainId);
     const k = `${chainId}/${epoch}`;
     let e = epochTrees.current.get(k);
     if (!e) {
-      if (epoch === 0) e = { key: ci.key, trees: ci.trees, root: ci.root, recRoot: ci.recRoot };
+      if (epoch === 0) e = { key: ci.key, trees: ci.trees, root: ci.root, recRoot: ci.recRoot, seed: ci.seed };
       else {
         const key = epochKey(ci.key, epoch);
         const trees = new Map<string, Tree>();
         const pub = await poolRef.current!.keygen(key, "K", trees);
-        e = { key, trees, root: toHex(pub.root) as Hex, recRoot: toHex(pub.recRoot) as Hex };
+        e = { key, trees, root: toHex(pub.root) as Hex, recRoot: toHex(pub.recRoot) as Hex, seed: toHex(pub.seed) as Hex };
       }
       epochTrees.current.set(k, e);
     }
-    if (e.root.toLowerCase() !== onchainRoot.toLowerCase() || e.recRoot.toLowerCase() !== onchainRecRoot.toLowerCase()) {
-      throw new Error(`the chain holds roots for epoch ${epoch} that this mnemonic does not derive; the account was recovered with a different key`);
+    const same = (a: Hex, b: Hex) => a.toLowerCase() === b.toLowerCase();
+    if (!same(e.root, onchain.root) || !same(e.recRoot, onchain.recRoot) || !same(e.seed, onchain.seed)) {
+      throw new Error(`the chain holds a public key for epoch ${epoch} that this mnemonic does not derive; the account was recovered with a different key`);
     }
     return e;
   }
+  const readPublicKey = (pub: ReturnType<typeof makePublicClient>, account: Address) => Promise.all([
+    pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "root" }) as Promise<Hex>,
+    pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recRoot" }) as Promise<Hex>,
+    pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "pkSeed" }) as Promise<Hex>,
+  ]).then(([root, recRoot, seed]) => ({ root, recRoot, seed }));
 
   /**
    * Recovery as key rotation: epoch e -> e + 1 with keys derived from the same
@@ -296,23 +303,22 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       const ci = chainIdentity(chain.id);
       const account = ci.address;
       setSpend({ phase: "rotating", msg: "reading account…" });
-      const [epochBig, recNonce, onchainRoot, onchainRecRoot] = await Promise.all([
+      const [epochBig, recNonce, onchain] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "epoch" }) as Promise<bigint>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recNonce" }) as Promise<bigint>,
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "root" }) as Promise<Hex>,
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recRoot" }) as Promise<Hex>,
+        readPublicKey(pub, account),
       ]);
       const epoch = Number(epochBig);
       if (Number(recNonce) <= highestRecoverySigned(chain.id, account)) {
         throw new Error("a rotation signed by this device for this recovery leaf is still pending; wait for it to land or be dropped");
       }
       setSpend({ phase: "rotating", msg: `deriving keys for epoch ${epoch} and ${epoch + 1}…` });
-      const cur = await epochKeys(chain.id, epoch, onchainRoot, onchainRecRoot);
+      const cur = await epochKeys(chain.id, epoch, onchain);
       const next = epochKey(ci.key, epoch + 1);
       const nextTrees = new Map<string, Tree>();
       const nextPub = await poolRef.current!.keygen(next, "K", nextTrees);
-      epochTrees.current.set(`${chain.id}/${epoch + 1}`, { key: next, trees: nextTrees, root: toHex(nextPub.root) as Hex, recRoot: toHex(nextPub.recRoot) as Hex });
-      const m = cchsK.recoveryDigest({ chainId: BigInt(chain.id), account: hexToBytes(account), recNonce, newRoot: nextPub.root, newRecRoot: nextPub.recRoot });
+      epochTrees.current.set(`${chain.id}/${epoch + 1}`, { key: next, trees: nextTrees, root: toHex(nextPub.root) as Hex, recRoot: toHex(nextPub.recRoot) as Hex, seed: toHex(nextPub.seed) as Hex });
+      const m = cchsK.recoveryDigest({ chainId: BigInt(chain.id), account: hexToBytes(account), recNonce, newRoot: nextPub.root, newRecRoot: nextPub.recRoot, newSeed: nextPub.seed });
       setSpend({ phase: "rotating", msg: "signing with the recovery tree…" });
       markRecoverySigned(chain.id, account, Number(recNonce));
       const sig = cchsK.signRecovery(cur.key, Number(recNonce), m, cur.trees);
@@ -321,7 +327,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       setSpend({ phase: "rotating", msg: "confirm relay in wallet…" });
       const tx = await wc.writeContract({
         address: account, abi: ACCOUNT_ABI, functionName: "recover",
-        args: [toHex(nextPub.root) as Hex, toHex(nextPub.recRoot) as Hex, sig.wots.map((x) => toHex(x) as Hex), sig.auth.map((x) => toHex(x) as Hex)],
+        args: [toHex(nextPub.root) as Hex, toHex(nextPub.recRoot) as Hex, toHex(nextPub.seed) as Hex, sig.wots.map((x) => toHex(x) as Hex), sig.auth.map((x) => toHex(x) as Hex)],
         chain, account: w.account,
       });
       setSpend({ phase: "rotating", msg: "pending…", tx });
@@ -359,19 +365,18 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       // 2. Choose the leaf in this device's lane: never below the lane's nextIdx,
       //    never one this device signed before. Other devices own other lanes.
       const lane = deviceLane();
-      const [nextIdx, nonce, epochBig, onchainRoot, onchainRecRoot] = await Promise.all([
+      const [nextIdx, nonce, epochBig, onchain] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nextIdx", args: [lane] }) as Promise<bigint>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nonce", args: [lane] }) as Promise<bigint>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "epoch" }) as Promise<bigint>,
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "root" }) as Promise<Hex>,
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "recRoot" }) as Promise<Hex>,
+        readPublicKey(pub, account),
       ]);
       const epoch = Number(epochBig);
       if (recordMissing(chain.id, account, epoch, nextIdx, lane)) {
         setSpend({ phase: "rotate", epoch, nextIdx: Number(nextIdx) - laneFirst(lane), lane });
         return;
       }
-      const { key, trees } = await epochKeys(chain.id, epoch, onchainRoot, onchainRecRoot);
+      const { key, trees } = await epochKeys(chain.id, epoch, onchain);
       const idx = nextSigningIndex(chain.id, account, epoch, nextIdx, lane);
       const [needsTop, onchainDigest] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "needsTopLayerAt", args: [BigInt(idx)] }) as Promise<boolean>,
@@ -394,8 +399,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       if (!trees.has(ck)) trees.set(ck, await poolRef.current!.tree(key, "K", 0, treeIdx, H));
       markIndexSigned(chain.id, account, epoch, idx, lane);
       const sig = cchsK.sign(key, idx, m, !needsTop, trees);
-      // Local verification against the roots the chain holds, before anything leaves the device.
-      cchsK.verify({ root: hexToBytes(onchainRoot), recRoot: hexToBytes(onchainRecRoot) }, idx, m, sig, needsTop ? undefined : trees.get(ck)!.root);
+      // Local verification against the public key the chain holds, before anything leaves the device.
+      cchsK.verify({ root: hexToBytes(onchain.root), recRoot: hexToBytes(onchain.recRoot), seed: hexToBytes(onchain.seed) }, idx, m, sig, needsTop ? undefined : trees.get(ck)!.root);
 
       // 5. Relay through the injected wallet (it pays gas; it holds no authority over the account).
       setSpend({ phase: "confirm", bytes: signatureBytes(sig), layers: sig.l1 ? 2 : 1 });

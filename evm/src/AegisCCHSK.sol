@@ -11,8 +11,8 @@ import {AegisCCHSBase} from "./AegisCCHSBase.sol";
 contract AegisCCHSK is AegisCCHSBase {
     string public constant VERSION = "cchs-k-20/1.0.0";
 
-    constructor(bytes32 _root, bytes32 _recRoot) {
-        _init(_root, _recRoot);
+    constructor(bytes32 _root, bytes32 _recRoot, bytes16 _seed) {
+        _init(_root, _recRoot, _seed);
     }
 
     function _hash(bytes memory data) internal pure override returns (bytes32) {
@@ -20,6 +20,7 @@ contract AegisCCHSK is AegisCCHSBase {
     }
 
     function _wotsLeaf(
+        uint256 seed,
         uint8 layer,
         uint64 treeIdx,
         uint32 leafIdx,
@@ -27,8 +28,8 @@ contract AegisCCHSK is AegisCCHSBase {
         bytes32[67] calldata sig
     ) internal pure override returns (bytes32 leaf) {
         uint8[67] memory digits = _digits(m);
-        bytes32 base = _adrs(layer, treeIdx, 0x00, leafIdx, 0, 0);
-        bytes32 leafAdrs = _adrs(layer, treeIdx, 0x01, leafIdx, 0, 0);
+        bytes32 base = _adrs(seed, layer, treeIdx, 0x00, leafIdx, 0, 0);
+        bytes32 leafAdrs = _adrs(seed, layer, treeIdx, 0x01, leafIdx, 0, 0);
 
         assembly {
             let buf := mload(0x40)

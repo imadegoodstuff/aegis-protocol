@@ -8,7 +8,7 @@
 
 use cchs_core::{
     verify_layer, CchsError, CchsState, LayerSig, H, LAYER_BOTTOM, LAYER_RECOVERY, LAYER_TOP, LEN,
-    REC_H,
+    REC_H, Seed,
 };
 use serde_json::Value;
 use sha2::Sha256;
@@ -36,6 +36,18 @@ fn b32(v: &Value) -> [u8; 32] {
 
 fn b32_list(v: &Value) -> Vec<[u8; 32]> {
     v.as_array().expect("array").iter().map(b32).collect()
+}
+
+fn seed16(v: &Value) -> Seed {
+    let bytes = hex_bytes(v.as_str().expect("hex string"));
+    let mut out = [0u8; 16];
+    out.copy_from_slice(&bytes);
+    out
+}
+
+/// Public seed of the fixture key tree (carried in every ADRS).
+fn seed(f: &Value) -> Seed {
+    seed16(&f["seed"])
 }
 
 struct Layer {
@@ -82,7 +94,7 @@ impl Op {
 
 /// Fresh state with `ops[0]` applied: subtree 0 registered, `next_idx = 1`.
 fn after_first_op(f: &Value, h: &mut Sha256) -> (CchsState, [u8; 32]) {
-    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"])).unwrap();
+    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"]), seed(&f)).unwrap();
     let op = Op::from_json(&f["ops"][0]);
     let out = state.execute_verify(h, op.idx, &op.digest, op.l0.sig(), op.l1_sig(), None).unwrap();
     assert!(out.cache_write);
@@ -103,11 +115,11 @@ fn first_op_verifies_both_layers() {
     let mut h = Sha256::default();
 
     // Layer 0: tree 0, leaf 0, message = digest.
-    let r0 = verify_layer(&mut h, LAYER_BOTTOM, 0, 0, &digest, &l0.wots, &l0.auth, H);
+    let r0 = verify_layer(&mut h, &seed(&f), LAYER_BOTTOM, 0, 0, &digest, &l0.wots, &l0.auth, H);
     assert_eq!(r0, bottom0, "bottom root mismatch");
 
     // Layer 1: tree 0, leaf = bottom tree index (0), message = R_0.
-    let r1 = verify_layer(&mut h, LAYER_TOP, 0, 0, &r0, &l1.wots, &l1.auth, H);
+    let r1 = verify_layer(&mut h, &seed(&f), LAYER_TOP, 0, 0, &r0, &l1.wots, &l1.auth, H);
     assert_eq!(r1, root, "top root mismatch");
 }
 
@@ -117,7 +129,7 @@ fn state_machine_follows_fixture_ops() {
     let root = b32(&f["root"]);
     let rec_root = b32(&f["recRoot"]);
     let bottom0 = b32(&f["bottomRoot0"]);
-    let mut state = CchsState::new(root, rec_root).unwrap();
+    let mut state = CchsState::new(root, rec_root, seed(&f)).unwrap();
     let mut h = Sha256::default();
     let mut cache: Option<[u8; 32]> = None;
 
@@ -148,7 +160,7 @@ fn state_machine_follows_fixture_ops() {
 #[test]
 fn missing_top_layer_is_rejected() {
     let f = fixture();
-    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"])).unwrap();
+    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"]), seed(&f)).unwrap();
     let op = &f["ops"][0];
     let l0 = Layer::from_json(&op["l0"]);
     let mut h = Sha256::default();
@@ -302,11 +314,11 @@ fn tampered_chain_value_fails() {
     l0.wots[5][0] ^= 0x01;
     let mut h = Sha256::default();
 
-    let r0 = verify_layer(&mut h, LAYER_BOTTOM, 0, 0, &digest, &l0.wots, &l0.auth, H);
+    let r0 = verify_layer(&mut h, &seed(&f), LAYER_BOTTOM, 0, 0, &digest, &l0.wots, &l0.auth, H);
     assert_ne!(r0, bottom0);
 
     // Against the cache.
-    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"])).unwrap();
+    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"]), seed(&f)).unwrap();
     let err = state.execute_verify(&mut h, 0, &digest, l0.sig(), None, Some(bottom0)).unwrap_err();
     assert_eq!(err, CchsError::BadSubtreeRoot);
 
@@ -325,7 +337,7 @@ fn tampered_auth_path_fails() {
     let mut l0 = Layer::from_json(&op["l0"]);
     l0.auth[3][31] ^= 0x80;
     let mut h = Sha256::default();
-    let r0 = verify_layer(&mut h, LAYER_BOTTOM, 0, 1, &digest, &l0.wots, &l0.auth, H);
+    let r0 = verify_layer(&mut h, &seed(&f), LAYER_BOTTOM, 0, 1, &digest, &l0.wots, &l0.auth, H);
     assert_ne!(r0, bottom0);
 }
 
@@ -338,8 +350,32 @@ fn wrong_message_fails() {
     digest[7] ^= 0x10;
     let l0 = Layer::from_json(&op["l0"]);
     let mut h = Sha256::default();
-    let r0 = verify_layer(&mut h, LAYER_BOTTOM, 0, 2, &digest, &l0.wots, &l0.auth, H);
+    let r0 = verify_layer(&mut h, &seed(&f), LAYER_BOTTOM, 0, 2, &digest, &l0.wots, &l0.auth, H);
     assert_ne!(r0, bottom0);
+}
+
+/// The same signature hashed under another public seed reaches another
+/// root: the seed separates every tree's hash functions (spec 2.1).
+#[test]
+fn wrong_seed_fails() {
+    let f = fixture();
+    let bottom0 = b32(&f["bottomRoot0"]);
+    let op = &f["ops"][1];
+    let digest = b32(&op["digest"]);
+    let l0 = Layer::from_json(&op["l0"]);
+    let mut other = seed(&f);
+    other[0] ^= 0x01;
+    let mut h = Sha256::default();
+    let r0 = verify_layer(&mut h, &other, LAYER_BOTTOM, 0, 1, &digest, &l0.wots, &l0.auth, H);
+    assert_ne!(r0, bottom0);
+
+    // Against the cache: the state holds the fixture seed, a state created
+    // with another seed rejects the fixture signature as a bad subtree root.
+    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"]), other).unwrap();
+    let err = state
+        .execute_verify(&mut h, 1, &digest, l0.sig(), None, Some(bottom0))
+        .unwrap_err();
+    assert_eq!(err, CchsError::BadSubtreeRoot);
 }
 
 #[test]
@@ -353,16 +389,17 @@ fn recovery_vector_verifies() {
     assert_eq!(layer.auth.len(), REC_H);
     let mut h = Sha256::default();
 
-    let r = verify_layer(&mut h, LAYER_RECOVERY, 0, 0, &digest, &layer.wots, &layer.auth, REC_H);
+    let r = verify_layer(&mut h, &seed(&f), LAYER_RECOVERY, 0, 0, &digest, &layer.wots, &layer.auth, REC_H);
     assert_eq!(r, rec_root, "recovery root mismatch");
 
     let new_root = b32(&rec["newRoot"]);
     let new_rec_root = b32(&rec["newRecRoot"]);
-    let mut state = CchsState::new(b32(&f["root"]), rec_root).unwrap();
+    let new_seed = seed16(&rec["newSeed"]);
+    let mut state = CchsState::new(b32(&f["root"]), rec_root, seed(&f)).unwrap();
     state.next_idx = 3;
     state.nonce = 3;
     let epoch = state
-        .recover_verify(&mut h, &digest, new_root, new_rec_root, &layer.wots, &layer.auth)
+        .recover_verify(&mut h, &digest, new_root, new_rec_root, new_seed, &layer.wots, &layer.auth)
         .expect("recovery verifies");
     assert_eq!(epoch, 1);
     assert_eq!(state.root, new_root);
@@ -374,7 +411,7 @@ fn recovery_vector_verifies() {
 
     // The same recovery signature cannot be replayed: leaf 1 ≠ leaf 0.
     let err = state
-        .recover_verify(&mut h, &digest, new_root, new_rec_root, &layer.wots, &layer.auth)
+        .recover_verify(&mut h, &digest, new_root, new_rec_root, new_seed, &layer.wots, &layer.auth)
         .unwrap_err();
     assert_eq!(err, CchsError::BadRecovery);
 }
@@ -382,7 +419,7 @@ fn recovery_vector_verifies() {
 #[test]
 fn short_auth_path_is_rejected_without_panic() {
     let f = fixture();
-    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"])).unwrap();
+    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"]), seed(&f)).unwrap();
     let op = &f["ops"][0];
     let l0 = Layer::from_json(&op["l0"]);
     let short = LayerSig { wots: &l0.wots, auth: &l0.auth[..H - 1] };

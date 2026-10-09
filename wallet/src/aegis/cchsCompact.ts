@@ -21,7 +21,7 @@
 import { sha256 } from '@noble/hashes/sha256';
 import { hmac } from '@noble/hashes/hmac';
 import { concatBytes } from '@noble/hashes/utils';
-import { adrs, eq, type CchsKey, type CchsPublic, type Tree, type LayerSig, type CchsSignature, type HashFn } from './cchs';
+import { adrs, eq, SEED_BYTES, type CchsKey, type CchsPublic, type Tree, type LayerSig, type CchsSignature, type HashFn } from './cchs';
 
 export const N = 24;
 export const W = 256;
@@ -61,6 +61,14 @@ function sk(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number, chain
   skInfo[o] = layer; skInfo.set(u64be(treeIdx), o + 1); skInfo.set(u32be(leafIdx), o + 9); skInfo[o + 13] = chainIdx;
   return expanderOf(key.master)._cloneInto().update(skInfo).digest().subarray(0, N);
 }
+/** Public seed of the tree: HKDF-SHA256(master, "cchs/pkseed/c", 32)[0..16). Carried in every ADRS. */
+const SEED_INFO = concatBytes(enc.encode('cchs/pkseed/c'), Uint8Array.of(0x01));
+const seedCache = new WeakMap<Uint8Array, Uint8Array>();
+function seedOf(key: CchsKey): Uint8Array {
+  let s = seedCache.get(key.master);
+  if (!s) { s = expanderOf(key.master)._cloneInto().update(SEED_INFO).digest().subarray(0, SEED_BYTES); seedCache.set(key.master, s); }
+  return s;
+}
 
 // -------------------------------------------------------------------- digits
 /** 24 message bytes ‖ 2 checksum bytes (csum = Σ(255 − m_i) ≤ 6 120, big-endian). */
@@ -78,54 +86,55 @@ const scratch56 = new Uint8Array(32 + N);
 const scratch80 = new Uint8Array(32 + 2 * N);
 const scratchLeaf = new Uint8Array(32 + LEN * N);
 
-function chainSteps(layer: number, treeIdx: bigint, leafIdx: number, c: number, from: number, to: number, x: Uint8Array): Uint8Array {
+function chainSteps(seed: Uint8Array, layer: number, treeIdx: bigint, leafIdx: number, c: number, from: number, to: number, x: Uint8Array): Uint8Array {
   if (from >= to) return x;
-  scratch56.set(adrs(layer, treeIdx, 0x00, leafIdx, c, 0), 0);
+  scratch56.set(adrs(seed, layer, treeIdx, 0x00, leafIdx, c, 0), 0);
   for (let s = from; s < to; s++) { scratch56[15] = s; scratch56.set(x, 32); x = hashN(scratch56); }
   return x;
 }
-function leafFromEnds(layer: number, treeIdx: bigint, leafIdx: number, ends: Uint8Array[]): Uint8Array {
-  scratchLeaf.set(adrs(layer, treeIdx, 0x01, leafIdx, 0, 0), 0);
+function leafFromEnds(seed: Uint8Array, layer: number, treeIdx: bigint, leafIdx: number, ends: Uint8Array[]): Uint8Array {
+  scratchLeaf.set(adrs(seed, layer, treeIdx, 0x01, leafIdx, 0, 0), 0);
   for (let c = 0; c < LEN; c++) scratchLeaf.set(ends[c], 32 + c * N);
   return hashN(scratchLeaf);
 }
-function nodeHash(layer: number, treeIdx: bigint, parentPos: number, level: number, left: Uint8Array, right: Uint8Array): Uint8Array {
-  scratch80.set(adrs(layer, treeIdx, 0x02, parentPos, level, 0), 0);
+function nodeHash(seed: Uint8Array, layer: number, treeIdx: bigint, parentPos: number, level: number, left: Uint8Array, right: Uint8Array): Uint8Array {
+  scratch80.set(adrs(seed, layer, treeIdx, 0x02, parentPos, level, 0), 0);
   scratch80.set(left, 32); scratch80.set(right, 32 + N);
   return hashN(scratch80);
 }
 function wotsLeaf(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number): Uint8Array {
+  const seed = seedOf(key);
   const ends: Uint8Array[] = new Array(LEN);
-  for (let c = 0; c < LEN; c++) ends[c] = chainSteps(layer, treeIdx, leafIdx, c, 0, W - 1, sk(key, layer, treeIdx, leafIdx, c));
-  return leafFromEnds(layer, treeIdx, leafIdx, ends);
+  for (let c = 0; c < LEN; c++) ends[c] = chainSteps(seed, layer, treeIdx, leafIdx, c, 0, W - 1, sk(key, layer, treeIdx, leafIdx, c));
+  return leafFromEnds(seed, layer, treeIdx, leafIdx, ends);
 }
 function leavesRange(key: CchsKey, layer: number, treeIdx: bigint, from: number, to: number): Uint8Array[] {
   const out: Uint8Array[] = new Array(to - from);
   for (let j = from; j < to; j++) out[j - from] = wotsLeaf(key, layer, treeIdx, j);
   return out;
 }
-function buildTreeFromLeaves(layer: number, treeIdx: bigint, leaves: Uint8Array[]): Tree {
+function buildTreeFromLeaves(seed: Uint8Array, layer: number, treeIdx: bigint, leaves: Uint8Array[]): Tree {
   const height = Math.log2(leaves.length);
   const levels: Uint8Array[][] = [leaves];
   for (let k = 0; k < height; k++) {
     const prev = levels[k], next: Uint8Array[] = new Array(prev.length / 2);
-    for (let i = 0; i < next.length; i++) next[i] = nodeHash(layer, treeIdx, i, k, prev[2 * i], prev[2 * i + 1]);
+    for (let i = 0; i < next.length; i++) next[i] = nodeHash(seed, layer, treeIdx, i, k, prev[2 * i], prev[2 * i + 1]);
     levels.push(next);
   }
   return { height, levels, root: levels[height][0] };
 }
 function buildTree(key: CchsKey, layer: number, treeIdx: bigint, height: number): Tree {
-  return buildTreeFromLeaves(layer, treeIdx, leavesRange(key, layer, treeIdx, 0, 1 << height));
+  return buildTreeFromLeaves(seedOf(key), layer, treeIdx, leavesRange(key, layer, treeIdx, 0, 1 << height));
 }
 function authPath(t: Tree, leafIdx: number): Uint8Array[] {
   const path: Uint8Array[] = []; let pos = leafIdx;
   for (let k = 0; k < t.height; k++) { path.push(t.levels[k][pos ^ 1].slice()); pos >>= 1; }
   return path;
 }
-function rootFromPath(layer: number, treeIdx: bigint, leaf: Uint8Array, leafIdx: number, path: Uint8Array[]): Uint8Array {
+function rootFromPath(seed: Uint8Array, layer: number, treeIdx: bigint, leaf: Uint8Array, leafIdx: number, path: Uint8Array[]): Uint8Array {
   let r = leaf, pos = leafIdx;
   for (let k = 0; k < path.length; k++) {
-    r = (pos & 1) === 0 ? nodeHash(layer, treeIdx, pos >> 1, k, r, path[k]) : nodeHash(layer, treeIdx, pos >> 1, k, path[k], r);
+    r = (pos & 1) === 0 ? nodeHash(seed, layer, treeIdx, pos >> 1, k, r, path[k]) : nodeHash(seed, layer, treeIdx, pos >> 1, k, path[k], r);
     pos >>= 1;
   }
   return r;
@@ -134,17 +143,17 @@ function rootFromPath(layer: number, treeIdx: bigint, leaf: Uint8Array, leafIdx:
 function keygen(key: CchsKey, cache?: Map<string, Tree>): CchsPublic {
   const top = buildTree(key, 1, 0n, H), rec = buildTree(key, 0xff, 0n, REC_H);
   cache?.set('1/0', top); cache?.set('ff/0', rec);
-  return { root: top.root, recRoot: rec.root };
+  return { root: top.root, recRoot: rec.root, seed: seedOf(key).slice() };
 }
 
 function wotsSign(key: CchsKey, layer: number, treeIdx: bigint, leafIdx: number, m: Uint8Array): Uint8Array[] {
-  const d = digits(m), out: Uint8Array[] = new Array(LEN);
-  for (let c = 0; c < LEN; c++) out[c] = chainSteps(layer, treeIdx, leafIdx, c, 0, d[c], sk(key, layer, treeIdx, leafIdx, c));
+  const d = digits(m), seed = seedOf(key), out: Uint8Array[] = new Array(LEN);
+  for (let c = 0; c < LEN; c++) out[c] = chainSteps(seed, layer, treeIdx, leafIdx, c, 0, d[c], sk(key, layer, treeIdx, leafIdx, c));
   return out;
 }
-function wotsEndsFromSig(layer: number, treeIdx: bigint, leafIdx: number, m: Uint8Array, sig: Uint8Array[]): Uint8Array[] {
+function wotsEndsFromSig(seed: Uint8Array, layer: number, treeIdx: bigint, leafIdx: number, m: Uint8Array, sig: Uint8Array[]): Uint8Array[] {
   const d = digits(m), out: Uint8Array[] = new Array(LEN);
-  for (let c = 0; c < LEN; c++) out[c] = chainSteps(layer, treeIdx, leafIdx, c, d[c], W - 1, sig[c]);
+  for (let c = 0; c < LEN; c++) out[c] = chainSteps(seed, layer, treeIdx, leafIdx, c, d[c], W - 1, sig[c]);
   return out;
 }
 /** Number of hash calls a verifier spends on one layer for message `m` (for cost tables). */
@@ -175,23 +184,23 @@ function topLayer(key: CchsKey, treeIdx: bigint, bottomRoot: Uint8Array, treeCac
 }
 
 /** Bottom-layer root recomputed from a layer-0 signature (what the verifier compares with the cache). */
-function bottomRootOf(idx: number, m: Uint8Array, l0: LayerSig): Uint8Array {
+function bottomRootOf(seed: Uint8Array, idx: number, m: Uint8Array, l0: LayerSig): Uint8Array {
   const treeIdx = BigInt(idx >> H), leafIdx = idx & (LEAVES - 1);
-  return rootFromPath(0, treeIdx, leafFromEnds(0, treeIdx, leafIdx, wotsEndsFromSig(0, treeIdx, leafIdx, m, l0.wots)), leafIdx, l0.auth);
+  return rootFromPath(seed, 0, treeIdx, leafFromEnds(seed, 0, treeIdx, leafIdx, wotsEndsFromSig(seed, 0, treeIdx, leafIdx, m, l0.wots)), leafIdx, l0.auth);
 }
-/** Verify a top-layer proof for bottom root `r0` of tree `treeIdx` against `root`. */
-function verifyTopLayer(root: Uint8Array, treeIdx: bigint, r0: Uint8Array, l1: LayerSig): boolean {
-  const leaf = Number(treeIdx);
-  const r1 = rootFromPath(1, 0n, leafFromEnds(1, 0n, leaf, wotsEndsFromSig(1, 0n, leaf, r0, l1.wots)), leaf, l1.auth);
-  return eq(r1, root);
+/** Verify a top-layer proof for bottom root `r0` of tree `treeIdx` against `pub.root`. */
+function verifyTopLayer(pub: CchsPublic, treeIdx: bigint, r0: Uint8Array, l1: LayerSig): boolean {
+  const leaf = Number(treeIdx), seed = pub.seed;
+  const r1 = rootFromPath(seed, 1, 0n, leafFromEnds(seed, 1, 0n, leaf, wotsEndsFromSig(seed, 1, 0n, leaf, r0, l1.wots)), leaf, l1.auth);
+  return eq(r1, pub.root);
 }
 /** Local verifier mirroring the on-chain state machine. Returns the bottom root to cache, or throws. */
 function verify(pub: CchsPublic, idx: number, m: Uint8Array, s: CchsSignature, cachedBottomRoot?: Uint8Array): Uint8Array {
   if (s.idx !== idx) throw new Error('index mismatch');
-  const r0 = bottomRootOf(idx, m, s.l0);
+  const r0 = bottomRootOf(pub.seed, idx, m, s.l0);
   if (cachedBottomRoot) { if (!eq(cachedBottomRoot, r0)) throw new Error('bad subtree root'); return r0; }
   if (!s.l1) throw new Error('missing top layer');
-  if (!verifyTopLayer(pub.root, BigInt(idx >> H), r0, s.l1)) throw new Error('bad top root');
+  if (!verifyTopLayer(pub, BigInt(idx >> H), r0, s.l1)) throw new Error('bad top root');
   return r0;
 }
 
@@ -200,9 +209,10 @@ function signRecovery(key: CchsKey, recNonce: number, m: Uint8Array, treeCache?:
   if (!rec) { rec = buildTree(key, 0xff, 0n, REC_H); treeCache?.set('ff/0', rec); }
   return { wots: wotsSign(key, 0xff, 0n, recNonce, m), auth: authPath(rec, recNonce) };
 }
-function verifyRecovery(recRoot: Uint8Array, recNonce: number, m: Uint8Array, s: LayerSig): boolean {
-  const r = rootFromPath(0xff, 0n, leafFromEnds(0xff, 0n, recNonce, wotsEndsFromSig(0xff, 0n, recNonce, m, s.wots)), recNonce, s.auth);
-  return eq(r, recRoot);
+function verifyRecovery(pub: CchsPublic, recNonce: number, m: Uint8Array, s: LayerSig): boolean {
+  const seed = pub.seed;
+  const r = rootFromPath(seed, 0xff, 0n, leafFromEnds(seed, 0xff, 0n, recNonce, wotsEndsFromSig(seed, 0xff, 0n, recNonce, m, s.wots)), recNonce, s.auth);
+  return eq(r, pub.recRoot);
 }
 
 /**
@@ -213,15 +223,17 @@ function verifyRecovery(recRoot: Uint8Array, recNonce: number, m: Uint8Array, s:
 function executeDigest(p: { tag: string; account: Uint8Array; nonce: bigint; idx: bigint; callHash: Uint8Array }): Uint8Array {
   return hashN(concatBytes(enc.encode('AEGIS_CCHS_V1'), enc.encode(p.tag), p.account, u64be(p.nonce), u64be(p.idx), p.callHash));
 }
-function recoveryDigest(p: { tag: string; account: Uint8Array; recNonce: bigint; newRoot: Uint8Array; newRecRoot: Uint8Array }): Uint8Array {
-  return hashN(concatBytes(enc.encode('AEGIS_CCHS_RECOVER_V1'), enc.encode(p.tag), p.account, u64be(p.recNonce), p.newRoot, p.newRecRoot));
+/** Recovery message binds the new roots and the new 16-byte seed. */
+function recoveryDigest(p: { tag: string; account: Uint8Array; recNonce: bigint; newRoot: Uint8Array; newRecRoot: Uint8Array; newSeed: Uint8Array }): Uint8Array {
+  if (p.newSeed.length !== SEED_BYTES) throw new Error('newSeed must be 16 bytes');
+  return hashN(concatBytes(enc.encode('AEGIS_CCHS_RECOVER_V1'), enc.encode(p.tag), p.account, u64be(p.recNonce), p.newRoot, p.newRecRoot, p.newSeed));
 }
 
 function signatureBytes(s: CchsSignature): number { return s.l1 ? SIG_BYTES_FIRST : SIG_BYTES_CACHED; }
 
 return {
   variant: 'C' as const, N, W, LEN, H, REC_H,
-  sk, digits, wotsLeaf, leavesRange, buildTree, buildTreeFromLeaves, rootFromPath,
+  sk, seedOf, digits, wotsLeaf, leavesRange, buildTree, buildTreeFromLeaves, rootFromPath,
   keygen, sign, topLayer, bottomRootOf, verifyTopLayer, verify, signRecovery, verifyRecovery,
   executeDigest, recoveryDigest, verifySteps, signatureBytes,
 };

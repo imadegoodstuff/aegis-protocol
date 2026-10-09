@@ -76,6 +76,9 @@ module aegis::aegis_account {
         root: vector<u8>,
         /// Recovery tree root (single layer, height 8).
         rec_root: vector<u8>,
+        /// Public seed of the current key tree (16 bytes, in every ADRS).
+        /// Rotated together with the roots by `recover`.
+        seed: vector<u8>,
         /// Increments on every recovery; namespaces `cached_root`.
         epoch: u64,
         /// Lowest leaf index still accepted, in [0, 2^20). Set to `idx + 1`
@@ -97,13 +100,13 @@ module aegis::aegis_account {
 
     // ------------------------------------------------------------ events
     #[event]
-    struct Created has drop, store { account: address, creator: address, root: vector<u8>, rec_root: vector<u8> }
+    struct Created has drop, store { account: address, creator: address, root: vector<u8>, rec_root: vector<u8>, seed: vector<u8> }
     #[event]
     struct Executed has drop, store { account: address, idx: u64, asset: vector<u8>, recipient: address, amount: u64 }
     #[event]
     struct SubtreeCached has drop, store { account: address, epoch: u64, tree_idx: u64, subtree_root: vector<u8> }
     #[event]
-    struct Recovered has drop, store { account: address, new_epoch: u64, new_root: vector<u8>, new_rec_root: vector<u8> }
+    struct Recovered has drop, store { account: address, new_epoch: u64, new_root: vector<u8>, new_rec_root: vector<u8>, new_seed: vector<u8> }
 
     // ============================================================ create
 
@@ -115,17 +118,19 @@ module aegis::aegis_account {
     /// address. Funds sent to that address are spendable only through
     /// `execute_transfer*`. `creator` may be any signer, including a relayer;
     /// it keeps no authority. Use `derive_address` to predict the address.
-    public entry fun create(creator: &signer, root: vector<u8>, rec_root: vector<u8>) {
+    public entry fun create(creator: &signer, root: vector<u8>, rec_root: vector<u8>, seed: vector<u8>) {
         assert_root(&root);
         assert_root(&rec_root);
+        assert_seed(&seed);
         let (res_signer, signer_cap) = account::create_resource_account(creator, resource_seed(&root));
         let addr = signer::address_of(&res_signer);
         assert!(!exists<CchsAccount>(addr), error::already_exists(E_ALREADY_INIT));
         let creator_addr = signer::address_of(creator);
-        event::emit(Created { account: addr, creator: creator_addr, root, rec_root });
+        event::emit(Created { account: addr, creator: creator_addr, root, rec_root, seed });
         move_to(&res_signer, CchsAccount {
             root,
             rec_root,
+            seed,
             epoch: 0,
             next_idx: 0,
             nonce: 0,
@@ -224,7 +229,7 @@ module aegis::aegis_account {
         check_index(acct, idx);
 
         let m = digest(acct_addr, acct.nonce, idx, *asset, recipient, amount);
-        let r0 = verify_bottom_layer(idx, &m, l0_wots, l0_auth);
+        let r0 = verify_bottom_layer(&acct.seed, idx, &m, l0_wots, l0_auth);
         settle_subtree(acct, acct_addr, idx, r0, has_l1, l1_wots, l1_auth);
 
         // effects before interaction
@@ -235,31 +240,35 @@ module aegis::aegis_account {
 
     // ============================================================ recovery
 
-    /// Rotate `root` and `rec_root`, authorized by the recovery tree.
-    /// Resets `next_idx` and bumps `epoch` (logically clearing the cache).
-    /// Callable by anyone holding a valid recovery signature. The account
-    /// address does not change (it was fixed by the original root).
+    /// Rotate the public key (`root`, `rec_root`, `seed`), authorized by the
+    /// recovery tree under the current seed. Resets `next_idx` and bumps
+    /// `epoch` (logically clearing the cache). Callable by anyone holding a
+    /// valid recovery signature. The account address does not change (it was
+    /// fixed by the original root).
     public entry fun recover(
         acct_addr: address,
         new_root: vector<u8>,
         new_rec_root: vector<u8>,
+        new_seed: vector<u8>,
         wots: vector<vector<u8>>,
         auth: vector<vector<u8>>,
     ) acquires CchsAccount {
         assert!(exists<CchsAccount>(acct_addr), error::not_found(E_NOT_INIT));
         assert_root(&new_root);
         assert_root(&new_rec_root);
+        assert_seed(&new_seed);
         let acct = borrow_global_mut<CchsAccount>(acct_addr);
 
         let rn = acct.rec_nonce;
         assert!(rn < REC_CAPACITY, error::out_of_range(E_EXHAUSTED));
 
-        let m = recovery_digest(acct_addr, rn, &new_root, &new_rec_root);
-        let r = verify_layer(LAYER_REC, 0, rn, REC_H, &m, &wots, &auth);
+        let m = recovery_digest(acct_addr, rn, &new_root, &new_rec_root, &new_seed);
+        let r = verify_layer(&acct.seed, LAYER_REC, 0, rn, REC_H, &m, &wots, &auth);
         assert!(r == acct.rec_root, error::permission_denied(E_BAD_RECOVERY));
 
         acct.root = new_root;
         acct.rec_root = new_rec_root;
+        acct.seed = new_seed;
         acct.next_idx = 0;
         acct.epoch = acct.epoch + 1;
         acct.rec_nonce = rn + 1;
@@ -268,6 +277,7 @@ module aegis::aegis_account {
             new_epoch: acct.epoch,
             new_root: acct.root,
             new_rec_root: acct.rec_root,
+            new_seed: acct.seed,
         });
     }
 
@@ -325,9 +335,9 @@ module aegis::aegis_account {
 
     /// Digest the client must sign for the next `recover`.
     #[view]
-    public fun next_recovery_digest(acct_addr: address, new_root: vector<u8>, new_rec_root: vector<u8>): vector<u8> acquires CchsAccount {
+    public fun next_recovery_digest(acct_addr: address, new_root: vector<u8>, new_rec_root: vector<u8>, new_seed: vector<u8>): vector<u8> acquires CchsAccount {
         let acct = borrow_global<CchsAccount>(acct_addr);
-        recovery_digest(acct_addr, acct.rec_nonce, &new_root, &new_rec_root)
+        recovery_digest(acct_addr, acct.rec_nonce, &new_root, &new_rec_root, &new_seed)
     }
 
     /// Whether an `execute_transfer*` at leaf `idx` must include the top-layer proof.
@@ -347,6 +357,9 @@ module aegis::aegis_account {
     public fun root(acct_addr: address): vector<u8> acquires CchsAccount { borrow_global<CchsAccount>(acct_addr).root }
     #[view]
     public fun rec_root(acct_addr: address): vector<u8> acquires CchsAccount { borrow_global<CchsAccount>(acct_addr).rec_root }
+    /// 16-byte public seed of the current key tree.
+    #[view]
+    public fun seed(acct_addr: address): vector<u8> acquires CchsAccount { borrow_global<CchsAccount>(acct_addr).seed }
     #[view]
     public fun epoch(acct_addr: address): u64 acquires CchsAccount { borrow_global<CchsAccount>(acct_addr).epoch }
     #[view]
@@ -373,6 +386,10 @@ module aegis::aegis_account {
         seed
     }
 
+    fun assert_seed(s: &vector<u8>) {
+        assert!(vector::length(s) == 16, error::invalid_argument(E_BAD_LENGTH));
+    }
+
     fun cache_key(epoch: u64, tree_idx: u64): u128 {
         ((epoch as u128) << 64) | (tree_idx as u128)
     }
@@ -396,14 +413,15 @@ module aegis::aegis_account {
     }
 
     /// M_rec = sha2_256("AEGIS_CCHS_RECOVER_V1" || "aptos" || bcs(account) || rec_nonce(8 BE)
-    ///                  || new_root || new_rec_root)
-    fun recovery_digest(account: address, rec_nonce: u64, new_root: &vector<u8>, new_rec_root: &vector<u8>): vector<u8> {
+    ///                  || new_root || new_rec_root || new_seed(16))
+    fun recovery_digest(account: address, rec_nonce: u64, new_root: &vector<u8>, new_rec_root: &vector<u8>, new_seed: &vector<u8>): vector<u8> {
         let buf = b"AEGIS_CCHS_RECOVER_V1";
         vector::append(&mut buf, b"aptos");
         vector::append(&mut buf, bcs::to_bytes(&account));
         vector::append(&mut buf, be64(rec_nonce));
         vector::append(&mut buf, *new_root);
         vector::append(&mut buf, *new_rec_root);
+        vector::append(&mut buf, *new_seed);
         hash::sha2_256(buf)
     }
 
@@ -423,12 +441,13 @@ module aegis::aegis_account {
 
     /// Bottom-layer root recomputed from the WOTS+ signature on `m` at leaf `idx`.
     fun verify_bottom_layer(
+        seed: &vector<u8>,
         idx: u64,
         m: &vector<u8>,
         l0_wots: &vector<vector<u8>>,
         l0_auth: &vector<vector<u8>>,
     ): vector<u8> {
-        verify_layer(0, idx >> 10, idx & 1023, H, m, l0_wots, l0_auth)
+        verify_layer(seed, 0, idx >> 10, idx & 1023, H, m, l0_wots, l0_auth)
     }
 
     /// Given the recomputed bottom root `r0` of the subtree of `idx`: if the
@@ -453,7 +472,7 @@ module aegis::aegis_account {
         };
         assert!(has_l1, error::invalid_argument(E_MISSING_TOP_LAYER));
         // Top layer: tree 0, leaf = tree_idx, message = r0.
-        let r1 = verify_layer(1, 0, tree_idx, H, &r0, l1_wots, l1_auth);
+        let r1 = verify_layer(&acct.seed, 1, 0, tree_idx, H, &r0, l1_wots, l1_auth);
         assert!(r1 == acct.root, error::permission_denied(E_BAD_TOP_ROOT));
         table::add(&mut acct.cached_root, key, r0);
         event::emit(SubtreeCached { account: addr, epoch: acct.epoch, tree_idx, subtree_root: r0 });
@@ -463,6 +482,7 @@ module aegis::aegis_account {
     /// from a WOTS+ signature on `m` at `leaf_idx` and the auth path.
     /// Pure; byte-exact with `AegisCCHS._layerRoot`.
     public fun verify_layer(
+        seed: &vector<u8>,
         layer: u8,
         tree_idx: u64,
         leaf_idx: u64,
@@ -477,14 +497,15 @@ module aegis::aegis_account {
         let d = digits(m);
 
         // Leaf: sha2_256(adrs_leaf || pk_0 || ... || pk_66)
-        let leaf_buf = adrs(layer, tree_idx, 0x01, leaf_idx, 0, 0);
+        assert_seed(seed);
+        let leaf_buf = adrs(seed, layer, tree_idx, 0x01, leaf_idx, 0, 0);
         let c = 0;
         while (c < LEN) {
             let x = *vector::borrow(wots, c);
             assert!(vector::length(&x) == 32, error::invalid_argument(E_BAD_LENGTH));
             let s = *vector::borrow(&d, c);
             while (s < 15) {
-                let input = adrs(layer, tree_idx, 0x00, leaf_idx, (c as u8), s);
+                let input = adrs(seed, layer, tree_idx, 0x00, leaf_idx, (c as u8), s);
                 vector::append(&mut input, x);
                 x = hash::sha2_256(input);
                 s = s + 1;
@@ -492,11 +513,12 @@ module aegis::aegis_account {
             vector::append(&mut leaf_buf, x);
             c = c + 1;
         };
-        merkle_root(layer, tree_idx, leaf_idx, height, hash::sha2_256(leaf_buf), auth)
+        merkle_root(seed, layer, tree_idx, leaf_idx, height, hash::sha2_256(leaf_buf), auth)
     }
 
-    /// Auth path, leaf -> root: node_k = sha2_256(adrs(layer, tree, 0x02, pos >> 1, k, 0) || left || right).
+    /// Auth path, leaf -> root: node_k = sha2_256(adrs(seed, layer, tree, 0x02, pos >> 1, k, 0) || left || right).
     public fun merkle_root(
+        seed: &vector<u8>,
         layer: u8,
         tree_idx: u64,
         leaf_idx: u64,
@@ -510,7 +532,7 @@ module aegis::aegis_account {
         while (k < height) {
             let sib = *vector::borrow(auth, k);
             assert!(vector::length(&sib) == 32, error::invalid_argument(E_BAD_LENGTH));
-            let input = adrs(layer, tree_idx, 0x02, pos >> 1, (k as u8), 0);
+            let input = adrs(seed, layer, tree_idx, 0x02, pos >> 1, (k as u8), 0);
             if ((pos & 1) == 0) {
                 vector::append(&mut input, node);
                 vector::append(&mut input, sib);
@@ -546,8 +568,11 @@ module aegis::aegis_account {
         d
     }
 
-    /// ADRS = layer(1) || tree_idx(8 BE) || type(1) || leaf_idx(4 BE) || chain_idx(1) || step(1) || pad(16 zero)
-    public fun adrs(layer: u8, tree_idx: u64, typ: u8, leaf_idx: u64, chain_idx: u8, step: u8): vector<u8> {
+    /// ADRS = layer(1) || tree_idx(8 BE) || type(1) || leaf_idx(4 BE) || chain_idx(1) || step(1) || pk_seed(16)
+    /// `seed` is the 16-byte public seed of the key tree: it makes every hash
+    /// call of one tree a different function from the same position in any
+    /// other tree (spec 2.2, 5.5).
+    public fun adrs(seed: &vector<u8>, layer: u8, tree_idx: u64, typ: u8, leaf_idx: u64, chain_idx: u8, step: u8): vector<u8> {
         let a = vector::empty<u8>();
         vector::push_back(&mut a, layer);
         vector::append(&mut a, be64(tree_idx));
@@ -555,11 +580,7 @@ module aegis::aegis_account {
         vector::append(&mut a, be32(leaf_idx));
         vector::push_back(&mut a, chain_idx);
         vector::push_back(&mut a, step);
-        let i = 0;
-        while (i < 16) {
-            vector::push_back(&mut a, 0);
-            i = i + 1;
-        };
+        vector::append(&mut a, *seed);
         a
     }
 
@@ -594,8 +615,9 @@ module aegis::aegis_account {
 
     #[test]
     fun test_adrs_layout() {
-        let a = adrs(0x01, 0x0102030405060708, 0x02, 0x0a0b0c0d, 0x21, 0x0e);
-        assert!(a == x"010102030405060708020a0b0c0d210e00000000000000000000000000000000", 0);
+        let seed = x"a0a1a2a3a4a5a6a7a8a9aaabacadaeaf";
+        let a = adrs(&seed, 0x01, 0x0102030405060708, 0x02, 0x0a0b0c0d, 0x21, 0x0e);
+        assert!(a == x"010102030405060708020a0b0c0d210ea0a1a2a3a4a5a6a7a8a9aaabacadaeaf", 0);
         assert!(vector::length(&a) == 32, 1);
     }
 
@@ -612,16 +634,25 @@ module aegis::aegis_account {
     fun test_layer0_fixture_op1_matches_bottom_root0() {
         // ops[1]: idx 1 -> tree 0, leaf 1, cached path (no top layer).
         let m = x"7c06dfcdc83e3f42a32ee106be945deee21183c9a8563a2eab8450cbc7f1cede";
-        let r0 = verify_layer(0, 0, 1, 10, &m, &fixture_op1_l0_wots(), &fixture_op1_l0_auth());
-        assert!(r0 == x"0e2f82e50284c90ccbf4cc9621789de2746ade4e231383eb2a89794db19ff80a", 0);
+        let r0 = verify_layer(&FIXTURE_SEED, 0, 0, 1, 10, &m, &fixture_op1_l0_wots(), &fixture_op1_l0_auth());
+        assert!(r0 == FIXTURE_BOTTOM_ROOT0, 0);
+    }
+
+    #[test]
+    fun test_layer0_fixture_op1_under_other_seed_mismatches() {
+        // The same signature hashed under a different public seed reaches a
+        // different root: the seed separates every tree's hash functions.
+        let m = x"7c06dfcdc83e3f42a32ee106be945deee21183c9a8563a2eab8450cbc7f1cede";
+        let r0 = verify_layer(&TEST_SEED, 0, 0, 1, 10, &m, &fixture_op1_l0_wots(), &fixture_op1_l0_auth());
+        assert!(r0 != FIXTURE_BOTTOM_ROOT0, 0);
     }
 
     #[test]
     fun test_layer1_fixture_op0_matches_root() {
         // ops[0].l1: top layer, tree 0, leaf = tree_idx = 0, message = bottomRoot0.
-        let r0 = x"0e2f82e50284c90ccbf4cc9621789de2746ade4e231383eb2a89794db19ff80a";
-        let r1 = verify_layer(1, 0, 0, 10, &r0, &fixture_op0_l1_wots(), &fixture_op0_l1_auth());
-        assert!(r1 == x"0db8112457679a25c1f76a03204a76986ba5f1c7bce2add2cce5a9e3591593c7", 0);
+        let r0 = FIXTURE_BOTTOM_ROOT0;
+        let r1 = verify_layer(&FIXTURE_SEED, 1, 0, 0, 10, &r0, &fixture_op0_l1_wots(), &fixture_op0_l1_auth());
+        assert!(r1 == FIXTURE_ROOT, 0);
     }
 
     #[test]
@@ -630,8 +661,8 @@ module aegis::aegis_account {
         let m = x"7c06dfcdc83e3f42a32ee106be945deee21183c9a8563a2eab8450cbc7f1cede";
         let wots = fixture_op1_l0_wots();
         *vector::borrow_mut(&mut wots, 3) = x"0000000000000000000000000000000000000000000000000000000000000000";
-        let r0 = verify_layer(0, 0, 1, 10, &m, &wots, &fixture_op1_l0_auth());
-        assert!(r0 == x"0e2f82e50284c90ccbf4cc9621789de2746ade4e231383eb2a89794db19ff80a", 0);
+        let r0 = verify_layer(&FIXTURE_SEED, 0, 0, 1, 10, &m, &wots, &fixture_op1_l0_auth());
+        assert!(r0 == FIXTURE_BOTTOM_ROOT0, 0);
     }
 
     #[test]
@@ -653,8 +684,9 @@ module aegis::aegis_account {
         assert!(m == x"96662a83a81b07b57ff154f5bbe77d5921a8880f093781687565e1375ea861e5", 3);
         let root = x"1111111111111111111111111111111111111111111111111111111111111111";
         let rec_root = x"2222222222222222222222222222222222222222222222222222222222222222";
-        let mr = recovery_digest(@0xcafe, 0, &root, &rec_root);
-        assert!(mr == x"be47de861c9e54e7246189f1728cf42fc4479ee6e088a2c235956d5260b1b5e9", 4);
+        let new_seed = x"55555555555555555555555555555555";
+        let mr = recovery_digest(@0xcafe, 0, &root, &rec_root, &new_seed);
+        assert!(mr == x"b51d7a3b8a09e001c289db3a3f6d6776084110a2c0153faacca35e1e572b1871", 4);
     }
 
     #[test(framework = @aptos_framework, creator = @0xa11ce)]
@@ -666,7 +698,7 @@ module aegis::aegis_account {
         let top_root = test_root(1, 0, 0, H, false);
         let rec0 = test_root(LAYER_REC, 0, 0, REC_H, false);
 
-        create(creator, top_root, rec0);
+        create(creator, top_root, rec0, TEST_SEED);
         let addr = derive_address(@0xa11ce, top_root);
         assert!(exists<CchsAccount>(addr), 0);
         assert!(creator_of(addr) == @0xa11ce, 1);
@@ -703,9 +735,10 @@ module aegis::aegis_account {
         // Recovery: rotate roots; address and funds stay.
         let new_root = x"3333333333333333333333333333333333333333333333333333333333333333";
         let new_rec = x"4444444444444444444444444444444444444444444444444444444444444444";
-        let mr = next_recovery_digest(addr, new_root, new_rec);
-        recover(addr, new_root, new_rec, test_sign(LAYER_REC, 0, 0, &mr), test_auth(LAYER_REC, 0, 0, REC_H, false));
-        assert!(root(addr) == new_root && rec_root(addr) == new_rec, 11);
+        let new_seed = x"55555555555555555555555555555555";
+        let mr = next_recovery_digest(addr, new_root, new_rec, new_seed);
+        recover(addr, new_root, new_rec, new_seed, test_sign(LAYER_REC, 0, 0, &mr), test_auth(LAYER_REC, 0, 0, REC_H, false));
+        assert!(root(addr) == new_root && rec_root(addr) == new_rec && seed(addr) == new_seed, 11);
         assert!(epoch(addr) == 1 && next_idx(addr) == 0 && rec_nonce(addr) == 1, 12);
         assert!(needs_top_layer(addr), 13);
         assert!(coin::balance<AptosCoin>(addr) == 500, 14);
@@ -720,7 +753,7 @@ module aegis::aegis_account {
         let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(framework);
         let r0 = test_root(0, 0, 0, H, false);
         let top_root = test_root(1, 0, 0, H, false);
-        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false));
+        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false), TEST_SEED);
         let addr = derive_address(@0xa11ce, top_root);
         aptos_account::deposit_coins(addr, coin::mint<AptosCoin>(1000, &mint_cap));
 
@@ -742,7 +775,7 @@ module aegis::aegis_account {
     fun test_first_use_without_top_layer_fails(framework: &signer, creator: &signer) acquires CchsAccount {
         let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(framework);
         let top_root = test_root(1, 0, 0, H, false);
-        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false));
+        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false), TEST_SEED);
         let addr = derive_address(@0xa11ce, top_root);
         aptos_account::deposit_coins(addr, coin::mint<AptosCoin>(1000, &mint_cap));
         let m0 = next_digest<AptosCoin>(addr, @0xb0b, 400);
@@ -757,7 +790,7 @@ module aegis::aegis_account {
         let (burn_cap, mint_cap) = aptos_coin::initialize_for_test(framework);
         let r0 = test_root(0, 0, 0, H, false);
         let top_root = test_root(1, 0, 0, H, false);
-        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false));
+        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false), TEST_SEED);
         let addr = derive_address(@0xa11ce, top_root);
         aptos_account::deposit_coins(addr, coin::mint<AptosCoin>(1000, &mint_cap));
         // Signed for 400, submitted for 900: the bottom root no longer matches
@@ -785,7 +818,7 @@ module aegis::aegis_account {
     fun test_account_with_subtree0(creator: &signer): address acquires CchsAccount {
         let r0 = test_root(0, 0, 0, H, false);
         let top_root = test_root(1, 0, 0, H, true);
-        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false));
+        create(creator, top_root, test_root(LAYER_REC, 0, 0, REC_H, false), TEST_SEED);
         let addr = derive_address(signer::address_of(creator), top_root);
         assert!(needs_top_layer_at(addr, 0), 100);
         test_apply(addr, 0, r0, true, test_sign(1, 0, 0, &r0), test_auth(1, 0, 0, H, true));
@@ -877,7 +910,7 @@ module aegis::aegis_account {
     #[test(creator = @0xa11ce)]
     fun test_digest_at_binds_index(creator: &signer) acquires CchsAccount {
         let root = x"1111111111111111111111111111111111111111111111111111111111111111";
-        create(creator, root, x"2222222222222222222222222222222222222222222222222222222222222222");
+        create(creator, root, x"2222222222222222222222222222222222222222222222222222222222222222", TEST_SEED);
         let addr = derive_address(@0xa11ce, root);
         let d5 = digest_at<AptosCoin>(addr, 5, @0xb0b, 400);
         let d6 = digest_at<AptosCoin>(addr, 6, @0xb0b, 400);
@@ -901,28 +934,31 @@ module aegis::aegis_account {
     // one full `verify_layer` on `skip.ops[1].l0` covers the WOTS+ part with
     // tree index 1 in every ADRS.
 
+    // Public seed of the fixture key tree (`seed` in cchs-s-20.json).
+    #[test_only]
+    const FIXTURE_SEED: vector<u8> = x"3807d89f250b16fa055f3ec3e1bd65a5";
     // Leaf 5 of bottom tree 0 (`skip.ops[0]`, idx 5).
     #[test_only]
-    const FIXTURE_LEAF_L0_T0_5: vector<u8> = x"338da9f9647caaf75368844a0f8bf933aa32be8f37aa86af4e4aa85c56b74da1";
+    const FIXTURE_LEAF_L0_T0_5: vector<u8> = x"1830232019c75c9e2ab72f0249cae822246b80edc33b7087a65c9560b2c23214";
     // Leaf 0 of bottom tree 1 (`skip.ops[1]`, idx 1024).
     #[test_only]
-    const FIXTURE_LEAF_L0_T1_0: vector<u8> = x"618932b666d7a32e3b50ca0b707adfb5a20748e201efb3e6a05c03c7f744bf53";
+    const FIXTURE_LEAF_L0_T1_0: vector<u8> = x"1c111532ccc50d0476cd19800d358e8a5066911652c4067dd308ec020d93694a";
     // Top-layer leaf 0 (signs `bottomRoot0`; sibling of top leaf 1, so it is `skip.ops[1].l1.auth[0]`).
     #[test_only]
-    const FIXTURE_LEAF_L1_T0_0: vector<u8> = x"4d3620a6d258ffe53e42bb9b69db12718969ce6c75f3372d86303120292b7c50";
+    const FIXTURE_LEAF_L1_T0_0: vector<u8> = x"3774c3b9f1f6441f0ba83061f84147ab042fe9810fef3b546e6389af5d342d5b";
     // Top-layer leaf 1 (signs `bottomRoot1`; sibling of top leaf 0, so it is `ops[0].l1.auth[0]`).
     #[test_only]
-    const FIXTURE_LEAF_L1_T0_1: vector<u8> = x"1cea5544e961226c23b3ced52dfa7caac6122e16116c42f6b2fec69ce014322a";
+    const FIXTURE_LEAF_L1_T0_1: vector<u8> = x"9cc3a4f7b8692784cfb68ecfa1c5f1b839bf6d13b4d21bb12918df7bbd8c280c";
     #[test_only]
-    const FIXTURE_ROOT: vector<u8> = x"0db8112457679a25c1f76a03204a76986ba5f1c7bce2add2cce5a9e3591593c7";
+    const FIXTURE_ROOT: vector<u8> = x"08f0d64029c76bbc5c5dac1f51d6ef8920b3daff5165d4051d7580da3c79762d";
     #[test_only]
-    const FIXTURE_BOTTOM_ROOT0: vector<u8> = x"0e2f82e50284c90ccbf4cc9621789de2746ade4e231383eb2a89794db19ff80a";
+    const FIXTURE_BOTTOM_ROOT0: vector<u8> = x"f6da7162aa497dbfa63dd60bf7a23a5da7591429a7489410d2affe322a1f3af4";
     #[test_only]
-    const FIXTURE_BOTTOM_ROOT1: vector<u8> = x"607bed1784b23c544c2ac23126d2fa5582e7cf20fd3e31922c3d530cef965a7b";
+    const FIXTURE_BOTTOM_ROOT1: vector<u8> = x"862abc2cf7edf525b36c923eb1447b52a076c6cd42e5e6ae11ea8d978352a759";
 
     #[test]
     fun test_fixture_skip_leaf5_path_matches_bottom_root0() {
-        assert!(merkle_root(0, 0, 5, H, FIXTURE_LEAF_L0_T0_5, &fixture_skip_a_l0_auth()) == FIXTURE_BOTTOM_ROOT0, 0);
+        assert!(merkle_root(&FIXTURE_SEED, 0, 0, 5, H, FIXTURE_LEAF_L0_T0_5, &fixture_skip_a_l0_auth()) == FIXTURE_BOTTOM_ROOT0, 0);
     }
 
     #[test]
@@ -932,29 +968,29 @@ module aegis::aegis_account {
         // an `execute_transfer` at idx 6 with this signature aborts with
         // E_BAD_SUBTREE_ROOT. (The WOTS+ digits would differ as well, since
         // the index is in the digest.)
-        assert!(merkle_root(0, 0, 6, H, FIXTURE_LEAF_L0_T0_5, &fixture_skip_a_l0_auth()) != FIXTURE_BOTTOM_ROOT0, 0);
+        assert!(merkle_root(&FIXTURE_SEED, 0, 0, 6, H, FIXTURE_LEAF_L0_T0_5, &fixture_skip_a_l0_auth()) != FIXTURE_BOTTOM_ROOT0, 0);
     }
 
     #[test]
     fun test_fixture_skip_leaf1024_path_matches_bottom_root1() {
-        assert!(merkle_root(0, 1, 0, H, FIXTURE_LEAF_L0_T1_0, &fixture_skip_b_l0_auth()) == FIXTURE_BOTTOM_ROOT1, 0);
+        assert!(merkle_root(&FIXTURE_SEED, 0, 1, 0, H, FIXTURE_LEAF_L0_T1_0, &fixture_skip_b_l0_auth()) == FIXTURE_BOTTOM_ROOT1, 0);
     }
 
     #[test]
     fun test_fixture_skip_leaf1024_full_layer0_matches_bottom_root1() {
         // skip.ops[1]: idx 1024 -> tree 1, leaf 0; the signed message is skip.ops[1].digest.
         let m = x"b66cd1ee383ae8930b7afea625bb3e949cef3ca216c52d800f78c85c8a659c33";
-        let r0 = verify_layer(0, 1, 0, H, &m, &fixture_skip_b_l0_wots(), &fixture_skip_b_l0_auth());
+        let r0 = verify_layer(&FIXTURE_SEED, 0, 1, 0, H, &m, &fixture_skip_b_l0_wots(), &fixture_skip_b_l0_auth());
         assert!(r0 == FIXTURE_BOTTOM_ROOT1, 0);
     }
 
     #[test]
     fun test_fixture_skip_top_leaf1_path_matches_root() {
         // skip.ops[1].l1: top layer, leaf = tree_idx = 1, message = bottomRoot1.
-        assert!(merkle_root(1, 0, 1, H, FIXTURE_LEAF_L1_T0_1, &fixture_skip_b_l1_auth()) == FIXTURE_ROOT, 0);
+        assert!(merkle_root(&FIXTURE_SEED, 1, 0, 1, H, FIXTURE_LEAF_L1_T0_1, &fixture_skip_b_l1_auth()) == FIXTURE_ROOT, 0);
         // Top leaves 0 and 1 are siblings: each appears at level 0 of the other's path.
         assert!(*vector::borrow(&fixture_op0_l1_auth(), 0) == FIXTURE_LEAF_L1_T0_1, 1);
-        assert!(merkle_root(1, 0, 0, H, FIXTURE_LEAF_L1_T0_0, &fixture_op0_l1_auth()) == FIXTURE_ROOT, 2);
+        assert!(merkle_root(&FIXTURE_SEED, 1, 0, 0, H, FIXTURE_LEAF_L1_T0_0, &fixture_op0_l1_auth()) == FIXTURE_ROOT, 2);
     }
 
     #[test(creator = @0xa11ce)]
@@ -962,14 +998,19 @@ module aegis::aegis_account {
     fun test_create_twice_same_root_fails(creator: &signer) {
         let root = x"1111111111111111111111111111111111111111111111111111111111111111";
         let rec = x"2222222222222222222222222222222222222222222222222222222222222222";
-        create(creator, root, rec);
-        create(creator, root, rec);
+        create(creator, root, rec, TEST_SEED);
+        create(creator, root, rec, TEST_SEED);
     }
 
     // ---- test-only key material. A WOTS+ key whose chain secrets are
     // sha2_256 of a tag; sibling nodes are either the real neighbour leaf
     // (level 0, `real_sibling`) or tagged pseudo-random values. Verification
     // only recomputes the root from leaf and path, so this is a valid tree.
+
+    /// Public seed of the test-only key trees (all zero, so the test trees
+    /// are independent of the fixture seed).
+    #[test_only]
+    const TEST_SEED: vector<u8> = x"00000000000000000000000000000000";
 
     #[test_only]
     fun test_sk(layer: u8, tree_idx: u64, leaf_idx: u64, c: u64): vector<u8> {
@@ -985,7 +1026,7 @@ module aegis::aegis_account {
     fun test_chain(layer: u8, tree_idx: u64, leaf_idx: u64, c: u64, x: vector<u8>, from: u8, to: u8): vector<u8> {
         let s = from;
         while (s < to) {
-            let input = adrs(layer, tree_idx, 0x00, leaf_idx, (c as u8), s);
+            let input = adrs(&TEST_SEED, layer, tree_idx, 0x00, leaf_idx, (c as u8), s);
             vector::append(&mut input, x);
             x = hash::sha2_256(input);
             s = s + 1;
@@ -995,7 +1036,7 @@ module aegis::aegis_account {
 
     #[test_only]
     fun test_leaf(layer: u8, tree_idx: u64, leaf_idx: u64): vector<u8> {
-        let buf = adrs(layer, tree_idx, 0x01, leaf_idx, 0, 0);
+        let buf = adrs(&TEST_SEED, layer, tree_idx, 0x01, leaf_idx, 0, 0);
         let c = 0;
         while (c < LEN) {
             vector::append(&mut buf, test_chain(layer, tree_idx, leaf_idx, c, test_sk(layer, tree_idx, leaf_idx, c), 0, 15));
@@ -1041,7 +1082,7 @@ module aegis::aegis_account {
 
     #[test_only]
     fun test_root(layer: u8, tree_idx: u64, leaf_idx: u64, height: u64, real_sibling: bool): vector<u8> {
-        merkle_root(layer, tree_idx, leaf_idx, height, test_leaf(layer, tree_idx, leaf_idx), &test_auth(layer, tree_idx, leaf_idx, height, real_sibling))
+        merkle_root(&TEST_SEED, layer, tree_idx, leaf_idx, height, test_leaf(layer, tree_idx, leaf_idx), &test_auth(layer, tree_idx, leaf_idx, height, real_sibling))
     }
 
     // State transition of `authorize` for an operation at `idx` whose
@@ -1067,178 +1108,178 @@ module aegis::aegis_account {
     #[test_only]
     fun fixture_op1_l0_wots(): vector<vector<u8>> {
         vector[
-            x"2ba2fd5a08e2ace460183c9cbf65f256e9f2df69c401078778f919d9213e09ae",
-            x"465ae8facb833a2e8b586dfb55bd146a85b7451e0dcac795a68578f87f6e6069",
+            x"8ea6272780ad240f7dc82b6dd090bb4ac21b2d71c18c52a41179029d4ad27873",
+            x"9765927cff2dda0bc01cdd6be5cc0c3651330763a16ce0eeb18cfe53e25af7da",
             x"5b7f98ecff37e2cd29b9adec3bcf1dc128bb005359828975d079eb4505c0ee9e",
-            x"a91cfc65e05cc78482103689417e341842b9ca23ca8919a59f7643a4b8333e6c",
-            x"e4cfe8de0a5b08b445f9152f4a7aa87a57cbeb26d45aa54029a3a2bb8b1429f2",
-            x"1e3c4db9ff0a844d7075a8eb65068d0a0b3fe16b9a326204209968f6d61618d7",
-            x"b46140dffe5a8db66685a4214904fd9bd594741a451cb142b3cffb82a93cdff9",
-            x"82a7d811bbf3db7ab046ea1ad0b695dc43003ce5f4abce4f799a8818727df5da",
-            x"fdd361dc4250c25c19e4ec35b821bd08a594de034b421cc8d7569394785c0389",
-            x"6ae3b025d5f74e596ca422936cef0fa0a40cce3b6194cf076b8625a0a9b4cfaf",
-            x"044360137cac085959120735430ecee6b70b091d87084226c3eb6cfbc23b9bfd",
-            x"dd80d6d7bade858a6b73802c6997fc1ecfcf3aee174e82faf45762ec380e3f62",
-            x"7737003ff5d3bf71e6abde54e9bc874e2ce4ef73ce2348b533f02909b4b2c830",
-            x"51840135442eb59f7945d3febc37c5d0775822cf06330982449000833df2c457",
-            x"111fada9f272e71e80daccf8a172c59ad0c54086737bb2f93a9653308f6afd19",
-            x"35f420d52210b77abf29b1f94d77ccc5e48bf5141a871fef65da75de693749a0",
-            x"08c1b22331c4750685f669ab95a5c64df92f32e4b84ff4ef07f5aeb3bce13a3b",
-            x"a086521cfbaaf2421f4ec411c1aec1898ae91aa9b1191e821b4b4fb54bac1600",
-            x"5af12f532342a99cb487894ed6726d547023020789852c5262c631f880b6c543",
-            x"1448f9dabcccb3dbaa27f74da0bda5d0faace84e3729acdb495979233e0f9b05",
-            x"7f6b037d035df8519e87190bb12b0c6e027b280fc3f71966d16f6b82e95db0b7",
-            x"bf8e81b0b18e658f995449a9ab10e5f39c5b9490fadf9c0a8c1b87f00c170a43",
+            x"5077019b92cdb1b7aeb9294185e751d8cbc402c50149b11f639841485baf4533",
+            x"00038b72b53417ef016094de4f850ec3bfcdafbe7fdb01607515c648199cf94d",
+            x"012ff2b8d0f7740a909800e14873109dd28ac8c44c0af7a513ad3ab1d91679a8",
+            x"4b291c6875b6d549a647d575a0ee54d771b3499d7643dcab6b0957f08b6658e7",
+            x"d9e9b936957542ddd2fa159dcc401ecb908f52610d1c912e2b057569af882230",
+            x"c685233b1ac5118afe8254b74b86152adb870f36800cea83dcf46aa562baf3f9",
+            x"dee55c760370081ea61c9b00b92694febb1132ecaa37677d4caa5e8aa16c04eb",
+            x"bd3cd136b15851ef82bed5df68f5943fc9512ac7974f990a6cf2699ecaced7dc",
+            x"3cc3d66c38ca0042b13cee81b4987821457d16d6dc9f6dbfa8fa8b611bff963f",
+            x"2628c71b883df72bf1847b92ff2e078868ac738c058fc0a24f42b6d6e4096403",
+            x"72ca917192ef82a96caa33f0bdf929b7cf5de47f05ba6ee8b1498cec0662d8ed",
+            x"d3412b0e09f889aac63a189cf267ae78dd7b466aaf05fec07d05b85b0d31e0c2",
+            x"d36962d586a81707a0a881b6dbd3d392b91e6b0a31270a1cf3c95981444d356f",
+            x"6ead864ca29ccbf1cb9997998f195d61068121efcfa3facbc606478fd9d11176",
+            x"a47f91d99cf2266c13c284cccdc831c5a73dbe549db38fdc2a1e89e0f06b3c8e",
+            x"b553db92b6f3aaeb903a6934a1adc13be1c17d637e9f97397fefd1bfa3f2ae50",
+            x"b42de23aa1b441a80a408ef7da2025b67bc822976431fa363c1176886cff3d58",
+            x"a366405adf7935556f637d2a3b285584abb2f500c8b723b68330eb9e5c189d80",
+            x"5310ef9dc8e74a2a7364575e1919471734c784efb12cb814a2fbaa325da67c3b",
             x"2276097e8e89c615ced336109d565af438868b8978ed77301a4e27670607966e",
-            x"e8b16fa15e95d3cd06482c1e0464cd8bd49589be455017a094868b808d7e6b8c",
-            x"d6cefc33f5d189b1487a83329a3e628cc56ca8e6f7f1ccdf527acf34419ea17b",
-            x"8a46f4fd4468ef4a67eaa45fd2018dfb9d8dbcbedf08cb7072971fa85f2b292a",
-            x"58cbbd9479d6f0a89df1770e50cdbe776697086ba36db8c8a4dd3f543a660645",
-            x"432352b4f849d24bbde7b7d6785ba25efc27ddd4244cfcb518a684a8e2a9b434",
-            x"762df77329744bd934d3bfcbe94053f277206c1bf152e9fcc190826cae820b33",
-            x"fe6b4b691383d9d1f2ed79a740e05d32260321a6b29a8b9ae9299c7a66669fde",
-            x"b467ec3a8507aa44b2cbe357b7b9204ef92be99690f32d670b5b167078427fbe",
-            x"ee75db88255924addc5c26c769ebc8c900c42d44487341e7478eae247fb21e0c",
-            x"0ab95f648e8e778cf70e5aaac2f930b001b76f1be42b8de61269e98c97cfc7f4",
-            x"fb7797aec1659c7426f8f4f77678780fca0ab0a06f6d3f0268add614c8ff25c9",
-            x"805ef0e15b274db4e393feebd2fd75fcd006bb3d9446c0b9d8751c845c7d1834",
-            x"3f5c715a541e14af56fcc0c4b317a492f850478518031bd0b6d598341ecb8750",
-            x"7ed62848e47fa8b5058737f8b048f15c8587e7ccf335bdde827d22a30f49cf75",
-            x"2d3a7daa90acfaaabbeae31f1a629813edf42072c86e93fa037f68671513d2ff",
-            x"b6d91fcdbec380b91d21cd66a05b6835e6e16b512e3015a21583a8047bf9fe88",
-            x"1d12193996e60e0cb4a0f0c4a67ddd593c62a3b8d18169748a73cf3b3526a8bc",
-            x"e8cca7517ad6ddcaf0321c732cec09952a749009c2adc72742a2946de2e8dcf3",
-            x"fa94854c9355b46de38a56af5e593f68d285b76116245aab32318b85477e79fd",
-            x"0de452f0b8445c8b648b80619d8f9f99857ff0cbf526a9bc55236604b1cea1e6",
-            x"a308955fc83adc5b8def964e52e0be96300711c7e3820e1a6645caf16104d110",
-            x"c6a7de768d788648781eb7add258b127f1a3878e9305ad28b0520ac6fdf63c06",
-            x"a0e61d0a8d475daf3b71c3dd00c0758e748e1be6049c5551946582a583a8e8fe",
-            x"b9ff2862546ba0be8440f5768fb5e4ade5e4b495366863b338fa32464d2c9b2a",
-            x"70975dc50603c763dfbebd254db85f3b9be138111e08e894dace312fcc69cc70",
-            x"882bdcb29381ebad154c968250e0e86b699b2d54766de7686da70c51a6496d2b",
-            x"44c1afe9f5813daa6c72e8ec517f75175ed42d5c3667d319817956c933e08b92",
-            x"2a657054cbfce9fc52cdb2b19dfda707367303a13e18690e4be597332bf0321d",
-            x"75a50e54edfd562c745365fd7e6fc00aedcbc0e41800323dadd6501d1acf00a7",
-            x"e0fdd92bf83c6f4d7db9d7d8263dae5089825f1f8410e5557fda8451a5b84e0c",
+            x"db38b827dc0345fccde7885f571a030f95b37abe51419bbbbce8a1505da24543",
+            x"5832fc1a81afe68cb136bfe7267de1be92dd89f0a50c9afac8a7446e7c3935e1",
+            x"21fc93f555d935e63c780cb88e6205acac3387d17cb1514ac2ca36975cb4de92",
+            x"c4589aebbd0e1a03aabcc56998021d6e711446c5ba6ae10b1b9b8e3867144dfc",
+            x"20ff8efaa9c232bc9e91d96f56ff262920b610473f11533ec9936ead7e0ade7d",
+            x"7d0d6c17a8ffc8d079583bbe4dcb66d1e6d52d84da1661b1ea2160284d6eed05",
+            x"e2e61358e45fdf62914645145c8a574464700a060ea4cfd053f2e719e1801eca",
+            x"ee4f199b95b04379805acdf823b0c4fe23bc9a43ac61702732166d528dc19d20",
+            x"4550a498c6914980016eac297db7ffdea31984fd9cda042e4b6dbbe6019f0f85",
+            x"592bb3f7b94c4cc2d28d289059818475a0ab07ee879440da389602a223de605c",
+            x"097e201667ca6802e60a9b978f9ccd384545247b46b09b4470c4a706d57bdbaf",
+            x"1e18abeca53437b69b9bc37326d8e9f036357fed772feb356756d5aa016b086e",
+            x"2c07b3cd887742225e149b671687224d4bcfe50f4a77f7f107eba0da909510db",
+            x"5894cb79bbeb6129457e804958ffddbf471e3d24b20032f69de0618773ff4c74",
+            x"31910fd637876ff9acf84eed87e3149cdae584b27e89a2edd49887276f5f44a0",
+            x"47ac186f5108bbffcf651f44a75f4dbbbad2e31e6af118f67efec8a0118bff2c",
+            x"63c6093d42337ec7cabd727cdf35cbe4af578c15c2ee7098f82d323d9e19c3ad",
+            x"0558a7e4e6bde8d672a3110a3249adae904d05d6ebb8d74fb857e23ca65e3430",
+            x"f6822bf7ffc8c5c06fc65ddebbad2c18ac055ce1636f76e37c845d0e7611b611",
+            x"b187efb8b0e2b6e733a761c29f75c2bcb3673776f0e1c6c0c99e742baa729c08",
+            x"e41acda343992707890b6e212aaba9bb73cbbd5711587e88090490885eec28dd",
+            x"39c0677bca5edb09a2fde2e480879199448f3289234c84c461cff77523a471b6",
+            x"f989574e8f9a72d62a1e744fcc16946fd846849cd39b958cedb5ec2fdaf60567",
+            x"8fabf9f35684e94790343218287451aa101535735b571aac0cc8165382445f5e",
+            x"38f04d147b053ac82b5f771f025ef2d1d6f381c49df997926ac72cb3a0dd66d1",
+            x"a1beeff76f74852ca592b5f5ef6f97786b09271f44cf17dc26c827cf29fbea2d",
+            x"0e3e9f515918a39060234b9904f62cb22e8cd76212634776d88875cfb27fdf0f",
+            x"935fc0d32a91843971a44b1389b8c2b95290bc646ca06b75678297360682481c",
+            x"5050908586804d3b51fe825b9ca4535ecdcd5b925f13479545890dbd1f65f218",
+            x"42fad7b795dce960ca189b37a8c59c5e88261b8ff1f4af1b05211fe2786baf1b",
             x"2f186825bae762094aa4ad822af781b434b58c34668e4d4d6862d69d5cfb390d",
-            x"1a9e1a99c59d59e9cba12df4b999c0dc7ae89bb858cfbcc4c80305f5df18c071",
-            x"04d94d19f6ba91fe18b6683de54e5bbb3320f2d44ae65a6b350e8df3fa47dd56",
-            x"a98015850c7b5e8d694ff0d846bb55347120d38a2fac659fbd56e4c477e4bfed",
-            x"d1d5f827706c8ac9122a89fef4104089e4effc7be8fcd88a8a8732fff67ed2c4",
-            x"c6d152d257f44e5aff9c2bb0fb0087ae0ce59dadfa2575b4489e28586bccd0f9",
-            x"656225d3f6d7eab16ec156bdceaff613653eaf84996bc3b345f40a9bebc2f860",
-            x"a1ddd134063c7709f2630e76e22b9f3d49440de35249523f9d441e5d95db04d6",
-            x"4a67f7ee50cc7e4a2de34b81b4e2fc0196f50a571c67f5a1cd9ea0c91b99c6ec",
-            x"e2a615f935665cb77f6a75d86c66221de04245cd04a767463e9e0dc60442f7fa",
-            x"9492cd5b201c29257daaa3e881de515a280de1accd7e31939db43e57bc3fc6e4",
-            x"c5a0173470cb83b2520e9951a50258382ccabaaab0e697ab9d8b8dc52e28b124",
-            x"57d6fdfb501e531588e0dec870191be7171f0402f55edf121452b2b515f9e84a",
-            x"3433cea87206ddd1728b74549a7174f90dd3303ce822f77f480cb93ad2572add",
+            x"5f4dcf51bf65b3fd380a3644ef58c00e28844e688de9298c39a77a6ac3e02813",
+            x"33e47d74409e3b64644be592713308a4d84e0eb62c2ad47d521bfcf18274967d",
+            x"a97b60f772099df7e5a2a9190fa3c9b89a9d6f2634d6071670078215e0b71f87",
+            x"0cf2cb7ac3de78f03f8d897c6c9f3d45e8f45b1e42ad25e8b29e015ed58f9c8f",
+            x"780329c9fe52ef5b34a94e3288a39e3eef6d65080aca3a1d2500c93c81346454",
+            x"3b4220d930d531f56fbf6c4dd4fbdf010226e0e6acd89bdafe2500697b85d7d7",
+            x"aa94b058b6c004477d0ed3c8aa400d8e7b9b99cbb59735e583bddbef891306cf",
+            x"c7552432ef193931479c0543d440d63597cd6518d093253c7974f9a5bf984619",
+            x"73f2f88af1edbe3afa599aa51bc8ed1481915c6e1252fee770b4ed02a38e13a8",
+            x"ff1568f0a5ecb09a5e1fecc99ceb5cee88dca47567498c61ce095416066904a1",
+            x"4bb77d1956acc4003372d81fffd6d27f96ec45eabeb72fe23fe23e8f88d062c7",
+            x"0e173bfb1fa245b82457250db24d770ff8df25bde7497d0050198267d64f95b3",
+            x"cfa42e81ce030cb5bccdc3260ef42385babecbbdf08df827dbe8e160d2de1646",
         ]
     }
 
     #[test_only]
     fun fixture_op1_l0_auth(): vector<vector<u8>> {
         vector[
-            x"05d036257a8a6bf32c10a7d52fcc91d700dccbd57dd9feb74fd36517f3051ec0",
-            x"d9062fbaacd1bb8b5b631d3f740f5bd4273ff1f5845dacc7e67f599a84417a3d",
-            x"cd4d0c50d445073839b3e70fec476f8bd80c6112e50335ce772ab65e77e71640",
-            x"5e72add3cb130b8fbea418d1f3b2a2a506feba02be382c6a102a047e202ee7e6",
-            x"575335c4000842b2c80d0584c6509c92362474725f11085c3b3e85e3f6ef3b62",
-            x"9a6609a09286b8d0102b29d242a358bd3f100be36fc89c1b3e2f7c6f0698707b",
-            x"1bce46fe9ddd267125035bff246c715b3702d09d573d98f4143770cd8c5303ff",
-            x"1521e03b61b9cf159eca6c3fe03ae55a686d619e6a160f502e95e0f0d4c95b01",
-            x"b3551ec61ae4e21230b7ae9a4f408b9198ba80698773d5e202af0325c4b2b6cf",
-            x"166f57c72b5c66002859c7b910151f2b5b8c51936f7215f16e7381796726bce8",
+            x"c370033356a66e9f1fa83c88a9994a6cd2d26effb8d808eff2369a42234a0343",
+            x"d933d4d829c4c2e447887a177989e94c9667c1a2c5517c389186daa2502ae35a",
+            x"cb0fdba37c4ea8bbf234c2b5cd0375a004984c9d645f08d2acedbd3f7454bda5",
+            x"1c1742681dd27a9b4db2c3132a6644642fe1b314dd52c42f7a1319efb8fc1251",
+            x"fc38c45df857bc7f6e87a1313c3483ccfee0cf7dece1de51b14cd8e100cfb423",
+            x"141ec34645751ef15f99000b543d1ba29316dc0db1df067730978edee4ce2f76",
+            x"24a23886f8cf8d1b5f2bb23565bfde289be5f8476f33fe8413a3f8b757490cc9",
+            x"640857986fb250218d967098c1b55985bb35dfb6ddab797df99998b03d15b726",
+            x"36d6264b659d94a7641998a483348fb0cfd6ef5d6701a5ae3902e8b7823b92ed",
+            x"529438c49e2b338b60d23d9c352fa165801becfdd1a07441720d01d843df3ec5",
         ]
     }
 
     #[test_only]
     fun fixture_op0_l1_wots(): vector<vector<u8>> {
         vector[
-            x"26299f57be2f391890ab3f5c3aead99474498e22b582272e4b7c299ac72fd2f0",
-            x"4284f25cfcf2b0c3e5840c982fc08bb1c23e2a5df2fc3760c7f5a951dd95401a",
-            x"ac30b133c6a96d63682e2ec9b12d3bac973da9171045bfbfc30bac2e7e8f47d9",
-            x"6418297d02533e30f28cc8862c3690067869bd6f83e7b57dd0f4376826401c69",
-            x"a88d4746eba990b00d47bec3931ea7b1e972fb323520554bc88f8bfe676e5c26",
-            x"5893f800d84b32c955df8b05e059d40d6c41f273fbb23d755380a676c31f62da",
-            x"2da612db5b95b9ab6736b9a7a6a8dddb100d204b92b01bb1854413ce3d5161d0",
-            x"2e3591b22fc5e0274cec9aa3c2d129c861b67714da8659d53c50750679ef1dd2",
-            x"17c9561352aa641e9aca97da851e8b4ee3b35b11306b113aaf1719738c5b7e30",
-            x"274571e14b93703f8a6f30ae99e8a081386b103e012288d899f7eb7d3a3b7837",
-            x"dfe971a61e5f957ce04fb78411908980cdf055390f79b53eabfb00a65fff53b5",
-            x"ba4f27559e563bfa24c37d5ed27a8530d9b1a59251b983cd5b4999076650a6c8",
-            x"5fa7742efe0931457b43f09137e2b03f0d19746041938ffec6620d463b256129",
-            x"dbc59af4ecae61bbd34e2be095490deb185fd979cf29e0327b6a431a15b1b456",
-            x"dbf9ea4117dccf68525b70360ae6e60b0a0ba6beed2cd35d15beb5e614c24120",
-            x"208d7aa6448c6a2752d879cee25499b9c258a3bf3f0e2e99369c5d38ac8653f5",
-            x"ae36180b84b8c4bc19e4f991ac47c11147823558d3faf7b529e0c8ba11aab3b9",
-            x"c2c686592bc89b5e0cb0f3c7272fd7ff7d31a0a7d120ecd3d1b2f2eef247d062",
-            x"792713d2901f342578393d2b6182ee8fa4818c22c299d8f87fb66dec0e9d8d64",
-            x"6892622458385fb6566c7db0f8cb3ec0f955645731f0691af3145944e26f22ec",
-            x"1a6792446ebd17dc61cd71fe8e58bb150a14ef018ffd52e47eb5c2e37163ee73",
-            x"e9037e646f6f2468ecceff911b71135fe22c2de223b7e42c0c96696a6bcf1246",
-            x"7e59a45391a4188d41ad18d1a7ec3027572b723367d19acb1b0bffcd8f2f4cf8",
-            x"9d8806e51e09cd78bc9b8a623e8079f660d383c61cb433511076f49f647cd8ed",
-            x"749ccdf1e7f8b934eea3d84fb335193812cf33161959f82483b6eb602356bccc",
-            x"b567cfaf7686560c245ec227fde2a21f87b792b5200afa2907c7467299b57231",
-            x"228ca76a83774ea663bd0407d35400e378206a74d7a73120cea258726a2f51e0",
-            x"1ad419f75fd7b0973d274ea4014050292fa7bb55e0d0749621e98cec049dda20",
-            x"9ed2bfd7a5b367f02523d1c3c97029d23f60494b6e9fb7c46dd9d64a3f1e3d82",
-            x"165e08c2a79be2cad41dc73aebcd9f3a098b36faf683557e2dc198d25f2d6a79",
-            x"242ed57a56860704e3aba5658cae7da26bc381a8784e2192734f9a47a1992c61",
-            x"0c8beec77fc537c7355f6db92ba69fb537e5ea372ed5f75392237251dfd2363a",
-            x"48d7dcd1de18c860d516fab2fff9e38d747f3a596c9f3d9604d56518c826ddaa",
-            x"1bfa586dac80d7c4542e617968cf753a3dbd5e48aaa64d7df7f140e364413ca1",
-            x"47336dd545f557b95c03a0dc6eecc4211fb258059e4e9230449af26ed1de48dc",
-            x"13bc8d0c762df1499a0eee4344e81975a2dc8dd0514c56e7fe8e1b3c821defb3",
-            x"9f656cf4a1320ab6ee3f8ee7cc23e376669e3652ee57cc85800ca45e8c19d307",
-            x"b6522aa1cca9f2313fb34a54ed82b08d10ce80fd10b750dd35c621fbd86649f4",
-            x"6079e851747446f3a71f449cc389755b286843cd219d1f3e40b1ca7ab0d7cde1",
-            x"2d74a9f38c21c326cc1fe3c6fbfaab3c8fa3997cadf45b39eb64710115e39745",
-            x"c1100e3b6a09d8a4c25f180e5a6be0f6c54c822ee9ecc8717919f52b3394aa58",
-            x"c8b21f9504b31f5708abb1447aa8ae81857e46564b753aa098de6c6f17bb0639",
-            x"9751dfda6e63569bd2cf1da6cb5c1a1c9c18bca203af3416457b9dbe726b4cce",
-            x"ed771242321bb37a4f46356e116c227b4cb8e5c6b0167919d6b9fc3bb819c537",
-            x"bd5d265668c05190ede986bcd129442fcdf370935e7cc135079b665978b5ebcb",
-            x"453f876ab5aceb2aff5f4c9f7aebe88c8bc80e8bc83f243e5eff6d42a1493f14",
-            x"33490b284f41cbcc2bf17d9eadb0b620d3620c3ce7574d88c3a2ce24d9b67ab5",
-            x"6c3770d2292faef3a99433c77ce8f2f27e715c6a919ce3e591132c70a455fa11",
-            x"61faeeddc488319caace91dfcccee6c31603283883142ce7b8c42f3fc0010ef8",
-            x"2e33624b961249d8802a0a931bdb1ee42c54ed1ec1b30deafc4d7373d841f753",
-            x"06d1435094665d5b8faa371b646277c6603a2ec98b7170dc9e536c7c4261ad82",
-            x"2ed10c36d4f54d76ba45257fd595d3f4035bb5b940a739ecfd44f73f59294d87",
-            x"bfdba8a60347a491fad944d40b1b17b0328872f25b2cb362d536843c46a7a23f",
-            x"a398bb4823f91d0be807a01bd633a92945694685f8d0c3422b99feacdfd5c588",
-            x"90ef89faaf08996a299742b0d6de19472c778f4026394235bf748b6c29dbc02d",
-            x"6084b8f39b78c8761bb3c5cac8cfa110bd6d16a10d97b19fe8e28e2c775ad3be",
-            x"ec4a9bf8aa0879f91c1980501a0af39f647f994d60427c585aa805b23d0dd221",
-            x"c80de58882218fc26f98580894071d7c130d8480a0542e52cac8c68a4d5e317f",
-            x"aac433cc9cae94b2012f6fe1096417e0712065321f21a5eddff714d79645faa8",
-            x"cfde7c2763becdd2287feb905f9fc0046bf240143110186acd1d4dbc964d4596",
-            x"9add6bab8caa9ff82672659b216f9307f897e1633035729fc8cea453ec324a7d",
-            x"0585787e740569a53231b4697ce232ad34d86c8dbb6a1b66ebccf2044949fec7",
-            x"1a443e96c2a87b3fa21222a0d5f910d50c606c74f12ab14a26b82fd312a8341c",
-            x"44c280bf5f89953b8d40618e6f9ed90ed2ca367060b27d53e78be62cc3d98eff",
-            x"e8c6e2fb70398cc5e443366b6f6c4db705b77bd36049e14b8412f0c982a9d093",
-            x"964b86f10c103970df1208963d0d8e1febf59544bd9e0810a8adde4998d972fe",
-            x"df4c92c232d7233ee0b960aa1cd2758130be9defffedaa269acc58aa404a75f4",
+            x"a129b67359995947545903464bad5922e1bd566308b288556f9f00a7203ed5f7",
+            x"130d0462688e8b01d3c4afcd95526c8fa62a72755aa961d4dd00cecd7f8f1cf8",
+            x"b2a38b1eee674e9696274f1d20b4a407a4aac81dbb6095c140b3dfa95123f414",
+            x"1b402a3a721ebfdbf9e23e6b2c880bf4a1a146cb253944cd394639e60f12687d",
+            x"16b43656772d61614b794929e20820ca0ec3fed22933d44d9b788ff46f4406cb",
+            x"e470370b0be8dadd95d60d4b1fc02c6e9a47cee5a61c9fc0f663db8c02a2d9cd",
+            x"eeec8297377ebfb09352f1f00c2a9ba69e331dd6ba352a9a30d976c4eab57774",
+            x"876eae96bacfdbfabba798d41b528930f18a3e8273224ab4be4dbabcae232801",
+            x"d77def98feffcb1892c7dd6ca64cf748af1b04426d80d5bf377c44a2178e0311",
+            x"76480b4ccc3a4c7ded8c4edcfe4810e045ef4f130bd7ddf98797868a36fcfb85",
+            x"ff69374a1fbfbff49ccbc618bb96eeacfe8085b54a30af567fbc8c1bd31827f8",
+            x"f8cf94511eb66842888e9f3c2d8b0b8cebeca1adbd5995c2625710d03c808b7a",
+            x"cd1f00566fd0f2000309ca863729af79008effe5ec40d5a123a2a0ea74af57df",
+            x"06e7133b63ec7e8929587d8fc6c6ff0832b0c64a4d726b8cf86bca2ce71a57ca",
+            x"d8472632aeb9b196aa680075d658dd7f9a7f9e20a7ca5ecd21262e62e01358e2",
+            x"558f4fcb14e2edf753ba4c0d0f9a62426c1df441eccb934fb54466d370b44d41",
+            x"a940cf9df568613ab2466bbce8193a9d88a9db589b5b131397e48e1623fef3b1",
+            x"94acba0c581b8983b6f1c801c16df614b10b318259930a8c7b2c4b1b1b928a3d",
+            x"f139f6388e684acb8fba330d13252f937a0c1a48aa1ccd31ff00cdb463d446a2",
+            x"4405da81745e37b77b911d2f77d93797ba06fe6658a7a2ac002f210b7546e822",
+            x"abdce273636f713859448354bd7f6e34028a83259017cecff4d6ccda7559c322",
+            x"599476b15654452c38e3d39bc372f79714e431006e130adb729859ac915d3671",
+            x"aaadc03e9075e6a0b72dbdd82cee2674f5467f7299e134effc945590027cacfc",
+            x"6ac0e31fb248b39f7cac92c2829dca6963ed045a866edd2b7d55c988568bbfbe",
+            x"69ee391976a874dafe7f19b2127c528f6bf2b598501e2694af6b3da6ba65f3ac",
+            x"6c3b7924dd7b9cd7edb4dee27516a5260b8872ef96bcb128ea1a2a559eb745e7",
+            x"0a620e8e3fa3df5eb7c311b87d3d2a410f8cc78e73f8c6436a2ceee971857b1b",
+            x"45c3105f7ba61841ca86b387c1bdca1ef27793d0b90d5b1734bea33e3ee490b7",
+            x"b84414f43d12a65596f332ea01f3639039d97852598995e5f21e24b880aa4b41",
+            x"a3c08ce9888cc26052c4f9b2817b1c290cec9d03b07be6b1aa083ca6c7103231",
+            x"1d7d6bfc0a85038b65ce831026c1f69bcdca04310e32ca0055c4d738413e5458",
+            x"3422b123c844f4eb796acb8eb8bbb89e40d6f19ca9c5307b2925927ef4af6ef8",
+            x"412c5767af3910000c8a6c70be9bce8b3ceec046490491e32b1cfc7997d107b1",
+            x"a745e7329af68d34dbfdf1182e5d296eef57a33fdc4da40c93896a56f6b1eb28",
+            x"00f1bb4a72b5efa7a9730931185ff19596d23a408e457a3bd6a97ae8eed6992c",
+            x"7d49caf572f306a5f10143300890e84f550785ad4b3dd63672ac126c1b57d93e",
+            x"c6259eda0dbaf11d7f52eeaf4fae54cb1f20f54055cf59b604ac55bd32b59b0a",
+            x"01ea4f9b6ab1cdb65dcea0bdf5eef856bd1a42681c3e9bf69109b7a908ae6f79",
+            x"4bbc8958c6c1a8c92474b1e4f3fdb077cdf37af7cccf80b7fab9b59d745df0b0",
+            x"790b6e8e27d8a993c059ff62d66117ec6b9200b27bb14aa22c4131a2e3e07c4b",
+            x"31767166002b3630f3a96a68d2a8a2777330984c55aad7f5998ef63ae5a55906",
+            x"99aa4b5761d72ab2e578939865f36494724acce3170cc0628406422727faf5ce",
+            x"4b77310ddf9998e4b713c2bc8ad60ca098eb189c7689d6de2b4810350aa68a83",
+            x"2fcefa78ef38a17dfa9b534ac543ee7b47e93769de75ce87a81a305d2ac25841",
+            x"becd1375873d7dd7b8144d143cbcc970b8ef68ed1b522fa46739f38c32b3d82b",
+            x"d8d09da5e074912a0ca146f4eade066e2fe1d5482be9eab530376d1d3e9840a9",
+            x"15033465ac1927ae532868d0e474e8cb699778fb497a61ad63232696ecd80d15",
+            x"c995fca4475eb89dd3e3e1dc05103af50a9140e6297f90180b2ec80d9514d91f",
+            x"e5616e9f6c4f4d408e86ac0920ecce063b1184a90c20ef5526549dea9d3a6a53",
+            x"89e277cd5ea9077b19f583a9a249b3969e50b6771c82d5a2423b9cf2f57331ff",
+            x"8460a36f315b39f68718a3dcc8475cc8db69d5de28fcbd81897c5c4ae88e79f6",
+            x"2f8358f6530153c1712462bb6512d620bd65459a0441ee094058b5a82e096f44",
+            x"978f1de488bfe1c89a8567058f733c2ac9b1350ffc5d99cdfe868cc04af50c8e",
+            x"fd668b11af796b6ff3eee0db310c7afd01827f727ae0226dc4cad497bd4c145e",
+            x"fb44160db944b097cb7af1cb7853a0e21af9c7e6cedd46d7ae73a11d100be6cf",
+            x"f80e9fedd84e1f418bd55e0e7c5607010e010bf8a064c771b53843c698b9a9be",
+            x"4e824b658fffba9807d4fdfb62521de5adbe0b60dcf1ad718f19171823e7aa09",
+            x"e932e07efd5ea0b7d4559571279da2aa0a234fda553aefced7e5370d68f81a7b",
+            x"b51094d9377473c332193709804d849f06b59ffc5d6133478de431600dea6dcf",
+            x"8d271c01e242d6403ca6eafa5df24f3cb115a92a2cb2a875c085f12c6e1b51fe",
+            x"b00b8bd23cc080a1a485b84abebbb42166ab9f9b40fff42556a8ebbd6ae81a5e",
+            x"68d19a5fdfa28de5ad617f278490e172e1cddb9382ebbf10abf3d9d29a012638",
+            x"dc7b0960a085307063b6fad6d8921f3cdf4e3162acaeac4021b4849cde04282d",
+            x"8d4e179e74822a4d227df0af9bd04572b26ade644898c16b2b73be28dcd4e2db",
+            x"6d344671d81087387bfbefbf6ee4af7fb992945d9fb5d06876a713ecbd9b4ee2",
+            x"38047aac7bcf5ba334f9c3e8828806beb59f335f779474cfb33edceaae5b7fe1",
+            x"2d6ca4cf742c8c5b8a106208a0e9dde501baa687348c7aa5133796e0cc92f3e0",
         ]
     }
 
     #[test_only]
     fun fixture_op0_l1_auth(): vector<vector<u8>> {
         vector[
-            x"1cea5544e961226c23b3ced52dfa7caac6122e16116c42f6b2fec69ce014322a",
-            x"6db136295add86a70bda1faef3d313ee76cc62bb190da64174a0830e402779e0",
-            x"24c16ba45c79fb6e9c2d9efd57db949469d10acd2291d93a86cd9349752b7f73",
-            x"8b1a64133f2604e05b9c800d59db40ef431077f8f91ff85b5be2d6e3ad05bd7c",
-            x"da0f533344f582fc261b419d9290902af67b8bc3954a006a82ecb536190f65de",
-            x"794c20f155652862b68fe89b43d47dd832dae1f9b34a7afac18c56425f3780d9",
-            x"6a61356108c4e419c233ffbcf1a19b9e5421d1ec081f2786ab918d4f23f195b9",
-            x"e644df9fc718de3078a319c5b8fa81810faa9b834371284a90d02f2ab12f9ca7",
-            x"f9e5b7fead542699500a1eba7e6f82ae081e0a6a94560c661c074f92c08d4155",
-            x"b0de967824fd295948d97a350d8bbae2456a4442a08916e85ed559cce16243a3",
+            x"9cc3a4f7b8692784cfb68ecfa1c5f1b839bf6d13b4d21bb12918df7bbd8c280c",
+            x"903dacfaf46f6ae52895f1519f792212ec81ce044df3d0af6b5dfd1ab6a42ca5",
+            x"8c9414719d9ed2641e19677673af342c33537be8a419340d03e8f3b2ea141bdf",
+            x"9e9fa74db087131c8023a1d8f7b45477a3486d59d9e66db93f3df7756bd638f3",
+            x"cbf49ceaf4e05afe62a052d6656d491b83031b67ea1862085b45f8d8cbc4857e",
+            x"ddbd0cd48282cedb2a56f5b0add28df5fdc41ca65d4a76dc3a40614b8d8841b6",
+            x"b6f08980dc9e1aa69152892402380fd8bb937a488eb1ce16a000e9606077c7d6",
+            x"3a76d898fddc7225e9a088b45b8dcc5401022ff413d679d7224f10ad86239c67",
+            x"812f263c01d99cd83de82df7ca999050e4e71ca900e2ee766f98c4746c02c11a",
+            x"f1ebba2e533ec4e5884aef803d86ec20cc573ae77bcfd91dd77db0ac35a88af6",
         ]
     }
 
@@ -1246,16 +1287,16 @@ module aegis::aegis_account {
     #[test_only]
     fun fixture_skip_a_l0_auth(): vector<vector<u8>> {
         vector[
-            x"ad0be2267f130edd718c2502d8a04a020fcf7f7992e1557221e90d5fb3a94f5c",
-            x"4c3ee8c40cd04143cbcceb0d72bfbfd4b943b07c9d9f1ba31673f6d6a3ba286c",
-            x"ec639785d2ca72899600bbb127058b55d34fae0d08f4fcf12f73d2a7857bdcc7",
-            x"5e72add3cb130b8fbea418d1f3b2a2a506feba02be382c6a102a047e202ee7e6",
-            x"575335c4000842b2c80d0584c6509c92362474725f11085c3b3e85e3f6ef3b62",
-            x"9a6609a09286b8d0102b29d242a358bd3f100be36fc89c1b3e2f7c6f0698707b",
-            x"1bce46fe9ddd267125035bff246c715b3702d09d573d98f4143770cd8c5303ff",
-            x"1521e03b61b9cf159eca6c3fe03ae55a686d619e6a160f502e95e0f0d4c95b01",
-            x"b3551ec61ae4e21230b7ae9a4f408b9198ba80698773d5e202af0325c4b2b6cf",
-            x"166f57c72b5c66002859c7b910151f2b5b8c51936f7215f16e7381796726bce8",
+            x"9b4c481e8c6591ff73861f50c68aa8ebffbd98ba7a7309d1c54b328ac749c87d",
+            x"ff1d6063caa1e6e241f6e2903bb4bb3cbbf7b6938fed4f9ee98c3c58b617a862",
+            x"52c229bb623bb59ba6c728fa978107eee711fd0cbd8c60f0eb7449c50af15177",
+            x"1c1742681dd27a9b4db2c3132a6644642fe1b314dd52c42f7a1319efb8fc1251",
+            x"fc38c45df857bc7f6e87a1313c3483ccfee0cf7dece1de51b14cd8e100cfb423",
+            x"141ec34645751ef15f99000b543d1ba29316dc0db1df067730978edee4ce2f76",
+            x"24a23886f8cf8d1b5f2bb23565bfde289be5f8476f33fe8413a3f8b757490cc9",
+            x"640857986fb250218d967098c1b55985bb35dfb6ddab797df99998b03d15b726",
+            x"36d6264b659d94a7641998a483348fb0cfd6ef5d6701a5ae3902e8b7823b92ed",
+            x"529438c49e2b338b60d23d9c352fa165801becfdd1a07441720d01d843df3ec5",
         ]
     }
 
@@ -1263,73 +1304,73 @@ module aegis::aegis_account {
     #[test_only]
     fun fixture_skip_b_l0_wots(): vector<vector<u8>> {
         vector[
-            x"57b7ec52d1ef4291fb8998bc287e5b3438526a43c1308a2009a227525fd87e6a",
-            x"f7f932bf972a8255d8323ff7fa4c3b02b1d655f77ec8abbc471a91b2adce104e",
-            x"f33ae95f74d78039a95ad84472ccca75f21a70696ed69d30f96572a6fe8cc67c",
-            x"9c3f5176c0bcd9dd8d31d48614b540f313e24f0c6574eb4225b1c6e015442cbc",
-            x"8a883a46abb6d80e4759325bada067b3d5cef8242636fad3402ac90fdbe2086d",
-            x"0bd3c874eeb17012ea4ac7dad1ccff2b716e48fa376ffdce0ed22742b3ecf515",
-            x"720d79cf7dfaf222f525ad9158ff2bdf6d690475429efd468160298c541eae6a",
-            x"7ed03c41cae8eed8d2664698cd67cf60d2cb049d1739fe23d6e2644ef0813bc4",
-            x"4215f1474f877aac1f4c208922ee6e42fa4487a87cc90d3ee27cd8229533e1e4",
-            x"dc23219ae9b97c3aa44eb1ca02aa8d9cdaa8bafbac405f74c8f56a9c56e48e0d",
-            x"bdc00166b3b374cb5546f6832b3f705e2e179f04594462a13ffef1376ca3d94a",
-            x"4f5b477d2b455c79bf99e4132453cb4ad3e98ef8ae0c0176e1c5d0212494db5c",
-            x"23ac2b12ddfc36cc5fcd17ed4f70ca586660c635d58b47d93cf94cebd7a2e2be",
-            x"4694f309063d55b1b67c9dd4489a74424626d562f82fab4284be754633077c76",
-            x"ec9a2ddf304f249c1a64f1aec241847ab9754449e42d66de8df378a0dbd597a8",
-            x"6fe0b721ca0cfdc7b637b9324c79f715004696c9883bd2e1017d1cbb6ef4a9f7",
+            x"bcc1bd3e1dc5dddaa5442829867476d03ecca8ceb4ae3703584d703467f8415c",
+            x"631d7dbd0519d9bdd8581d47a09318648cb1648ad1f15891ba52b3b924c3bbac",
+            x"175340363c2745f093dd688e16b9892656f40926ef625ee03aaf2ded2a571c7b",
+            x"145bb4829c9bf2690390fd41eaddfe42007c832e9e33256060a091254dd39261",
+            x"ed80c8e1eeb881c7d444b22c73c278683bf20d5bccf60765a796c8ab0b2f05eb",
+            x"f99172f3ef2b9ba53a764894af49da99703528af69460f4675b88dd9204915c7",
+            x"7ed3cd219906b28cec408c34cd496f8adf63826ff7bac299229159d7f07429c2",
+            x"db74fdf860178c8a0b6c72af3434c7ccd0fcccd08765fcbe29ede3a481da90fe",
+            x"26fd8d49627250e3e63b64d9937c5be9cae7ef3dc80b2eff301b30084e877616",
+            x"ca1eaed91e64d9211617479d8483cf19b3a46e7de7bba454d847246cdef3e307",
+            x"426be47b35b211af46e5a45586f12ad9317bd572d893fbe51bd41ee39b0ece4c",
+            x"c6275782abe8052ccdc1692c340ba4aea5046dc8c59de83c1e27a935953b9bdb",
+            x"8e91f9c6d769248f59644cac1e33a2e9d3e019f5c4406bc062390f339aeddc53",
+            x"cbda841d86c009f7f951ec8b38d456737b879a2a3fa14194112de3a02abb10b6",
+            x"0e3f51780e48fa4d202184cffa1c512ffaf48561d46aa9e5071f85f384e79fc1",
+            x"b72bfe49b4bf331b3affb8e362d41203b9623e897cc4e8d8c485571fbf2170d2",
             x"3f452a3a085ddc2973c3cf0c13d841af3c7ae3f830898976674c0a2c2d156277",
-            x"7f1e6fccb6e4b0b7159cc1c87188c81a30f702f07f48837e7ae82c188ed4c419",
-            x"0ec5b6eaa220a7505b1a46c0e9ab2b403dd85920a5af3b33c0589ae8eb99d7fd",
-            x"631fdef6f18c982f78c8e0e0acd9b194e35db78410f8b5f904a1084ed8edaf0d",
-            x"8830cc1bde368ba685b68a37eb0a1abe823682b024afabbc2dfd3f994ecf361c",
-            x"f03e32b7b0881c8e52d197872d26df90c9339db86c5a46630c785549f4310c3c",
-            x"4ca50aeb342ff6fbdbf3c373f9f5863a71304ce00a2ff0f38e2dede5d467a3cd",
-            x"8ae97e8f50e4ad7d701a8df857cfe2a5ce82a57512d82ebe22cb2cd7d5b7d0ca",
-            x"e57c4ec63126f3375239d23ca23cdbf4c3a3f06293e2f7fe63f0d667cb764d55",
-            x"a69b53095380c4b13b1cacb8f6e7cf75794ef0fab8afeabf9c73fd81930efef2",
-            x"6873278febfa9a151ff3927caf79d149382c95a16a0cf5e3d16f57bf0073ced2",
-            x"ebb6770415ab9061eb82b7ae2214a1c16509a2b4f32ede0be98d859d2ce4a771",
-            x"56444374ec5057f6b2cca5227e7c75865f4e69f320a905879ec3bc2d51074d53",
-            x"0bae1c1a34913b57798cd2f5a846fb51b0f9d1c0439d5b252b5a1bad2295f85e",
-            x"89f57d5ca917d5d7ced7b406e73373f07232c1a3cc99d104999ab970090bc28a",
-            x"34e367a3cfe3aeaa2d7d5315684df8a35a1ee1d29df21722da9d174f6523fb89",
-            x"f54a3b6bddbf74d553e7ed10501eaddb5317ade15e41de3e1fcdbe648de7c416",
-            x"545ad3900a4d8c75f44fde394991987ee8ec23298877cd75463b4f93916dfe8a",
-            x"31c49d0fa1c0373cbfe9dc416a6849607743e7625a9e5b88bd4b9a807cfc35f0",
-            x"7232ea5dcf7a309d0864162f92fd2dbd6dec7ce9e6aee501d8d73179c56bbdaa",
-            x"f2a91c726c0ff490b6b9a203c376756c4510dc9b10df3c995289e88f6eacd1da",
-            x"dfe430900fbe9bf4a6f8f84b9504396af25a40ee3f589d59f501a29d86ffd209",
-            x"3ee8015807aaea074a8fab90d272b51a6d483f055d86c90d179ff7824af6f6b8",
-            x"7e09f93955802100f53eb98b12f3dc8b73a3639f44d3be7978db0e7d854ef930",
-            x"aa484709bc39b64264aff1a2b6ac0fd19f61651faf7611739064d5e58dfc64df",
-            x"3475a674df456a03a48b170ceff6f519c79504ff79fa87dce3e571e2a15ba62a",
-            x"7e0db3b75eb4ee740d7cd8f0f38af31438b7261ee8ba1d1e751871624f6883d5",
-            x"5d6cd747a6ec2488023a0b2b3c9f0597a2d439bd978f0854e6a232898acc61de",
-            x"e0193d4d25ed8d889aa99cf9e97581473218c4f7213a48fc13d38a8870d5e20d",
-            x"d7a68b5851390386646c95af7fb1bc54e1cf3e2592b9a6f56d17b626df592a56",
-            x"b8af0fabdbf4cf0625c1df252162e99d16cfaf3ae1ff9ca2f255cfe35fa416be",
+            x"0acd4f2ff79db516a58fc2899574b98d4a32c906844799ff8f84c13137e58b39",
+            x"d40d4ca144aa9be13d6f2dad94c5fd53183d8544bd7164d300c6dc582e2bfb5b",
+            x"afa631115505a9afafc1b4a853de90f3690a8dcf773865fd9c9f8513ac6eedae",
+            x"e5846a79b3b5f6fc443690955a37663e9c75f3a0b73a750280c82dfcdc4f7f6d",
+            x"40e48d07a5b5283ceed185fa6e2699d5b183dae7f58dad72fa016ffe307a2448",
+            x"e9493c3987e5a9e638a7827340bb3ace1f13409d94b3c9f8a009c52f273b615e",
+            x"362165c7ca9dee68913933bec3e9d5704ad25f0b077bb6b14c90e39aeebf26aa",
+            x"fc23476274b02d99a8cbe8e72c208c119108d7dc20a3cdc5de404fdf2da0e14d",
+            x"98facd0ec532c11e3c4c12d43be0878fe064787eede11ee3624d4bc4296c7289",
+            x"ee61dd38eba7f1a05922cc094b3e7f92834788af710532bfb745fde489df1fd2",
+            x"61c59de4b9166484217572b9be1152e03ed8924961961d213c766d37ae271635",
+            x"5965bb958e8e589b1231fbd912717a74b1c3ab5f2397b99f2066971caf602c84",
+            x"fa10c73e61c152bd3775647eedfa3638c6034745308a83397fe2ed2a9cf54910",
+            x"775bffa2841d3cbff0a4cea5fdef821227ea3ff2306f9ff611c1a5e2fa549297",
+            x"e3220d00b9fe31aeed1a51042e4622f709c5bba0ad6797bb15be66165d8ff2c9",
+            x"52a9b91564816a4a64aa01266db0ccf4b6bca0c36c181bd29d672acc1cfd4e63",
+            x"56bac3ee7b90752478a7ba5aa1f678b8b1d6315c364eeae4c3f76ea7aaa3b803",
+            x"6127264a9b48e2304e860cb68d018cb8ef2a56e086ba6d13b15e7a6c29006c21",
+            x"17ac3f4e1db9cf68d4ba92dd8451081e189daa772ea4a22ac2be08f20889cfe0",
+            x"647fa0f9be7d2e03e188e6d04c302cdcf79782cc364321a725cf76253859b398",
+            x"9366ce7d5606677f2a19d6f31e0657c34ed98dcba25f3a4a8db5257c322b41a3",
+            x"1d64707a0d6f7cffdb1127edd0cfa4721b4405286fad53fd28f8bbb5fd625d28",
+            x"de934977c3acc90f6766a1ee5802bee72bbce36a636c32d901d1dbb483e4e56e",
+            x"2fcb6240fcaff583dce73399a138f12ecd96321fccbefa36729033b8347b7bd2",
+            x"763d7917c869c43dcce70f84b9b748067a3f30e23fc9fd1c0810f8eed6fbcbf2",
+            x"9fd199a23d526f35a2206478f01fc9d1f519c083e82b362020bb8802e581d990",
+            x"84eabfa96fa5909f95275caf2c1583aa231bc6b55d08b6b829d7fb36f7e3fc3c",
+            x"5a01687016b6cfa62269a6a8da8b951402307ec6397a075f4b8ee35bb59fe8f6",
+            x"5c95685fded8b3e9c3a08a93483a8c792b1ad09afc05d45029f2032a8df4e01f",
+            x"f601529b2dfdfe7864713bc4b5b1755203da5885716cf4f1effaf295984b1ada",
             x"cf082bb9b1a1a24a1aef13b46e0a45c571088f56c1df4b603444137f1ea4ff6d",
             x"844830cfeca567fd6c504b2698723d85476e572c9d7ea4931946a92981d9e087",
-            x"7c21df0a0c6b6cde34aae82b03a0350b3b05eb99e251837db1e7d7f42ba7f982",
-            x"8ec0a407ada719e5bd6748478403813f87086a217a183955e5eb9b9218bae934",
-            x"b540f4009d8c3f52a750f4536b0fd6c30a1ef8cfb154080fb1d32d9ebc94436c",
-            x"36673dc9a3d54f4dbbc83bf90eba63703c124389cbdd1cd7050463b8af704223",
-            x"9c5dc3de0a87c5d66c2b7f7e49b6dc7f04133efa4e92e8fe497a6eb7a9e01ee2",
-            x"1b3f7b9a77754c7ced4181926688b12844715efd8baab7442dbe7d93c1d7c5a0",
-            x"0fb8972d343fc7acde999ebdac1c7e98456501fd61f1931393af8f6d21437315",
-            x"6b0544da6ee18f728a1124f255b718bc863a9964ef6d825f218eedebfba980f8",
-            x"4dd7744076192dd3700c35966b353d7d34c239e771c7eafa2e570fdf3ea0834c",
-            x"3ca7d2f3d2d6f8401aa01abe50cd78c6e316fb836fc48365999556f6b8a1689f",
-            x"db885d9c7b9c8561fc84904ca39499f97744893c5b8db1b2870da42464fd0d36",
-            x"ff3aac4b8c73665b7ba8611facf9c77d4590b6cd28ed2c0d5c190db71cf6e639",
-            x"75497f5028a2da31488134e7045598d73fbbe21bb7bf216b00afa8d4ddc5495b",
-            x"a43b7237eefdd49c3b9d02142c3fd283163d15b6285fcc81a46a2c26848d7604",
-            x"ac3aae587204abaae95707c979137aa201b7e8d1c3f46fc38413568f6d25cbf8",
-            x"b49278022e6519c3a78383a2b0925baae3eb42ac2e89aad97339a3840f586ea2",
-            x"f57c8a748f1cccb347929bf8fa00f6943c1fcc7a54a8f0dbabd4287d66329fc7",
-            x"dabb3ef753bb1672f8d70c8dd32943ab6876a2289a8b7540b94e513b3f8880fc",
+            x"4a1200c34be2f36fce31af4ccae5b50e62b627229e309eec5dbb075fab2f79da",
+            x"e5a133618e40dde246e120371313ad53493670399fcff02e8c448500521093e5",
+            x"2a674b054755bbfdf0a42577407c86313f8f76baf5ffd16149fae8e17e2e546b",
+            x"06ff3c498a21a13aa51f8339622c33f1252220cf6481af49bf64918cdf713b2f",
+            x"5f37600f034d26e4b03e6d89100326ff88ae77d0b8e6c3cbf667865d76c31cef",
+            x"1c470c3ee485fb66d874f103fd7008e8752a3900a9c817b091cea70e3cf68f82",
+            x"5b3c43a7f19363de05b912d451046fdddddab9135394e04e81cb00cb0a50faa7",
+            x"2e2ca8df09a47a94fa8f5d3dddc8470fdba3c8358a0d7b08cfda851c8e681f81",
+            x"c4a1ec141e41cc7f387cc61ddea0010f2a7ff7e43cb0f1a45efaf1b5aab6525a",
+            x"5ad652e888f480e9d8233efe2c9caeca80d0c2c93752431fe90faef7dfb84473",
+            x"5abe10cca6228ffd4f1e142dc103d359062979294bf371528bad1d083cc3315b",
+            x"4b3b5774674605f8e71fc1e44bbdefda32804d80b3c479caf9f93c54f279f2df",
+            x"9569277815dbbe6cf3fb2c95c027e082ee9b59422162f8c8c8cc793e55a50a26",
+            x"36fb08c2d263c504d674c58324c83cb2504b4e6220e74328a3de8b823637e08a",
+            x"fa172961ba4af43fb49e1e9f4e161dc3e70da8906153a5146f6437a97ef7ee1b",
+            x"3eb8ab08129a9a9a3b1f34cd6141769634944ffd72667614eb0773eb755a6ee2",
+            x"14712084fbd14eebd00bf5215698cd740c7aa91a55e7bb3684ce2e9766bc019b",
+            x"b1604728eda92b19ec7be95e4ce25c93643c676f3b39db069d9b44ea3d3489cb",
         ]
     }
 
@@ -1337,16 +1378,16 @@ module aegis::aegis_account {
     #[test_only]
     fun fixture_skip_b_l0_auth(): vector<vector<u8>> {
         vector[
-            x"b86fcfba6f0ed1ba32daf8c39230e0e5d3dbc15537fdb9ac2f85b7ca41f3e1fa",
-            x"63a3d5c8aa5de54b309c77aff8e8caf37377b1fec8fa992a8baa88d8922bd24a",
-            x"e37f4a6311831aa366f8a80e0e45789e6fcdf5f853c4872397e0f64b486aa7cd",
-            x"69a9eeaf708b93f9ada6d7dfd4c0a56bf7c1fba2936d1841058659aa80f2b43d",
-            x"430efe8a42661c581247b92350e72de907220a8e76ac2f335345454cceef78a0",
-            x"cb002ac83793090a8ea29a7507dcc0c4078599df025b7b4aa5d7d11d207b1369",
-            x"504df9a0926dfb7929a12b7b2900c0a2d3864f389c54b776b6b3040e6f1912af",
-            x"d142772e369fe9f28349414cd4c7cb4f2ea37328723d9e3327ca7b8b4a204b75",
-            x"11cb7190b9b45ace52dd42312d48355c33f24168901d739e3f96b962215689d7",
-            x"d8f594575be5f6e278f809c79d9bd69c6eb5bfd02f1e4bd99cf4f613a7e7a631",
+            x"4b584ea11bc0473aaf22f57762bef979d5c10f9a0e660cd821af1de23966f148",
+            x"2145ad96ebfd94c9ca8f0d971b82f23ff7fe73e00fae40e8b0dc68faddb4d008",
+            x"bb8749f49bd4f986901064c9fc6e7653e0239f81939a99ab338869522e68e58f",
+            x"532b405b0adc5474fa65a4ba794747281fccf3579d8a87da445ad347ebe18b4c",
+            x"63c6d0ba8cd77ad2184a644605f1df71025f0a0b9e6442174a23d0c4cc874891",
+            x"0b65abe1282142954ce8d77be02246fa2b0b35d31fdf5e322b768fe4540c6cb7",
+            x"2ba19937f08a10226c5b867ee8e40483c3b38bb7f33a08c55716d1f51ec7ddf2",
+            x"c19c969095c742660a0559ad0e54418535701d089a207bb1ee0ebbb355fc565d",
+            x"47563b28d0321fa66c12d6adff693542b3edbfba59b3f1a62371c26881c19def",
+            x"cb15988fe2dfa06a6f774757996ff4f9559f7e1dca63fe08cf628a9855e919d9",
         ]
     }
 

@@ -54,10 +54,11 @@ int sha256_2b(builder a, builder b) asm "2 PUSHINT HASHEXT_SHA256";
 ;; exactly the operand layout HASHEXT expects.
 int sha256_tuple(tuple parts) asm "255 PUSHINT EXPLODEVAR HASHEXT_SHA256";
 
-;; ADRS = layer(1) || treeIdx(8) || type(1) || leafIdx(4) || chainIdx(1) || step(1) || pad(16)
-;; Returned as one 256-bit integer (the 16 pad bytes are the low 128 bits).
-int adrs256(int layer, int tree_idx, int typ, int leaf_idx, int chain_idx, int step) inline {
-  return (layer << 248) | (tree_idx << 184) | (typ << 176) | (leaf_idx << 144) | (chain_idx << 136) | (step << 128);
+;; ADRS = layer(1) || treeIdx(8) || type(1) || leafIdx(4) || chainIdx(1) || step(1) || pkSeed(16)
+;; Returned as one 256-bit integer; the 16-byte public seed of the key tree
+;; occupies the low 128 bits (spec 2.2).
+int adrs256(int seed, int layer, int tree_idx, int typ, int leaf_idx, int chain_idx, int step) inline {
+  return (layer << 248) | (tree_idx << 184) | (typ << 176) | (leaf_idx << 144) | (chain_idx << 136) | (step << 128) | seed;
 }
 
 ;; F(ADRS, x) = sha256(ADRS || x)                    64-byte input
@@ -93,7 +94,7 @@ int node_t(int adrs, int l, int r) inline {
 ;;   leaf = sha256(ADRS_leaf || pk_0 || ... || pk_66)    2176-byte input
 ;; Digits: 64 base-16 nibbles of m (high nibble first) then the 3-digit
 ;; big-endian base-16 checksum sum(15 - d_i).
-(slice, int) load_wots_leaf(slice sig, int layer, int tree_idx, int leaf_idx, int m) {
+(slice, int) load_wots_leaf(slice sig, int seed, int layer, int tree_idx, int leaf_idx, int m) {
   int csum = 0;
   int t = m;
   repeat (64) {
@@ -101,13 +102,13 @@ int node_t(int adrs, int l, int r) inline {
     t >>= 4;
   }
 
-  int chain_base = adrs256(layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
+  int chain_base = adrs256(seed, layer, tree_idx, TYPE_CHAIN, leaf_idx, 0, 0);
 
   ;; Leaf input is accumulated as builders of 3 x 256 bits in a tuple:
   ;; slot 0 = ADRS_leaf, slots 1..67 = pk_c.  68 slots -> 23 builders.
   tuple parts = empty_tuple();
   builder cur = begin_cell()
-    .store_uint(adrs256(layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0), 256);
+    .store_uint(adrs256(seed, layer, tree_idx, TYPE_LEAF, leaf_idx, 0, 0), 256);
   int fill = 1;
 
   int c = 0;
@@ -146,13 +147,13 @@ int node_t(int adrs, int l, int r) inline {
 
 ;; Reads a WOTS+ signature followed by `height` auth-path siblings from `sig`
 ;; and returns the recomputed root of tree (layer, tree_idx).
-(slice, int) load_layer_root(slice sig, int layer, int tree_idx, int leaf_idx, int height, int m) {
-  int node = sig~load_wots_leaf(layer, tree_idx, leaf_idx, m);
+(slice, int) load_layer_root(slice sig, int seed, int layer, int tree_idx, int leaf_idx, int height, int m) {
+  int node = sig~load_wots_leaf(seed, layer, tree_idx, leaf_idx, m);
   int pos = leaf_idx;
   int k = 0;
   repeat (height) {
     int sib = sig~next_val();
-    int a = adrs256(layer, tree_idx, TYPE_NODE, pos >> 1, k, 0);
+    int a = adrs256(seed, layer, tree_idx, TYPE_NODE, pos >> 1, k, 0);
     if (pos & 1) {
       node = node_t(a, sib, node);
     } else {
@@ -165,24 +166,28 @@ int node_t(int adrs, int l, int r) inline {
 }
 
 ;; ----------------------------------------------------------------- storage
-;; root:uint256 rec_root:uint256 epoch:uint64 next_idx:uint64 nonce:uint64
-;; rec_nonce:uint64 cache:(HashmapE 128 uint256)   key = epoch << 64 | tree_idx
-(int, int, int, int, int, int, cell) load_data() inline {
+;; root:uint256 rec_root:uint256 seed:uint128 epoch:uint64 next_idx:uint64
+;; nonce:uint64 rec_nonce:uint64 cache:(HashmapE 128 uint256)   key = epoch << 64 | tree_idx
+;; `seed` is the 16-byte public seed of the current key tree; it is rotated
+;; together with the roots by recover.
+(int, int, int, int, int, int, int, cell) load_data() inline {
   slice ds = get_data().begin_parse();
   int root      = ds~load_uint(256);
   int rec_root  = ds~load_uint(256);
+  int seed      = ds~load_uint(128);
   int epoch     = ds~load_uint(64);
   int next_idx  = ds~load_uint(64);
   int nonce     = ds~load_uint(64);
   int rec_nonce = ds~load_uint(64);
   cell cache    = ds~load_dict();
-  return (root, rec_root, epoch, next_idx, nonce, rec_nonce, cache);
+  return (root, rec_root, seed, epoch, next_idx, nonce, rec_nonce, cache);
 }
 
-() save_data(int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) impure inline {
+() save_data(int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) impure inline {
   set_data(begin_cell()
     .store_uint(root, 256)
     .store_uint(rec_root, 256)
+    .store_uint(seed, 128)
     .store_uint(epoch, 64)
     .store_uint(next_idx, 64)
     .store_uint(nonce, 64)
@@ -210,9 +215,10 @@ int execute_digest(int addr_hash, int nonce, int idx, cell action) inline {
     .store_uint(cell_hash(action), 256));
 }
 
-;; M_rec = sha256("AEGIS_CCHS_RECOVER_V1" || "ton" || addr_hash(32) || rec_nonce(8) || new_root(32) || new_rec_root(32))
-;; 128 bytes = 1024 bits > one builder, so two 512-bit builders are hashed as one stream.
-int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root) inline {
+;; M_rec = sha256("AEGIS_CCHS_RECOVER_V1" || "ton" || addr_hash(32) || rec_nonce(8)
+;;               || new_root(32) || new_rec_root(32) || new_seed(16))
+;; 144 bytes = 1152 bits > one builder, so a 512-bit and a 640-bit builder are hashed as one stream.
+int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root, int new_seed) inline {
   builder p1 = begin_cell()
     .store_slice("AEGIS_CCHS_RECOVER_V1")
     .store_slice("ton")
@@ -220,7 +226,8 @@ int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root
     .store_uint(rec_nonce, 64);
   builder p2 = begin_cell()
     .store_uint(new_root, 256)
-    .store_uint(new_rec_root, 256);
+    .store_uint(new_rec_root, 256)
+    .store_uint(new_seed, 128);
   return sha256_2b(p1, p2);
 }
 
@@ -237,7 +244,7 @@ int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root
 ;; layer is required when the subtree of idx is not cached yet; when it is
 ;; already cached a supplied top layer is ignored rather than rejected.
 () handle_execute(slice body) impure inline {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
 
   int query_id = body~load_uint(64);
   int idx      = body~load_uint(64);
@@ -252,7 +259,7 @@ int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root
 
   int tree_idx = idx >> H;
   int leaf_idx = idx & (LEAVES - 1);
-  int r0 = l0~load_layer_root(0, tree_idx, leaf_idx, H, m);
+  int r0 = l0~load_layer_root(seed, 0, tree_idx, leaf_idx, H, m);
 
   int key = (epoch << 64) | tree_idx;
   (slice cached, int found) = cache.udict_get?(128, key);
@@ -262,13 +269,13 @@ int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root
     throw_unless(err::missing_top_layer, has_l1);
     slice l1 = body~load_ref().begin_parse();
     ;; Top layer: tree 0, leaf = tree_idx, message = r0.
-    int r1 = l1~load_layer_root(1, 0, tree_idx, H, r0);
+    int r1 = l1~load_layer_root(seed, 1, 0, tree_idx, H, r0);
     throw_unless(err::bad_top_root, r1 == root);
     cache~udict_set_builder(128, key, begin_cell().store_uint(r0, 256));
   }
 
   ;; Effects before interaction.
-  save_data(root, rec_root, epoch, idx + 1, nonce + 1, rec_nonce, cache);
+  save_data(root, rec_root, seed, epoch, idx + 1, nonce + 1, rec_nonce, cache);
 
   slice a = action.begin_parse();
   int mode = a~load_uint(8);
@@ -277,25 +284,28 @@ int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root
 }
 
 ;; recover body:
-;;   op:uint32 query_id:uint64 new_root:uint256 new_rec_root:uint256
+;;   op:uint32 query_id:uint64 new_root:uint256 new_rec_root:uint256 new_seed:uint128
 ;;   ref[0] = recovery stream (67 wots || 8 auth)
+;; The recovery tree belongs to the current key, so it is verified under the
+;; current seed; the new seed takes effect together with the new roots.
 () handle_recover(slice body) impure inline {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
 
   int query_id     = body~load_uint(64);
   int new_root     = body~load_uint(256);
   int new_rec_root = body~load_uint(256);
+  int new_seed     = body~load_uint(128);
   slice sig        = body~load_ref().begin_parse();
 
   throw_if(err::zero_root, (new_root == 0) | (new_rec_root == 0));
   throw_unless(err::exhausted, rec_nonce < REC_CAPACITY);
 
-  int m = recovery_digest(my_addr_hash(), rec_nonce, new_root, new_rec_root);
-  int r = sig~load_layer_root(LAYER_RECOVERY, 0, rec_nonce, REC_H, m);
+  int m = recovery_digest(my_addr_hash(), rec_nonce, new_root, new_rec_root, new_seed);
+  int r = sig~load_layer_root(seed, LAYER_RECOVERY, 0, rec_nonce, REC_H, m);
   throw_unless(err::bad_recovery, r == rec_root);
 
-  ;; New roots, fresh index space, new cache epoch; nonce keeps counting.
-  save_data(new_root, new_rec_root, epoch + 1, 0, nonce, rec_nonce + 1, cache);
+  ;; New public key, fresh index space, new cache epoch; nonce keeps counting.
+  save_data(new_root, new_rec_root, new_seed, epoch + 1, 0, nonce, rec_nonce + 1, cache);
 }
 
 ;; ------------------------------------------------------------ entry points
@@ -333,27 +343,27 @@ int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root
 }
 
 ;; ------------------------------------------------------------- get methods
-(int, int, int, int, int, int) get_account_state() method_id {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
-  return (root, rec_root, epoch, next_idx, nonce, rec_nonce);
+(int, int, int, int, int, int, int) get_account_state() method_id {
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  return (root, rec_root, seed, epoch, next_idx, nonce, rec_nonce);
 }
 
 int get_cached_root(int epoch, int tree_idx) method_id {
-  (int root, int rec_root, int e, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (int root, int rec_root, int seed, int e, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
   (slice v, int found) = cache.udict_get?(128, (epoch << 64) | tree_idx);
   return found ? v.preload_uint(256) : 0;
 }
 
 ;; Whether an execute at leaf `idx` must carry the top layer (-1) or not (0).
 int needs_top_layer_at(int idx) method_id {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
   (slice v, int found) = cache.udict_get?(128, (epoch << 64) | (idx >> H));
   return found ? 0 : -1;
 }
 
 ;; Same at idx = next_idx.
 int needs_top_layer() method_id {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
   (slice v, int found) = cache.udict_get?(128, (epoch << 64) | (next_idx >> H));
   return found ? 0 : -1;
 }
@@ -361,7 +371,7 @@ int needs_top_layer() method_id {
 ;; Digest the client must sign for an execute of `action` at leaf `idx`
 ;; (idx >= next_idx) with the current nonce. Pass cell_hash(action).
 int get_digest_at(int idx, int action_hash) method_id {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
   return sha256_b(begin_cell()
     .store_slice("AEGIS_CCHS_V1")
     .store_slice("ton")
@@ -373,7 +383,7 @@ int get_digest_at(int idx, int action_hash) method_id {
 
 ;; Digest for an execute at idx = next_idx.
 int get_next_digest(int action_hash) method_id {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
   return sha256_b(begin_cell()
     .store_slice("AEGIS_CCHS_V1")
     .store_slice("ton")
@@ -383,16 +393,16 @@ int get_next_digest(int action_hash) method_id {
     .store_uint(action_hash, 256));
 }
 
-int get_recovery_digest(int new_root, int new_rec_root) method_id {
-  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
-  return recovery_digest(my_addr_hash(), rec_nonce, new_root, new_rec_root);
+int get_recovery_digest(int new_root, int new_rec_root, int new_seed) method_id {
+  (int root, int rec_root, int seed, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  return recovery_digest(my_addr_hash(), rec_nonce, new_root, new_rec_root, new_seed);
 }
 
 ;; Pure verifier entry point for clients and tests: recomputes the root of
-;; tree (layer, tree_idx) from a signature stream (67 wots || height auth)
-;; on message m at leaf_idx. Does not touch storage.
-int compute_layer_root(int layer, int tree_idx, int leaf_idx, int height, int m, cell sig) method_id {
+;; tree (layer, tree_idx) under public seed `seed` from a signature stream
+;; (67 wots || height auth) on message m at leaf_idx. Does not touch storage.
+int compute_layer_root(int seed, int layer, int tree_idx, int leaf_idx, int height, int m, cell sig) method_id {
   slice s = sig.begin_parse();
-  int r = s~load_layer_root(layer, tree_idx, leaf_idx, height, m);
+  int r = s~load_layer_root(seed, layer, tree_idx, leaf_idx, height, m);
   return r;
 }

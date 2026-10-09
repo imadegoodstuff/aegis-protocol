@@ -6,7 +6,7 @@ import {AegisCCHSK} from "./AegisCCHSK.sol";
 
 /// @title AegisCCHSFactory — CREATE2 deployer for CCHS accounts.
 /// @notice Deployed at the same address on every EVM chain (same deployer,
-///         same nonce, metadata-free bytecode), so a given (root, recRoot)
+///         same nonce, metadata-free bytecode), so a given (root, recRoot, seed)
 ///         yields the same account address everywhere. Anyone may deploy an
 ///         account for anyone; deployment is permissionless and idempotent.
 ///
@@ -19,7 +19,7 @@ interface IERC20Minimal {
 contract AegisCCHSFactory {
     event AccountDeployed(address indexed account, bytes32 indexed root, bool sha256Variant);
 
-    /// @notice Accounts created by this factory, keyed by `_salt(root, recRoot, variant)`.
+    /// @notice Accounts created by this factory, keyed by `_salt(root, recRoot, seed, variant)`.
     ///         Idempotence is decided from this record, not from a recomputed
     ///         CREATE2 address, so `deploy` behaves the same on VMs whose
     ///         CREATE2 address prefix differs from `0xff` (TRON uses `0x41`).
@@ -29,21 +29,22 @@ contract AegisCCHSFactory {
     error FundFailed();
     error TokenTransferFailed(address token);
 
-    /// @notice Deploy (or return) the account for `(root, recRoot, variant)`.
+    /// @notice Deploy (or return) the account for `(root, recRoot, seed, variant)`;
+    ///         `seed` is the 16-byte public seed of the key tree (spec §2.2).
     ///         Any ETH sent with the call is forwarded to the account, so
     ///         "create my post-quantum account and move ETH into it" is one
     ///         transaction.
     /// @param sha256Variant  true → `AegisCCHS` (CCHS-S-20), false → `AegisCCHSK` (CCHS-K-20, EVM default)
-    function deploy(bytes32 root, bytes32 recRoot, bool sha256Variant)
+    function deploy(bytes32 root, bytes32 recRoot, bytes16 seed, bool sha256Variant)
         public payable returns (address account)
     {
-        bytes32 salt = _salt(root, recRoot, sha256Variant);
+        bytes32 salt = _salt(root, recRoot, seed, sha256Variant);
         account = accountOf[salt];
         if (account == address(0)) {
             if (sha256Variant) {
-                account = address(new AegisCCHS{salt: salt}(root, recRoot));
+                account = address(new AegisCCHS{salt: salt}(root, recRoot, seed));
             } else {
-                account = address(new AegisCCHSK{salt: salt}(root, recRoot));
+                account = address(new AegisCCHSK{salt: salt}(root, recRoot, seed));
             }
             if (account == address(0)) revert DeployFailed();
             accountOf[salt] = account;
@@ -59,10 +60,10 @@ contract AegisCCHSFactory {
     ///         ERC-20 into the account. Requires prior `approve` to this
     ///         factory for each token. Tokens are moved by `transferFrom`
     ///         from `msg.sender`; the factory never holds funds.
-    function deployAndMove(bytes32 root, bytes32 recRoot, bool sha256Variant, address[] calldata erc20s)
+    function deployAndMove(bytes32 root, bytes32 recRoot, bytes16 seed, bool sha256Variant, address[] calldata erc20s)
         external payable returns (address account)
     {
-        account = deploy(root, recRoot, sha256Variant);
+        account = deploy(root, recRoot, seed, sha256Variant);
         for (uint256 i = 0; i < erc20s.length; i++) {
             IERC20Minimal t = IERC20Minimal(erc20s[i]);
             uint256 bal = t.balanceOf(msg.sender);
@@ -74,24 +75,24 @@ contract AegisCCHSFactory {
         }
     }
 
-    /// @notice Counterfactual address for `(root, recRoot, variant)` under the
+    /// @notice Counterfactual address for `(root, recRoot, seed, variant)` under the
     ///         EVM CREATE2 rule (`0xff` prefix). On TRON the prefix is `0x41`;
     ///         use `accountOf` after deployment or the client-side predictor.
-    function predict(bytes32 root, bytes32 recRoot, bool sha256Variant)
+    function predict(bytes32 root, bytes32 recRoot, bytes16 seed, bool sha256Variant)
         public view returns (address)
     {
         bytes32 initCodeHash = keccak256(
             abi.encodePacked(
                 sha256Variant ? type(AegisCCHS).creationCode : type(AegisCCHSK).creationCode,
-                abi.encode(root, recRoot)
+                abi.encode(root, recRoot, seed)
             )
         );
         return address(uint160(uint256(keccak256(abi.encodePacked(
-            bytes1(0xff), address(this), _salt(root, recRoot, sha256Variant), initCodeHash
+            bytes1(0xff), address(this), _salt(root, recRoot, seed, sha256Variant), initCodeHash
         )))));
     }
 
-    function _salt(bytes32 root, bytes32 recRoot, bool sha256Variant) internal pure returns (bytes32) {
-        return keccak256(abi.encodePacked(root, recRoot, sha256Variant));
+    function _salt(bytes32 root, bytes32 recRoot, bytes16 seed, bool sha256Variant) internal pure returns (bytes32) {
+        return keccak256(abi.encodePacked(root, recRoot, seed, sha256Variant));
     }
 }

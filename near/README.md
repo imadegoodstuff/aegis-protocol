@@ -36,15 +36,15 @@ cache: LookupMap<(u64, u64), [u8; 32]>   (epoch, bottom tree index) → verified
 
 | Method | Args encoding | Arguments |
 |---|---|---|
-| `new` (init) | JSON | `root`, `rec_root`: base64 32 bytes |
+| `new` (init) | JSON | `root`, `rec_root`: base64 32 bytes; `seed`: base64 16 bytes |
 | `execute` | **Borsh** | `idx: u64`, `l0: LayerSig`, `l1: Option<LayerSig>`, `receiver_id: AccountId`, `method: String`, `args: Vec<u8>`, `deposit: u128`, `gas: u64` |
-| `recover` | **Borsh** | `new_root: [u8;32]`, `new_rec_root: [u8;32]`, `wots: Vec<[u8;32]>` (67), `auth: Vec<[u8;32]>` (8) |
+| `recover` | **Borsh** | `new_root: [u8;32]`, `new_rec_root: [u8;32]`, `new_seed: [u8;16]`, `wots: Vec<[u8;32]>` (67), `auth: Vec<[u8;32]>` (8) |
 | `get_state` | JSON | — |
 | `needs_top_layer` | JSON | — (`idx = next_idx`) |
 | `needs_top_layer_at` | JSON | `idx` (string u64) |
 | `next_digest` | JSON | `receiver_id`, `method`, `args` (base64), `deposit` (string u128) — `idx = next_idx` |
 | `digest_at` | JSON | `idx` (string u64), `receiver_id`, `method`, `args` (base64), `deposit` (string u128) |
-| `next_recovery_digest` | JSON | `new_root`, `new_rec_root` (base64) |
+| `next_recovery_digest` | JSON | `new_root`, `new_rec_root` (base64 32 B), `new_seed` (base64 16 B) |
 
 `LayerSig` is the Borsh struct `{ wots: Vec<[u8;32]> /*67*/, auth: Vec<[u8;32]> /*10*/ }`.
 Borsh is used for `execute` / `recover` so a 2.5 KB signature is not inflated
@@ -62,7 +62,7 @@ inner = sha256(len(receiver_id) u32 BE ‖ receiver_id
 M = sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(current_account_id) ‖ nonce u64 BE ‖ idx u64 BE ‖ inner)
 
 M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id) ‖ rec_nonce u64 BE
-               ‖ new_root ‖ new_rec_root)
+               ‖ new_root ‖ new_rec_root ‖ new_seed)
 ```
 
 `current_account_id` is the UTF-8 account name of the contract. The
@@ -74,7 +74,7 @@ digest. `gas` is not part of the digest (like gas on EVM). Use the
 ## Layer verification (shared with every chain)
 
 ```
-ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ 16 zero bytes
+ADRS = layer(1) ‖ treeIdx(8 BE) ‖ type(1) ‖ leafIdx(4 BE) ‖ chainIdx(1) ‖ step(1) ‖ pkSeed(16)
 F(adrs, x)   = sha256(adrs ‖ x)                      type 0x00
 leaf         = sha256(adrs ‖ pk_0 ‖ … ‖ pk_66)        type 0x01
 node         = sha256(adrs ‖ left ‖ right)            type 0x02, leafIdx = pos >> 1, chainIdx = level
@@ -84,6 +84,10 @@ Layer 0: `treeIdx = idx >> 10`, `leafIdx = idx & 1023`, message `M`. Layer 1:
 `treeIdx = 0`, `leafIdx = idx >> 10`, message `R_0`; required unless
 `cache[(epoch, idx >> 10)]` already holds `R_0`. Recovery: layer `0xFF`,
 tree 0, `leafIdx = rec_nonce`, height 8.
+
+`pkSeed` is the 16-byte public seed of the key tree (part of the public key,
+rotated by recovery, `CCHS.spec.md` §2.2): every hash call of one tree is a
+different function from the same position in any other tree.
 
 ## Build
 
@@ -98,7 +102,7 @@ cargo install cargo-near && cargo near build
 ```bash
 near deploy <account>.near target/wasm32-unknown-unknown/release/aegis_near.wasm \
     --initFunction new \
-    --initArgs '{"root":"<base64>","rec_root":"<base64>"}'
+    --initArgs '{"root":"<base64>","rec_root":"<base64>","seed":"<base64 16B>"}'
 ```
 
 ## Tests

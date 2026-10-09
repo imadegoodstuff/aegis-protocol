@@ -29,16 +29,18 @@ npm test          # @ton/sandbox: fixture roots, execute, cache, replay, recover
 
 ## Storage
 
-One cell, 769 bits + optional dictionary root:
+One cell, 897 bits + optional dictionary root:
 
 ```
-root:uint256 rec_root:uint256 epoch:uint64 next_idx:uint64 nonce:uint64 rec_nonce:uint64
+root:uint256 rec_root:uint256 seed:uint128 epoch:uint64 next_idx:uint64 nonce:uint64 rec_nonce:uint64
 cache:(HashmapE 128 uint256)        key = epoch << 64 | bottom_tree_idx, value = bottom root
 ```
 
 Deploy with an internal message carrying the StateInit (code + initial data
 with `epoch = next_idx = nonce = rec_nonce = 0` and an empty dictionary). The
-account address is `hash(StateInit)`, so it is a function of the two roots.
+account address is `hash(StateInit)`, so it is a function of the two roots
+and the 16-byte public seed (`seed`, the last 16 bytes of every ADRS,
+`CCHS.spec.md` §2.2; rotated by `recover`).
 
 ## Messages
 
@@ -75,7 +77,7 @@ the signed `action` cell, so a relayer cannot change it.
 ### `op::recover = 0x41455243`
 
 ```
-body:   op:uint32 query_id:uint64 new_root:uint256 new_rec_root:uint256
+body:   op:uint32 query_id:uint64 new_root:uint256 new_rec_root:uint256 new_seed:uint128
         ref[0] = recovery value stream   67 wots ‖ 8 auth   (layer 0xFF, leaf rec_nonce)
 ```
 
@@ -103,14 +105,14 @@ M      = sha256( "AEGIS_CCHS_V1" ‖ "ton" ‖ my_address.hash(32)
                  ‖ nonce(8 BE) ‖ idx(8 BE) ‖ cell_hash(action)(32) )          96 bytes
 
 M_rec  = sha256( "AEGIS_CCHS_RECOVER_V1" ‖ "ton" ‖ my_address.hash(32)
-                 ‖ rec_nonce(8 BE) ‖ new_root(32) ‖ new_rec_root(32) )        128 bytes
+                 ‖ rec_nonce(8 BE) ‖ new_root(32) ‖ new_rec_root(32) ‖ new_seed(16) )   144 bytes
 ```
 
 `my_address.hash` is the 256-bit hash part of the account's standard address.
 `cell_hash(action)` is the representation hash of the `action` cell, which
 commits to both the send mode and the full outgoing message. Get methods
 `get_digest_at(idx, cell_hash(action))` (or `get_next_digest` at
-`idx = next_idx`) and `get_recovery_digest(new_root, new_rec_root)` return the
+`idx = next_idx`) and `get_recovery_digest(new_root, new_rec_root, new_seed)` return the
 digest the client must sign.
 
 Note: the digest binds the account address, not the workchain or network;
@@ -121,14 +123,14 @@ therefore digests while their `nonce`/`next_idx` coincide.
 
 | Method | Returns |
 |---|---|
-| `get_account_state()` | `(root, rec_root, epoch, next_idx, nonce, rec_nonce)` |
+| `get_account_state()` | `(root, rec_root, seed, epoch, next_idx, nonce, rec_nonce)` |
 | `get_cached_root(epoch, tree_idx)` | cached bottom root or 0 |
 | `needs_top_layer_at(idx)` | `-1` if an execute at leaf `idx` must carry the top layer, else `0` |
 | `needs_top_layer()` | same at `idx = next_idx` |
 | `get_digest_at(idx, action_hash)` | digest for an execute at leaf `idx` with the current nonce |
 | `get_next_digest(action_hash)` | same at `idx = next_idx` |
-| `get_recovery_digest(new_root, new_rec_root)` | digest for the next recover |
-| `compute_layer_root(layer, tree_idx, leaf_idx, height, m, sig_cell)` | pure verifier; used by the tests |
+| `get_recovery_digest(new_root, new_rec_root, new_seed)` | digest for the next recover |
+| `compute_layer_root(seed, layer, tree_idx, leaf_idx, height, m, sig_cell)` | pure verifier; used by the tests |
 
 ## Exit codes
 
@@ -155,7 +157,7 @@ deepest stack entry is hashed first, so FunC argument order equals byte order.
 | chain step `F(ADRS, x)` | 64 B | `1 PUSHINT HASHEXT_SHA256` over one builder |
 | Merkle node `T_node(ADRS, l, r)` | 96 B | same |
 | execute digest | 96 B | same |
-| recovery digest | 128 B = 1024 bits | `2 PUSHINT HASHEXT_SHA256` over two 512-bit builders (one builder holds at most 1023 bits) |
+| recovery digest | 144 B = 1152 bits | `2 PUSHINT HASHEXT_SHA256` over a 512-bit and a 640-bit builder (one builder holds at most 1023 bits) |
 | leaf `T_leaf(ADRS, pk_0‖…‖pk_66)` | 2176 B | `255 PUSHINT EXPLODEVAR HASHEXT_SHA256` over a tuple of 23 builders (3 × 256 bits each) |
 
 `EXPLODEVAR` unpacks a tuple `t` of length `m ≤ 255` to `x_1 … x_m m`, which is
@@ -163,16 +165,16 @@ exactly the operand layout `HASHEXT` expects, so the 68-slot leaf input is
 hashed in one call without creating any cell. `SHA256U` (`string_hash`) would
 also work for the 64/96-byte inputs but is limited to a single slice of at most
 127 bytes and offers no advantage, so it is not used. No cells are created in
-the hot loop: ADRS is stored as one 256-bit integer, and HASHEXT accepts
-builders directly.
+the hot loop: ADRS is stored as one 256-bit integer (the public seed in its
+low 128 bits), and HASHEXT accepts builders directly.
 
 ## Gas (measured in @ton/sandbox, func 0.4.6)
 
 | Transaction | Compute gas |
 |---|---|
-| `execute`, first in subtree (two layers, cache write) | ~604 k |
-| `execute`, cached subtree (one layer) | ~290 k |
-| `recover` (height-8 layer) | ~298 k |
+| `execute`, first in subtree (two layers, cache write) | ~611 k |
+| `execute`, cached subtree (one layer) | ~327 k |
+| `recover` (height-8 layer) | ~304 k |
 | `compute_layer_root` get method, one height-10 layer | ~280–300 k |
 
 HASHEXT itself is cheap (1 gas per entry + 1 gas per 33 bytes); the cost is
