@@ -184,7 +184,8 @@ Tests (`#[test]` in the module):
 - `test_layer0_tampered_chain_fails` — a modified chain value changes the root.
 - `test_asset_id_and_digest_vectors` — SUI type name, asset id, transfer and recovery digests against independent vectors.
 - `test_create_deposit_execute_first_in_subtree` — created by one address, funded and spent by another; first transfer with top layer; recipient receives the `Coin<SUI>`.
-- `test_cached_second_op_and_recover` — second transfer from the cached subtree, then recovery rotates roots and resets the cache while id and balance stay.
+- `test_cached_second_op` — second transfer from the cached subtree (bottom layer only), index and nonce advance, no top layer needed.
+- `test_recover_rotates_roots_and_keeps_funds` — recovery rotates roots, bumps the epoch and resets the index while id and balance stay.
 - `test_replayed_signature_fails` — resubmitting a used signature aborts with `EBadSubtreeRoot`.
 - `test_first_use_without_top_layer_fails` — first use of a subtree without `l1` aborts with `EMissingTopLayer`.
 - `test_wrong_amount_fails` — a signature for one amount submitted with another aborts with `EBadTopRoot`.

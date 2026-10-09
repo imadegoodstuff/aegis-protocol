@@ -536,7 +536,7 @@ module aegis::aegis_account {
     }
 
     #[test]
-    fun test_cached_second_op_and_recover() {
+    fun test_cached_second_op() {
         let bob = @0xb0b;
         let mut ts = test_scenario::begin(@0xa11ce);
 
@@ -565,17 +565,30 @@ module aegis::aegis_account {
             test_scenario::ctx(&mut ts),
         );
         assert!(balance_value<SUI>(&acct) == 500, 0);
-        assert!(next_idx(&acct) == 2, 1);
+        assert!(next_idx(&acct) == 2 && nonce(&acct) == 2, 1);
+        assert!(!needs_top_layer(&acct), 2);
+        test_scenario::return_shared(acct);
+        test_scenario::end(ts);
+    }
+
+    #[test]
+    fun test_recover_rotates_roots_and_keeps_funds() {
+        let mut ts = test_scenario::begin(@0xa11ce);
+        create(TEST_TOP_ROOT, TEST_REC_ROOT, test_scenario::ctx(&mut ts));
+
+        test_scenario::next_tx(&mut ts, @0xfee);
+        let mut acct = test_scenario::take_shared<CchsAccount>(&ts);
+        deposit<SUI>(&mut acct, coin::mint_for_testing<SUI>(1000, test_scenario::ctx(&mut ts)));
 
         // Recovery rotates the roots; object id and funds stay.
         let new_root = x"3333333333333333333333333333333333333333333333333333333333333333";
         let new_rec = x"4444444444444444444444444444444444444444444444444444444444444444";
         let mr = next_recovery_digest(&acct, new_root, new_rec);
         recover(&mut acct, new_root, new_rec, test_sign(LAYER_REC, 0, 0, &mr), test_auth(LAYER_REC, 0, 0, REC_H, false));
-        assert!(root(&acct) == new_root && rec_root(&acct) == new_rec, 2);
-        assert!(epoch(&acct) == 1 && next_idx(&acct) == 0 && rec_nonce(&acct) == 1, 3);
-        assert!(needs_top_layer(&acct), 4);
-        assert!(balance_value<SUI>(&acct) == 500, 5);
+        assert!(root(&acct) == new_root && rec_root(&acct) == new_rec, 0);
+        assert!(epoch(&acct) == 1 && next_idx(&acct) == 0 && rec_nonce(&acct) == 1, 1);
+        assert!(needs_top_layer(&acct), 2);
+        assert!(balance_value<SUI>(&acct) == 1000, 3);
         test_scenario::return_shared(acct);
         test_scenario::end(ts);
     }
