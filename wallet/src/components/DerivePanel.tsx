@@ -95,7 +95,7 @@ export default function DerivePanel() {
 
           <div className="derive-section">
             <div className="derive-section-head">
-              <span className="section-eyebrow" style={{ color: "var(--accent)" }}>EVM — same address on 30+ chains</span>
+              <span className="section-eyebrow" style={{ color: "var(--accent)" }}>EVM — ECDSA address, the same on every EVM chain</span>
               <span className="chip chip-accent">secp256k1 (ECDSA) · not post-quantum · hybrid owner / fallback only</span>
             </div>
             <div className="addr-strip">

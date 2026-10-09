@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 type AdapterId = "evm" | "tron" | "svm" | "cosmos" | "near" | "aptos" | "sui" | "cairo" | "ton" | "bitcoin";
 
@@ -23,7 +23,7 @@ const ADAPTERS: Adapter[] = [
     address: "base58check(0x41 ‖ keccak256(pk)[12:])",
     hash: "keccak256 opcode", storage: "same artifact", path: "evm/ (shared)",
     blurb: "TVM executes the EVM artifact unmodified (the TVM build is checked byte-identical in CI). CREATE2 uses prefix 0x41 instead of 0xff, so account addresses differ from the EVM ones and are predicted by tron/predict.mjs; there is no deterministic proxy on TRON, so the factory address depends on who publishes it. Not yet published on Nile or mainnet." },
-  { id: "svm", name: "Solana", family: "Rust / Anchor", set: "CCHS-S-20",
+  { id: "svm", name: "Solana", family: "Rust / Anchor", set: "CCHS-C-20",
     addrStatus: "mainnet", pq: "source",
     address: "base58(ed25519_pk)",
     hash: "sha256 syscall", storage: "PDA per (epoch, treeIdx)", path: "solana/, cchs-core/",
@@ -71,10 +71,48 @@ const PQ_TEXT: Record<Pq, { label: string; cls: string }> = {
   blocked:  { label: "pq: blocked",  cls: "wait" },
 };
 
+/** Below this width the detail opens under the selected adapter (there is no hover, and a side panel would be off screen). */
+const NARROW = "(max-width: 900px)";
+
+function useNarrow(): boolean {
+  const [narrow, setNarrow] = useState(() => typeof window !== "undefined" && window.matchMedia(NARROW).matches);
+  useEffect(() => {
+    const mq = window.matchMedia(NARROW);
+    const on = () => setNarrow(mq.matches);
+    mq.addEventListener("change", on);
+    return () => mq.removeEventListener("change", on);
+  }, []);
+  return narrow;
+}
+
+function Detail({ a, inline }: { a: Adapter; inline?: boolean }) {
+  const pq = PQ_TEXT[a.pq];
+  return (
+    <div className={"arch-detail" + (inline ? " inline" : "")} role="region" aria-live="polite">
+      <div className="arch-head">
+        <div className="arch-detail-name">{a.name}</div>
+        <div className="arch-stack">
+          <span className={`arch-status ${a.addrStatus === "mainnet" ? "live" : "soon"}`}>addr: {a.addrStatus}</span>
+          <span className={`arch-status ${pq.cls}`}>{pq.label}</span>
+        </div>
+      </div>
+      <div className="mono arch-detail-set">{a.family} · {a.set}</div>
+      <p>{a.blurb}</p>
+      <div className="meta">
+        <div><div className="k">Address</div><div className="v">{a.address}</div></div>
+        <div><div className="k">Hash primitive</div><div className="v">{a.hash}</div></div>
+        <div><div className="k">Cache storage</div><div className="v">{a.storage}</div></div>
+        <div><div className="k">Path</div><div className="v">{a.path}</div></div>
+      </div>
+      {!inline && <div className="mono arch-hint">hover or tap an adapter</div>}
+    </div>
+  );
+}
+
 export default function ArchitectureDiagram() {
   const [sel, setSel] = useState<AdapterId>("evm");
+  const narrow = useNarrow();
   const a = ADAPTERS.find((x) => x.id === sel)!;
-  const pq = PQ_TEXT[a.pq];
   return (
     <div className="card arch">
       <div className="arch-stage">
@@ -94,8 +132,9 @@ export default function ArchitectureDiagram() {
               <span className="arch-status live">32 B</span>
             </div>
             <div className="arch-sub">
-              HKDF-SHA256("aegis/cchs/master/v1")<br />
-              → K-20 roots (EVM) · S-20 roots (others)<br />
+              HKDF-SHA256 · info "aegis/cchs/master/v1"<br />
+              → a chain key per chain · info "…/chain/v1" ‖ tag<br />
+              → K-20 tree (EVM) · S-20 / C-20 tree (others)<br />
               → every WOTS+ chain, derived on demand
             </div>
           </div>
@@ -114,40 +153,26 @@ export default function ArchitectureDiagram() {
         <div className="arch-col" role="group" aria-label="Chain adapters">
           <div className="arch-col-label">Chain adapters</div>
           {ADAPTERS.map((x) => (
-            <div key={x.id} className={"arch-adapter" + (sel === x.id ? " active" : "")}
-              onMouseEnter={() => setSel(x.id)} onFocus={() => setSel(x.id)} onClick={() => setSel(x.id)} tabIndex={0}>
-              <div className="arch-head">
-                <span className="arch-title">{x.name}</span>
-                <div className="arch-stack">
-                  <span className={`arch-status ${x.addrStatus === "mainnet" ? "live" : "soon"}`}>addr: {x.addrStatus}</span>
-                  <span className={`arch-status ${PQ_TEXT[x.pq].cls}`}>{PQ_TEXT[x.pq].label}</span>
+            <div key={x.id} className="arch-adapter-slot">
+              <div className={"arch-adapter" + (sel === x.id ? " active" : "")}
+                role="button" aria-pressed={sel === x.id} aria-controls="arch-detail"
+                onMouseEnter={() => { if (!narrow) setSel(x.id); }} onFocus={() => setSel(x.id)} onClick={() => setSel(x.id)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSel(x.id); } }} tabIndex={0}>
+                <div className="arch-head">
+                  <span className="arch-title">{x.name}</span>
+                  <div className="arch-stack">
+                    <span className={`arch-status ${x.addrStatus === "mainnet" ? "live" : "soon"}`}>addr: {x.addrStatus}</span>
+                    <span className={`arch-status ${PQ_TEXT[x.pq].cls}`}>{PQ_TEXT[x.pq].label}</span>
+                  </div>
                 </div>
+                <div className="arch-sub">{x.family} · {x.set}</div>
               </div>
-              <div className="arch-sub">{x.family} · {x.set}</div>
+              {narrow && sel === x.id && <Detail a={x} inline />}
             </div>
           ))}
         </div>
 
-        <div className="arch-detail" role="region" aria-live="polite">
-          <div className="arch-head">
-            <div className="arch-detail-name">{a.name}</div>
-            <div className="arch-stack">
-              <span className={`arch-status ${a.addrStatus === "mainnet" ? "live" : "soon"}`}>addr: {a.addrStatus}</span>
-              <span className={`arch-status ${pq.cls}`}>{pq.label}</span>
-            </div>
-          </div>
-          <div className="mono" style={{ fontSize: 12, color: "var(--text-3)" }}>{a.family} · {a.set}</div>
-          <p>{a.blurb}</p>
-          <div className="meta">
-            <div><div className="k">Address</div><div className="v">{a.address}</div></div>
-            <div><div className="k">Hash primitive</div><div className="v">{a.hash}</div></div>
-            <div><div className="k">Cache storage</div><div className="v">{a.storage}</div></div>
-            <div><div className="k">Path</div><div className="v">{a.path}</div></div>
-          </div>
-          <div className="mono" style={{ marginTop: "auto", fontSize: 11.5, color: "var(--text-4)" }}>
-            hover or tap an adapter
-          </div>
-        </div>
+        {!narrow && <div className="arch-detail-col"><Detail a={a} /></div>}
       </div>
     </div>
   );

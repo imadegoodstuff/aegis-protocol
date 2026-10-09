@@ -12,8 +12,8 @@ export type Chain = {
   family: "EVM" | "Starknet" | "SVM" | "Cosmos" | "Move" | "Other" | "Bitcoin";
   status: ChainStatus;   // standard address derivation
   pq: PqStatus;          // CCHS verifier
-  set: "K-20" | "S-20" | "—";
-  sameAddr?: boolean;    // EVM chains share one CREATE2 address
+  set: "K-20" | "S-20" | "C-20" | "—";
+  sameAddr?: boolean;    // the factory is at one CREATE2 address on these chains (accounts differ per chain: one key tree each)
   wallet?: string;       // native wallet that can import the derived address
 };
 
@@ -26,7 +26,7 @@ export const CHAINS: Chain[] = [
   EVM("Mantle", "MetaMask"), EVM("Blast"), EVM("Mode"),
 
   { name: "TRON",      family: "EVM",      status: "mainnet", pq: "contract", set: "K-20", wallet: "TronLink / Trust" },
-  { name: "Solana",    family: "SVM",      status: "mainnet", pq: "source",   set: "S-20", wallet: "Phantom / Backpack / Solflare" },
+  { name: "Solana",    family: "SVM",      status: "mainnet", pq: "source",   set: "C-20", wallet: "Phantom / Backpack / Solflare" },
   { name: "Osmosis",   family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr / Leap" },
   { name: "Injective", family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr" },
   { name: "Neutron",   family: "Cosmos",   status: "mainnet", pq: "source",   set: "S-20", wallet: "Keplr / Leap" },

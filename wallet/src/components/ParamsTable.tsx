@@ -14,8 +14,8 @@ const ROWS: Array<{ k: string; s: string; kk: string; unit?: string }> = [
   { k: "Execution gas, recovery",     s: "≈ 201 000",          kk: "≈ 107 000" },
   { k: "Runtime code",                s: "6 184",              kk: "6 072", unit: "B" },
   { k: "External verifier contract",  s: "none",               kk: "none" },
-  { k: "Client state",                s: "none (index on chain)", kk: "none (index on chain)" },
-  { k: "Primary use",                 s: "every non-EVM chain", kk: "EVM default" },
+  { k: "Client state",                s: "one integer per chain and epoch", kk: "one integer per chain and epoch" },
+  { k: "Primary use",                 s: "non-EVM chains (Solana: C-20)", kk: "EVM default" },
 ];
 
 export default function ParamsTable() {
@@ -44,7 +44,8 @@ export default function ParamsTable() {
       <figcaption>
         <span className="fig-num">Table 1</span>
         <span className="fig-text">
-          Both sets share one account contract and one master key. Gas is execution only (excludes 21 K intrinsic and
+          Both sets share one account contract and one master key; the client keeps only the highest leaf it has signed,
+          per chain and epoch (the index itself lives on chain). Gas is execution only (excludes 21 K intrinsic and
           calldata), measured in an EVM with client-produced signatures. For reference, on-chain SPHINCS+ C13 verification
           costs ≈ 190 K gas per signature plus a separate 14.6 KB verifier contract.
         </span>

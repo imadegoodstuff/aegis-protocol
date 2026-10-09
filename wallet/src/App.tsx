@@ -330,7 +330,7 @@ export default function App() {
                 <li><span className="mark">▶</span> The factory is not published on any chain yet. There is no deployer: the first Protect on a chain publishes it through the deterministic proxy as one extra transaction paid by that user, and the panel shows the live state</li>
                 <li><span className="mark">▶</span> No external audit and no machine-checked proof of the reductions in §6 of the spec</li>
                 <li><span className="mark">▶</span> Non-EVM verifiers (Solana, CosmWasm, NEAR, Move, Cairo, TON) are source against test vectors, not deployments</li>
-                <li><span className="mark">▶</span> Bitcoin needs OP_CAT or OP_CHECKSIGFROMSTACK to bind a hash signature to a transaction; neither is active</li>
+                <li><span className="mark">▶</span> Bitcoin needs a key-less output (BIP-360) and OP_CAT or OP_CHECKSIGFROMSTACK; none is active. Until then the Bitcoin address is ordinary P2WPKH and is not post-quantum (BITCOIN.md)</li>
                 <li><span className="mark">▶</span> Keygen is ~1 s per chain (14 chains ≈ 8 s on a laptop), not ~100 ms; that needs the chain loop inside WASM</li>
                 <li><span className="mark">▶</span> Account addresses differ per chain by design (one key tree per chain); only the factory is at one address everywhere</li>
                 <li><span className="mark">▶</span> A lost mnemonic or a compromised device cannot be recovered by anyone</li>
@@ -366,6 +366,7 @@ export default function App() {
               { h: "Attacks are tests",               p: "Front-run, replay, tampered chain value, tampered path, cache poisoning, old key after recovery: each is a Foundry test that must revert." },
               { h: "Front-end is static",             p: "Build from source, serve the dist folder. No API, no telemetry; RPC calls go to public endpoints you can change." },
               { h: "Spec states its limits",          p: "CCHS.spec.md §1 lists prior art and what the contribution is; §11 lists open problems. Read those before the claims." },
+              { h: "One key tree per chain",          p: "key(chain) = HKDF(master, \"aegis/cchs/chain/v1\" ‖ tag). evm/test/fixtures/cchs-derivation.json pins the keys; check-vectors asserts that chains 1 and 8453 share no leaf secret." },
             ].map((c, i) => (
               <div key={i} className="card check fade">
                 <div className="check-num mono" aria-hidden="true">{String(i + 1).padStart(2, "0")}</div>

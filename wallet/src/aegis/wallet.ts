@@ -88,7 +88,9 @@ export async function switchChain(chainId: number): Promise<void> {
 const RPC_OVERRIDES: Record<number, string> = { [polygon.id]: "https://1rpc.io/matic" };
 
 export function makePublicClient(chain: Chain): PublicClient {
-  return createPublicClient({ chain, transport: http(RPC_OVERRIDES[chain.id]) });
+  // A public endpoint that does not answer should surface as an error in the
+  // panel within seconds, not leave a row on "reading…" for a minute.
+  return createPublicClient({ chain, transport: http(RPC_OVERRIDES[chain.id], { timeout: 8_000, retryCount: 1 }) });
 }
 
 export function makeWalletClient(chain: Chain, account: Address): WalletClient {

@@ -1,7 +1,7 @@
 import { CHAINS, type PqStatus } from "../data/chains";
 
 const PQ_LABEL: Record<PqStatus, { text: string; cls: string }> = {
-  contract: { text: "verifier ready · first Protect publishes the factory", cls: "soon" },
+  contract: { text: "verifier ready · factory unpublished",   cls: "soon" },
   source:   { text: "verifier source · not deployed",         cls: "" },
   blocked:  { text: "needs OP_CAT",                           cls: "" },
   none:     { text: "—",                                      cls: "" },
@@ -15,13 +15,13 @@ export default function ChainDashboard() {
         <div>
           <div className="chain-dash-title">Table 2 · chain matrix</div>
           <div className="chain-dash-sub">
-            address = standard derivation, importable today · pq = state of the CCHS verifier on that chain
+            address = standard derivation, importable today · pq = state of the CCHS verifier on that chain · "factory unpublished" = the first Protect on that chain publishes it
           </div>
         </div>
         <div className="chain-dash-legend">
           <span><i className="chain-dot" /> address live</span>
           <span><i className="chain-dot pending" /> preview</span>
-          <span className="chip chip-accent">{evm} EVM chains · one address</span>
+          <span className="chip chip-accent">{evm} EVM chains · one key tree each · one factory address</span>
         </div>
       </div>
 

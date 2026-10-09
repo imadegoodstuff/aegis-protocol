@@ -20,6 +20,18 @@ const now = () => new Date().toISOString().slice(11, 23);
 
 const grp = (n: number) => n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, "\u2009");
 
+/** What a run does, in order; shown before the first run so the card is never blank. */
+const PLAN: Array<{ k: string; v: string }> = [
+  { k: "device",    v: "logical cores, platform" },
+  { k: "keccak256", v: "ns per hash, 64 B input, pure JS on the main thread" },
+  { k: "keygen",    v: "CCHS-K-20 in the worker pool: top tree, recovery tree, subtree 0 (~2.3 M hashes)" },
+  { k: "sign #0",   v: "first operation in a subtree: two layers, 4 928 B" },
+  { k: "sign #1",   v: "cached subtree: one layer, 2 464 B" },
+  { k: "verify",    v: "both signatures, #1 against the cached subtree root" },
+  { k: "tamper",    v: "one bit flipped in a chain value must be rejected" },
+  { k: "front-run", v: "signature #1 against a different digest must be rejected" },
+];
+
 export default function LabBench() {
   const [log, setLog] = useState<Entry[]>([]);
   const [running, setRunning] = useState(false);
@@ -123,9 +135,17 @@ export default function LabBench() {
       </div>
       <div className="bench-body mono" ref={bodyRef} aria-live="polite">
         {log.length === 0 && (
-          <div className="bench-empty">
-            keygen → sign (first-in-subtree) → sign (cached) → verify → tamper → front-run.
-            <br />A random master key is generated for the run and discarded. Nothing leaves the page.
+          <div className="bench-plan">
+            {PLAN.map((p) => (
+              <div key={p.k} className="bench-line muted">
+                <span className="bench-t">—</span>
+                <span className="bench-k">{p.k}</span>
+                <span className="bench-v">{p.v}</span>
+              </div>
+            ))}
+            <div className="bench-empty">
+              A random master key is generated for the run and discarded. Nothing leaves the page.
+            </div>
           </div>
         )}
         {log.map((e, i) => (

@@ -16,7 +16,8 @@ Browser client for Aegis accounts. Vite + React 19 + TypeScript. All cryptograph
 - Figures: an animated hypertree showing the cache filling signature by signature (`src/components/HypertreeFigure.tsx`), the parameter table for both sets (`src/components/ParamsTable.tsx`), and the chain matrix with truthful per-chain status (`src/components/ChainDashboard.tsx`).
 - Responsive layout down to 360 px: full-screen menu, stacked Protect rows, 44 px touch targets, safe-area insets, horizontally scrolling tables, no pointer effects on touch devices.
 - Live FIPS 205 sign + verify demo.
-- One-click hybrid account deployment via `viem` and the injected EVM provider (`src/components/SwapPanel.tsx`).
+- Hybrid account card (`src/components/SwapPanel.tsx`): states the position of the `AegisAccountV2` line (source and tests in `evm/`, not deployed on any chain) and shows the post-quantum commitment the mnemonic would carry. It deploys nothing.
+- Source excerpts (`src/components/CodeShowcase.tsx`): `AegisCCHSBase.sol`, `cchs-core/src/lib.rs`, `cairo/src/lib.cairo`, `cchsAccount.ts`, kept in step with the files by hand.
 
 ## Stack
 
