@@ -38,7 +38,7 @@ Bounded model checks explore every state up to the stated bounds; they are not p
 
 - No independent audit of any component.
 - No machine-checked proof; no written reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` (C-20).
-- No mainnet deployment; gas and compute figures come from local EVMs and estimates, and Solana compute units have not been measured on a cluster.
+- No mainnet deployment; gas figures come from a local EVM and Solana compute units from the `solana-program-test` runtime in CI, not from a public cluster.
 - The wallet is a reference implementation: single signer by default, browser `localStorage` for the index record, no hardware-key support.
 - Side channels in the client's hash chains (timing of WOTS+ chain lengths) are not addressed; the signer runs in a browser or a user's own process.
 
