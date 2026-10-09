@@ -25,6 +25,7 @@ import type { CchsKey, Tree, Variant } from './cchs';
 import { toHex } from './cchs';
 import { CchsPool } from './cchsPool';
 import artifacts from './cchsArtifacts.json';
+import { recordStore } from './recordStore';
 
 const MASTER_INFO = new TextEncoder().encode('aegis/cchs/master/v1');
 const CHAIN_INFO = new TextEncoder().encode('aegis/cchs/chain/v1');
@@ -116,12 +117,12 @@ export const laneOf = (idx: number) => idx >> LANE_SHIFT;
 const LANE_KEY = 'aegis/cchs/device-lane';
 /** The lane this device signs in (0 unless the user assigned another one for a second device). */
 export function deviceLane(): number {
-  const v = Number(globalThis.localStorage?.getItem(LANE_KEY) ?? 0);
+  const v = Number(recordStore().getItem(LANE_KEY) ?? 0);
   return Number.isInteger(v) && v >= 0 && v < LANES ? v : 0;
 }
 export function setDeviceLane(lane: number): void {
   if (!Number.isInteger(lane) || lane < 0 || lane >= LANES) throw new Error(`lane must be in [0, ${LANES})`);
-  globalThis.localStorage?.setItem(LANE_KEY, String(lane));
+  recordStore().setItem(LANE_KEY, String(lane));
 }
 
 const idxKey = (chainId: number, account: Address, epoch: number, lane: number) =>
@@ -130,7 +131,7 @@ const recKey = (chainId: number, account: Address) => `aegis/cchs/rec-signed/${c
 
 /** Highest leaf index this device has ever signed for the account in `epoch` and `lane`, or null if no record exists. */
 export function highestSignedIndex(chainId: number, account: Address, epoch: number, lane = 0): number | null {
-  const v = globalThis.localStorage?.getItem(idxKey(chainId, account, epoch, lane));
+  const v = recordStore().getItem(idxKey(chainId, account, epoch, lane));
   return v === null || v === undefined ? null : Number(v);
 }
 
@@ -154,17 +155,17 @@ export function nextSigningIndex(chainId: number, account: Address, epoch: numbe
 /** Record `idx` as used. Call before producing the signature, not after. */
 export function markIndexSigned(chainId: number, account: Address, epoch: number, idx: number, lane = 0): void {
   const rec = highestSignedIndex(chainId, account, epoch, lane);
-  if (rec === null || idx > rec) globalThis.localStorage?.setItem(idxKey(chainId, account, epoch, lane), String(idx));
+  if (rec === null || idx > rec) recordStore().setItem(idxKey(chainId, account, epoch, lane), String(idx));
 }
 
 /** Highest recovery nonce this device has signed for the account, or -1. */
 export function highestRecoverySigned(chainId: number, account: Address): number {
-  const v = globalThis.localStorage?.getItem(recKey(chainId, account));
+  const v = recordStore().getItem(recKey(chainId, account));
   return v === null || v === undefined ? -1 : Number(v);
 }
 /** Record recovery leaf `recNonce` as used. Call before producing the signature. */
 export function markRecoverySigned(chainId: number, account: Address, recNonce: number): void {
-  if (recNonce > highestRecoverySigned(chainId, account)) globalThis.localStorage?.setItem(recKey(chainId, account), String(recNonce));
+  if (recNonce > highestRecoverySigned(chainId, account)) recordStore().setItem(recKey(chainId, account), String(recNonce));
 }
 
 const EPOCH_INFO = new TextEncoder().encode('aegis/cchs/epoch/v1');

@@ -48,6 +48,8 @@ wallet/serve.err
 wallet/package-lock.json
 wallet/lh-local.json
 wallet/lighthouse-mobile.json
+sdk/dist/
+sdk/*.tgz
 
 # env
 .env

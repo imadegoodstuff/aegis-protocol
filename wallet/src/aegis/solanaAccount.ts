@@ -20,6 +20,7 @@ import type { CchsKey, CchsPublic, LayerSig, Tree } from './cchs';
 import { cchsC, H, LEN, REC_H } from './cchsCompact';
 import { chainKey, epochKey, labelChainTag } from './cchsAccount';
 import type { CchsPool } from './cchsPool';
+import { recordStore } from './recordStore';
 import {
   ASSOCIATED_TOKEN_PROGRAM, COMPUTE_BUDGET_PROGRAM, SYSTEM_PROGRAM, TOKEN_2022_PROGRAM, TOKEN_PROGRAM,
   associatedTokenAddress, compileMessage, concat, createAtaIdempotent, createLookupTable, extendLookupTable,
@@ -101,7 +102,7 @@ export const RECOVERIES = 1 << REC_H;
 const idxKey = (cluster: Cluster, account: string, epoch: bigint) => `aegis/cchs/solana/${cluster}/signed/${account}/${epoch}`;
 const recKey = (cluster: Cluster, account: string) => `aegis/cchs/solana/${cluster}/rec-signed/${account}`;
 export function highestSigned(cluster: Cluster, account: string, epoch: bigint): number | null {
-  const v = globalThis.localStorage?.getItem(idxKey(cluster, account, epoch));
+  const v = recordStore().getItem(idxKey(cluster, account, epoch));
   return v === null || v === undefined ? null : Number(v);
 }
 export function recordMissing(cluster: Cluster, account: string, st: AccountState): boolean {
@@ -115,14 +116,14 @@ export function nextIndex(cluster: Cluster, account: string, st: AccountState): 
 }
 export function markSigned(cluster: Cluster, account: string, epoch: bigint, idx: number): void {
   const rec = highestSigned(cluster, account, epoch);
-  if (rec === null || idx > rec) globalThis.localStorage?.setItem(idxKey(cluster, account, epoch), String(idx));
+  if (rec === null || idx > rec) recordStore().setItem(idxKey(cluster, account, epoch), String(idx));
 }
 export function highestRecoverySigned(cluster: Cluster, account: string): number {
-  const v = globalThis.localStorage?.getItem(recKey(cluster, account));
+  const v = recordStore().getItem(recKey(cluster, account));
   return v === null || v === undefined ? -1 : Number(v);
 }
 export function markRecoverySigned(cluster: Cluster, account: string, recNonce: number): void {
-  if (recNonce > highestRecoverySigned(cluster, account)) globalThis.localStorage?.setItem(recKey(cluster, account), String(recNonce));
+  if (recNonce > highestRecoverySigned(cluster, account)) recordStore().setItem(recKey(cluster, account), String(recNonce));
 }
 
 // ------------------------------------------------------- lookup table
@@ -133,9 +134,9 @@ export function markRecoverySigned(cluster: Cluster, account: string, recNonce: 
 export const TABLE_KEYS = (account: Pubkey, vault: Pubkey): Pubkey[] =>
   [SOLANA_PROGRAM_ID, account, vault, SYSTEM_PROGRAM, COMPUTE_BUDGET_PROGRAM, TOKEN_PROGRAM, TOKEN_2022_PROGRAM, ASSOCIATED_TOKEN_PROGRAM, cachePda(account, 0n, 0n)];
 const tableKey = (cluster: Cluster, account: string) => `aegis/cchs/solana/${cluster}/table/${account}`;
-export function rememberTable(cluster: Cluster, account: string, table: Pubkey): void { globalThis.localStorage?.setItem(tableKey(cluster, account), toBase58(table)); }
+export function rememberTable(cluster: Cluster, account: string, table: Pubkey): void { recordStore().setItem(tableKey(cluster, account), toBase58(table)); }
 export async function findTable(rpc: Rpc, cluster: Cluster, account: Pubkey): Promise<Pubkey | null> {
-  const local = globalThis.localStorage?.getItem(tableKey(cluster, toBase58(account)));
+  const local = recordStore().getItem(tableKey(cluster, toBase58(account)));
   if (local) return fromBase58(local);
   // Oldest transaction of the account: page back through its signatures.
   let before: string | undefined, oldest: string | undefined;

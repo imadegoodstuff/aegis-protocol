@@ -17,6 +17,7 @@
 import { bytesToHex, hexToBytes } from '@noble/hashes/utils';
 import { type CchsKey } from './cchs';
 import { epochKey } from './cchsAccount';
+import { recordStore, removeRecord } from './recordStore';
 import {
   HB, NO_SUBTREE, LAYER_BOTTOM, LAYER_TOP, LAYER_REC,
   publicKeyB, bottomOf, accountOutput, decodeSpend,
@@ -55,6 +56,8 @@ export interface PendingSpend {
 export interface PreparedSpend {
   tx: Tx; hex: string; txid: string; leaf: LeafName; vsize: number; weight: number; fee: number; feerate: number;
   inputs: BtcUtxo[]; next: BtcState; nextAddress: string; payment: { to: string; sat: bigint } | null;
+  /** Address the inputs were taken from (the account's address when the spend was prepared). */
+  from: string;
 }
 
 export const stateLabel = (st: BtcState) => `epoch ${st.epoch}, t ${st.t === NO_SUBTREE ? '∅' : st.t}, nextIdx ${st.nextIdx}`;
@@ -102,9 +105,9 @@ export async function relayInfo(relayUrl: string): Promise<{ chain: string; bloc
 }
 
 const store = {
-  get<T>(k: string): T | null { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) as T : null; } catch { return null; } },
-  set(k: string, v: unknown) { try { localStorage.setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
-  del(k: string) { try { localStorage.removeItem(k); } catch { /* ignore */ } },
+  get<T>(k: string): T | null { try { const v = recordStore().getItem(k); return v ? JSON.parse(v) as T : null; } catch { return null; } },
+  set(k: string, v: unknown) { try { recordStore().setItem(k, JSON.stringify(v)); } catch { /* private mode */ } },
+  del(k: string) { try { removeRecord(recordStore(), k); } catch { /* ignore */ } },
 };
 
 export class BtcAccount {
@@ -266,7 +269,7 @@ export class BtcAccount {
     }
     const hex = bytesToHex(serialize(tx, true));
     const id = txidToHex(txidOf(tx));
-    return { tx, hex, txid: id, leaf, vsize: vsize(tx), weight: weight(tx), fee: Number(fee), feerate: Number(fee) / vsize(tx), inputs, next, nextAddress: this.addressOf(next), payment };
+    return { tx, hex, txid: id, leaf, vsize: vsize(tx), weight: weight(tx), fee: Number(fee), feerate: Number(fee) / vsize(tx), inputs, next, nextAddress: this.addressOf(next), payment, from: lin.address };
   }
 
   /** Record a broadcast so the UI survives a reload while the esplora API cannot see the transaction. */

@@ -98,6 +98,26 @@ jobs:
       - name: Bitcoin CCHS-UTXO leaves (exec, execFirst, recover) executed in a BIP-342 + OP_CAT + OP_CHECKSIGFROMSTACK interpreter, sizes pinned
         run: npm run btc
 
+  sdk:
+    name: SDK (@aegis-protocol/sdk)
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: sdk } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '22' }
+      # The SDK compiles the wallet's own sources (../wallet/src/aegis), whose
+      # imports resolve from wallet/node_modules; both trees are installed.
+      - run: npm ci || npm install
+        working-directory: wallet
+      - run: npm ci || npm install
+      - run: npm run typecheck
+      - run: npm run build
+      - name: offline smoke (EVM, Solana, Bitcoin addresses; K-20 and SLH-DSA signatures; execute tx size)
+        run: npm run smoke
+      - name: package contents
+        run: npm pack --dry-run
+
   bitcoin:
     name: Bitcoin Inquisition regtest (CCHS-UTXO lineage on a real node)
     runs-on: ubuntu-latest
