@@ -170,9 +170,9 @@ builders directly.
 
 | Transaction | Compute gas |
 |---|---|
-| `execute`, first in subtree (two layers, cache write) | ~598 k |
-| `execute`, cached subtree (one layer) | ~301 k |
-| `recover` (height-8 layer) | ~304 k |
+| `execute`, first in subtree (two layers, cache write) | ~604 k |
+| `execute`, cached subtree (one layer) | ~290 k |
+| `recover` (height-8 layer) | ~298 k |
 | `compute_layer_root` get method, one height-10 layer | ~280–300 k |
 
 HASHEXT itself is cheap (1 gas per entry + 1 gas per 33 bytes); the cost is

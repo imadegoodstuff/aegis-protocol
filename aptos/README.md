@@ -2,10 +2,12 @@
 
 **Status**: source compiled and unit-tested in CI (`aptos move compile`,
 `aptos move test`, `.github/workflows/build.yml`). `verify_layer` is checked
-against the shared fixture `evm/test/fixtures/cchs-s-20.json`; the full
-create → fund → execute → cached execute → recover flow is exercised with a
-test-generated hypertree. **Not published on mainnet, testnet or devnet by
-anyone yet.** No audit.
+against the shared fixture `evm/test/fixtures/cchs-s-20.json` (including the
+signer-chosen-index vectors in `skip.ops`); the full create → fund → execute
+→ cached execute → recover flow and the index discipline (skip within a
+subtree, jump across subtrees, index reuse, redundant top layer) are
+exercised with a test-generated hypertree. **Not published on mainnet,
+testnet or devnet by anyone yet.** No audit.
 
 Module: `aptos/sources/aegis_account.move` (`aegis::aegis_account`).
 Protocol: `../CCHS.spec.md`. Reference implementations: `evm/src/AegisCCHS.sol`,
@@ -62,7 +64,7 @@ the address.
 | `root` | `vector<u8>` (32) | top-layer tree root; rotated only by `recover` |
 | `rec_root` | `vector<u8>` (32) | recovery tree root (height 8) |
 | `epoch` | `u64` | bumped on every recovery; namespaces the cache |
-| `next_idx` | `u64` | next unused leaf in `[0, 2^20)` |
+| `next_idx` | `u64` | lowest leaf still accepted, in `[0, 2^20)`; becomes `idx + 1` after each execute |
 | `nonce` | `u64` | bound into every digest |
 | `rec_nonce` | `u64` | next unused recovery leaf in `[0, 256)` |
 | `cached_root` | `Table<u128, vector<u8>>` | `(epoch << 64) \| tree_idx` → verified bottom subtree root |
@@ -74,13 +76,22 @@ the address.
 ```
 create(creator: &signer, root, rec_root)
 deposit<CoinType>(payer: &signer, acct_addr, amount)        -- convenience; any transfer to acct_addr works
-execute_transfer<CoinType>(acct_addr, recipient, amount,
+execute_transfer<CoinType>(acct_addr, recipient, amount, idx: u64,
                  l0_wots: vector<vector<u8>>, l0_auth: vector<vector<u8>>,
                  has_l1: bool,
                  l1_wots: vector<vector<u8>>, l1_auth: vector<vector<u8>>)
-execute_transfer_fa(acct_addr, metadata: Object<Metadata>, recipient, amount, l0_*, has_l1, l1_*)
+execute_transfer_fa(acct_addr, metadata: Object<Metadata>, recipient, amount, idx, l0_*, has_l1, l1_*)
 recover(acct_addr, new_root, new_rec_root, wots, auth)
 ```
+
+`idx` is the leaf the signer chose: it must be `>= next_idx` (`E_INDEX_USED`
+otherwise) and `< 2^20` (`E_EXHAUSTED`); on success `next_idx` becomes
+`idx + 1`, so every lower leaf is abandoned forever. The index is bound into
+the digest, so only the key holder can skip leaves or jump to a later subtree.
+The top layer is required when the subtree of `idx` is not cached for the
+current epoch (`E_MISSING_TOP_LAYER`) and ignored when it already is, so a
+transaction prepared with a proof still succeeds if the subtree was
+registered in the meantime.
 
 `execute_transfer<CoinType>` covers APT (`0x1::aptos_coin::AptosCoin`) and
 every legacy `Coin<T>`, including coins that have migrated to a paired
@@ -93,11 +104,14 @@ account's signer obtained from `account::create_signer_with_capability`.
 Both create the recipient account if it does not exist.
 
 Views: `derive_address(creator, root)`, `coin_asset_id<CoinType>()`,
-`fa_asset_id(metadata_addr)`, `next_digest<CoinType>(acct_addr, recipient, amount)`,
+`fa_asset_id(metadata_addr)`,
+`digest_at<CoinType>(acct_addr, idx, recipient, amount)` and
+`next_digest<CoinType>(acct_addr, recipient, amount)` (the same at `idx = next_idx`),
+`digest_at_fa(acct_addr, idx, metadata_addr, recipient, amount)` and
 `next_digest_fa(acct_addr, metadata_addr, recipient, amount)`,
 `next_recovery_digest(acct_addr, new_root, new_rec_root)`,
-`needs_top_layer(acct_addr)`, `creator_of(acct_addr)`, plus getters for
-every counter and root.
+`needs_top_layer_at(acct_addr, idx)` and `needs_top_layer(acct_addr)` (at
+`next_idx`), `creator_of(acct_addr)`, plus getters for every counter and root.
 
 `l*_wots` is 67 × 32 bytes, `l*_auth` is 10 × 32 bytes (8 × 32 for recovery).
 `verify_layer(layer, tree_idx, leaf_idx, height, m, wots, auth)` and
@@ -130,13 +144,14 @@ recomputed independently.
 
 ## Verification flow (`execute_transfer*`)
 
-1. `idx = next_idx` (abort if `≥ 2^20`); `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
+1. Require `idx >= next_idx` (`E_INDEX_USED`) and `idx < 2^20` (`E_EXHAUSTED`);
+   `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
 2. `r0 = verify_layer(0, tree_idx, leaf_idx, 10, M, l0_wots, l0_auth)`.
-3. If `cached_root[(epoch, tree_idx)]` exists, require it equals `r0`.
-   Otherwise require `has_l1`, compute
+3. If `cached_root[(epoch, tree_idx)]` exists, require it equals `r0` and
+   ignore `l1_*` even if `has_l1`. Otherwise require `has_l1`, compute
    `r1 = verify_layer(1, 0, tree_idx, 10, r0, l1_wots, l1_auth)`, require
    `r1 == root`, and store `r0` in the cache.
-4. `next_idx += 1`, `nonce += 1`, then obtain the resource signer and move the asset.
+4. `next_idx = idx + 1`, `nonce += 1`, then obtain the resource signer and move the asset.
 
 `recover` verifies layer `0xFF`, tree 0, leaf `rec_nonce`, height 8 against
 `rec_root`, then sets the new roots, resets `next_idx`, and bumps `epoch` and
@@ -203,8 +218,8 @@ aptos move run --function-id <PUBLISHER_ADDR>::aegis_account::create --args hex:
 # fund: any transfer to the derived address
 aptos account transfer --account <ACCOUNT_ADDR> --amount <OCTAS>
 # spend: submitted by any payer, no owner key
-aptos move view --function-id <PUBLISHER_ADDR>::aegis_account::next_digest --type-args 0x1::aptos_coin::AptosCoin --args address:<ACCOUNT_ADDR> address:<TO> u64:<AMOUNT>
-aptos move run  --function-id <PUBLISHER_ADDR>::aegis_account::execute_transfer --type-args 0x1::aptos_coin::AptosCoin --args address:<ACCOUNT_ADDR> address:<TO> u64:<AMOUNT> 'hex:[...]' 'hex:[...]' bool:true 'hex:[...]' 'hex:[...]'
+aptos move view --function-id <PUBLISHER_ADDR>::aegis_account::digest_at --type-args 0x1::aptos_coin::AptosCoin --args address:<ACCOUNT_ADDR> u64:<IDX> address:<TO> u64:<AMOUNT>
+aptos move run  --function-id <PUBLISHER_ADDR>::aegis_account::execute_transfer --type-args 0x1::aptos_coin::AptosCoin --args address:<ACCOUNT_ADDR> address:<TO> u64:<AMOUNT> u64:<IDX> 'hex:[...]' 'hex:[...]' bool:true 'hex:[...]' 'hex:[...]'
 ```
 
 Publish and `create` costs have not been measured on a live network; the
@@ -227,15 +242,34 @@ Tests (`#[test]` in the module):
 - `test_derive_address_vector` — seed bytes and `sha3_256` resource address against an independently computed vector.
 - `test_asset_ids_and_digest_vectors` — APT type name, coin and FA asset ids, transfer and recovery digests against independent vectors.
 - `test_create_fund_execute_cached_recover` — resource account created, funded with APT, first transfer with top layer (no signer), second transfer from the cached subtree, recovery rotates roots and resets the cache while the address and balance stay.
-- `test_replayed_signature_fails` — resubmitting a used signature aborts with `E_BAD_SUBTREE_ROOT`.
+- `test_replayed_signature_fails` — a used signature resubmitted at the next free leaf aborts with `E_BAD_SUBTREE_ROOT`.
 - `test_first_use_without_top_layer_fails` — first use of a subtree without `l1` aborts with `E_MISSING_TOP_LAYER`.
 - `test_wrong_amount_fails` — a signature for one amount submitted with another aborts with `E_BAD_TOP_ROOT`.
 - `test_create_twice_same_root_fails` — the framework rejects a second resource account for the same seed.
 
+Signer-chosen index (through `test_apply`, see below):
+
+- `test_skip_within_subtree_and_across_subtrees` — after leaf 0 registers subtree 0, idx 5 is accepted on the cached path (`next_idx` 6), then idx 1024 with the top layer registers subtree 1 (`next_idx` 1025).
+- `test_index_reuse_fails`, `test_same_index_twice_fails` — `idx < next_idx` aborts with `E_INDEX_USED`.
+- `test_index_beyond_capacity_fails` — `idx >= 2^20` aborts with `E_EXHAUSTED`.
+- `test_jump_to_fresh_subtree_without_top_layer_fails` — idx 1024 without `l1` aborts with `E_MISSING_TOP_LAYER`.
+- `test_redundant_top_layer_is_ignored` — a top layer supplied for an already registered subtree is ignored, not rejected.
+- `test_bottom_root_mismatch_in_registered_subtree_fails` — a bottom root other than the cached one aborts with `E_BAD_SUBTREE_ROOT` even with a proof attached.
+- `test_digest_at_binds_index` — `digest_at` / `digest_at_fa` differ between idx 5 and 6, equal `next_digest*` at `next_idx`, and match independent vectors.
+- `test_fixture_skip_leaf5_path_matches_bottom_root0`, `test_fixture_skip_leaf1024_path_matches_bottom_root1`, `test_fixture_skip_top_leaf1_path_matches_root` — the `skip.ops` auth paths reach `bottomRoot0`, `bottomRoot1` and `root` from the fixture leaves.
+- `test_fixture_skip_leaf5_at_shifted_index_mismatches` — leaf 5's path presented at leaf 6 does not reach `bottomRoot0`.
+- `test_fixture_skip_leaf1024_full_layer0_matches_bottom_root1` — full `verify_layer` of `skip.ops[1].l0` (tree index 1) recomputes `bottomRoot1`.
+
 The end-to-end tests build a real WOTS+ hypertree in `#[test_only]` code
 (chain secrets derived from a tag; sibling nodes are the real neighbour leaf
 or tagged values), so they exercise signing and verification with the actual
-digest the module computes.
+digest the module computes. The index-discipline tests go through
+`test_apply`, a `#[test_only]` helper that runs the state transition of
+`authorize` (index check, cache lookup or top-layer registration, counter
+update) around an already-known bottom root, so they stay cheap and mirror
+the Sui suite. The fixture leaf hashes used by the `test_fixture_skip_*`
+tests were derived from `skip.ops[*]` with `wallet/src/aegis/cchs.ts` (chains
+completed to step 15 and compressed under the leaf ADRS).
 
 ## Framework APIs used
 

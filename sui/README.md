@@ -2,10 +2,12 @@
 
 **Status**: source compiled and unit-tested in CI (`sui move build`,
 `sui move test`, `.github/workflows/build.yml`). `verify_layer` is checked
-against the shared fixture `evm/test/fixtures/cchs-s-20.json`; the full
-create → deposit → execute → cached execute → recover flow is exercised in
-`test_scenario` with a test-generated hypertree. **Not published on mainnet,
-testnet or devnet by anyone yet.** No audit.
+against the shared fixture `evm/test/fixtures/cchs-s-20.json` (including the
+signer-chosen-index vectors in `skip.ops`); the full create → deposit →
+execute → cached execute → recover flow and the index discipline (skip within
+a subtree, jump across subtrees, index reuse, redundant top layer) are
+exercised in `test_scenario` with a test-generated hypertree. **Not published
+on mainnet, testnet or devnet by anyone yet.** No audit.
 
 Module: `sui/sources/aegis_account.move` (`aegis::aegis_account`, Move 2024).
 Protocol: `../CCHS.spec.md`. Reference implementations: `evm/src/AegisCCHS.sol`,
@@ -37,7 +39,7 @@ adapter.
 | `root` | `vector<u8>` (32) | top-layer tree root; rotated only by `recover` |
 | `rec_root` | `vector<u8>` (32) | recovery tree root (height 8) |
 | `epoch` | `u64` | bumped on every recovery; namespaces the cache |
-| `next_idx` | `u64` | next unused leaf in `[0, 2^20)` |
+| `next_idx` | `u64` | lowest leaf still accepted, in `[0, 2^20)`; becomes `idx + 1` after each execute |
 | `nonce` | `u64` | bound into every digest |
 | `rec_nonce` | `u64` | next unused recovery leaf in `[0, 256)` |
 | `cached_root` | `Table<u128, vector<u8>>` | `(epoch << 64) \| tree_idx` → verified bottom subtree root |
@@ -48,12 +50,21 @@ Entry functions:
 ```
 create(root, rec_root, ctx)                           -- shares the object; sender keeps nothing
 deposit<T>(acct: &mut CchsAccount, coin: Coin<T>)     -- anyone may fund, any coin type
-execute_transfer<T>(acct: &mut CchsAccount, recipient, amount,
+execute_transfer<T>(acct: &mut CchsAccount, recipient, amount, idx: u64,
                  l0_wots: vector<vector<u8>>, l0_auth: vector<vector<u8>>,
                  has_l1: bool,
                  l1_wots: vector<vector<u8>>, l1_auth: vector<vector<u8>>, ctx)
 recover(acct: &mut CchsAccount, new_root, new_rec_root, wots, auth)
 ```
+
+`idx` is the leaf the signer chose: it must be `>= next_idx` (`EIndexUsed`
+otherwise) and `< 2^20` (`EExhausted`); on success `next_idx` becomes
+`idx + 1`, so every lower leaf is abandoned forever. The index is bound into
+the digest, so only the key holder can skip leaves or jump to a later subtree.
+The top layer is required when the subtree of `idx` is not cached for the
+current epoch (`EMissingTopLayer`) and ignored when it already is, so a
+transaction prepared with a proof still succeeds if the subtree was
+registered in the meantime.
 
 The balance is generic: `deposit<T>` joins into (or creates) the
 `Balance<T>` entry keyed by `type_name::with_defining_ids<T>()`, and
@@ -62,8 +73,10 @@ The balance is generic: `deposit<T>` joins into (or creates) the
 created with no balances; a transfer of a type never deposited aborts with
 `ENoBalance`.
 
-Views: `asset_id<T>()`, `next_digest<T>(acct, recipient, amount)`,
-`next_recovery_digest(acct, new_root, new_rec_root)`, `needs_top_layer(acct)`,
+Views: `asset_id<T>()`, `digest_at<T>(acct, idx, recipient, amount)` and
+`next_digest<T>(acct, recipient, amount)` (the same at `idx = next_idx`),
+`next_recovery_digest(acct, new_root, new_rec_root)`,
+`needs_top_layer_at(acct, idx)` and `needs_top_layer(acct)` (at `next_idx`),
 `balance_value<T>(acct)`, plus getters for every counter and root.
 
 `l*_wots` is 67 × 32 bytes, `l*_auth` is 10 × 32 bytes (8 × 32 for recovery).
@@ -97,13 +110,14 @@ asserted in the module tests and were recomputed independently.
 
 ## Verification flow (`execute_transfer`)
 
-1. `idx = next_idx` (abort if `≥ 2^20`); `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
+1. Require `idx >= next_idx` (`EIndexUsed`) and `idx < 2^20` (`EExhausted`);
+   `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
 2. `r0 = verify_layer(0, tree_idx, leaf_idx, 10, M, l0_wots, l0_auth)`.
-3. If `cached_root[(epoch, tree_idx)]` exists, require it equals `r0`.
-   Otherwise require `has_l1`, compute
+3. If `cached_root[(epoch, tree_idx)]` exists, require it equals `r0` and
+   ignore `l1_*` even if `has_l1`. Otherwise require `has_l1`, compute
    `r1 = verify_layer(1, 0, tree_idx, 10, r0, l1_wots, l1_auth)`, require
    `r1 == root`, and store `r0` in the cache.
-4. `next_idx += 1`, `nonce += 1`, then split and transfer the coin.
+4. `next_idx = idx + 1`, `nonce += 1`, then split and transfer the coin.
 
 `recover` verifies layer `0xFF`, tree 0, leaf `rec_nonce`, height 8 against
 `rec_root`, then sets the new roots, resets `next_idx`, and bumps `epoch` and
@@ -162,11 +176,11 @@ Publish and `create` costs have not been measured on a live network.
 sui client call --package <PKG> --module aegis_account --function create --args <ROOT_HEX> <REC_ROOT_HEX> --gas-budget 10000000
 sui client call --package <PKG> --module aegis_account --function deposit --type-args 0x2::sui::SUI --args <ACCOUNT_ID> <COIN_ID> --gas-budget 10000000
 sui client call --package <PKG> --module aegis_account --function execute_transfer --type-args 0x2::sui::SUI \
-  --args <ACCOUNT_ID> <TO> <AMOUNT> '[...]' '[...]' true '[...]' '[...]' --gas-budget 50000000
+  --args <ACCOUNT_ID> <TO> <AMOUNT> <IDX> '[...]' '[...]' true '[...]' '[...]' --gas-budget 50000000
 ```
 
-`next_digest<T>` is a plain (non-entry) function; read it with a dev-inspect
-call or recompute it client-side from the layout above.
+`digest_at<T>` / `next_digest<T>` are plain (non-entry) functions; read them
+with a dev-inspect call or recompute them client-side from the layout above.
 
 ## Build and test
 
@@ -186,11 +200,24 @@ Tests (`#[test]` in the module):
 - `test_create_deposit_execute_first_in_subtree` — created by one address, funded and spent by another; first transfer with top layer; recipient receives the `Coin<SUI>`.
 - `test_cached_second_op` — second transfer from the cached subtree (bottom layer only), index and nonce advance, no top layer needed.
 - `test_recover_rotates_roots_and_keeps_funds` — recovery rotates roots, bumps the epoch and resets the index while id and balance stay.
-- `test_replayed_signature_fails` — resubmitting a used signature aborts with `EBadSubtreeRoot`.
+- `test_replayed_signature_fails` — a used signature resubmitted at the next free leaf aborts with `EBadSubtreeRoot`.
 - `test_first_use_without_top_layer_fails` — first use of a subtree without `l1` aborts with `EMissingTopLayer`.
 - `test_wrong_amount_fails` — a signature for one amount submitted with another aborts with `EBadTopRoot`.
 
-- `test_precomputed_leaves`, `test_precomputed_root_l0`, `test_precomputed_root_l0_real_sibling`, `test_precomputed_top_root`, `test_precomputed_rec_root` — re-derive the two leaves and four tree roots the end-to-end tests start from.
+Signer-chosen index (through `test_apply`, see below):
+
+- `test_skip_within_subtree_and_across_subtrees` — after leaf 0 registers subtree 0, idx 5 is accepted on the cached path (`next_idx` 6), then idx 1024 with the top layer registers subtree 1 (`next_idx` 1025).
+- `test_index_reuse_fails`, `test_same_index_twice_fails` — `idx < next_idx` aborts with `EIndexUsed`.
+- `test_index_beyond_capacity_fails` — `idx >= 2^20` aborts with `EExhausted`.
+- `test_jump_to_fresh_subtree_without_top_layer_fails` — idx 1024 without `l1` aborts with `EMissingTopLayer`.
+- `test_redundant_top_layer_is_ignored` — a top layer supplied for an already registered subtree is ignored, not rejected.
+- `test_bottom_root_mismatch_in_registered_subtree_fails` — a bottom root other than the cached one aborts with `EBadSubtreeRoot` even with a proof attached.
+- `test_digest_at_binds_index` — `digest_at` differs between idx 5 and 6, equals `next_digest` at `next_idx`, and matches independent vectors.
+- `test_fixture_skip_leaf5_path_matches_bottom_root0`, `test_fixture_skip_leaf1024_path_matches_bottom_root1`, `test_fixture_skip_top_leaf1_path_matches_root` — the `skip.ops` auth paths reach `bottomRoot0`, `bottomRoot1` and `root` from the fixture leaves.
+- `test_fixture_skip_leaf5_at_shifted_index_mismatches` — leaf 5's path presented at leaf 6 does not reach `bottomRoot0`.
+- `test_fixture_skip_leaf1024_full_layer0_matches_bottom_root1` — full `verify_layer` of `skip.ops[1].l0` (tree index 1) recomputes `bottomRoot1`.
+
+- `test_precomputed_leaves`, `test_precomputed_top_leaves`, `test_precomputed_root_l0`, `test_precomputed_root_l0_real_sibling`, `test_precomputed_top_root`, `test_precomputed_top_root_real_sibling`, `test_precomputed_rec_root` — re-derive the four leaves and five tree roots the end-to-end tests start from.
 
 The end-to-end tests sign with a real WOTS+ hypertree built in `#[test_only]`
 code (chain secrets derived from a tag; sibling nodes are the real neighbour
@@ -198,7 +225,14 @@ leaf or tagged values), so they exercise signing and verification with the
 actual digest the module computes. Tree roots are precomputed constants
 because every unit test runs under the Sui computation cap and building three
 full trees (67 chains x 15 steps per leaf) inside one test exceeds it; the
-four `test_precomputed_*` tests rebuild one root each.
+`test_precomputed_*` tests rebuild one root each. For the same reason the
+index-discipline tests go through `test_apply`, a `#[test_only]` helper that
+runs the state transition of `execute_transfer` (index check, cache lookup or
+top-layer registration, counter update) around an already-known bottom root,
+so each of them pays for at most two top-layer verifications. The fixture
+leaf hashes used by the `test_fixture_skip_*` tests were derived from
+`skip.ops[*]` with `wallet/src/aegis/cchs.ts` (chains completed to step 15
+and compressed under the leaf ADRS), so a Merkle path check costs ten hashes.
 
 ## Framework APIs used
 
