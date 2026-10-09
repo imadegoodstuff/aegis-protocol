@@ -1,5 +1,7 @@
 # @aegis-protocol/sdk
 
+![Post-quantum, hash-only accounts for any wallet, in a few lines of code](docs/sdk-card.png)
+
 Everything the site at [aegisprotocol.si](https://aegisprotocol.si) does, as a
 TypeScript library for node and the browser: hash-only post-quantum accounts
 (CCHS, [`CCHS.spec.md`](../CCHS.spec.md)) on EVM chains, Solana and Bitcoin

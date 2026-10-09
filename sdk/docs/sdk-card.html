@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<style>
+  html,body{margin:0;background:#0b0f14;}
+  .card{width:1200px;height:675px;box-sizing:border-box;padding:56px 64px;color:#e8eef5;
+        font-family:Inter,"Segoe UI",system-ui,sans-serif;background:
+        radial-gradient(900px 500px at 85% -10%,rgba(56,189,248,.18),transparent 60%),
+        radial-gradient(700px 400px at -10% 110%,rgba(16,185,129,.14),transparent 60%),#0b0f14;position:relative;}
+  .brand{display:flex;align-items:center;gap:14px;font-weight:600;letter-spacing:.02em;color:#9fb3c8;font-size:20px}
+  .brand .mark{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#38bdf8,#10b981)}
+  h1{margin:34px 0 0;font-size:46px;line-height:1.15;font-weight:700;letter-spacing:-.01em}
+  h1 span{color:#38bdf8}
+  .sub{margin:18px 0 0;font-size:21px;color:#aebccb;line-height:1.5;max-width:1000px}
+  .flow{display:flex;align-items:center;gap:0;margin-top:44px}
+  .box{background:#111820;border:1px solid #223042;border-radius:14px;padding:18px 22px;min-width:200px}
+  .box b{display:block;font-size:17px;color:#fff;margin-bottom:6px}
+  .box small{font-size:14px;color:#8fa3b8;line-height:1.45;display:block}
+  .arrow{width:54px;height:2px;background:#2d3e52;position:relative;margin:0 4px}
+  .arrow:after{content:"";position:absolute;right:-1px;top:-5px;border:6px solid transparent;border-left-color:#2d3e52}
+  .chains{display:flex;gap:10px;margin-top:40px;flex-wrap:wrap}
+  .chip{border-radius:999px;padding:8px 14px;font-size:15px;border:1px solid #223042;background:#0f1620;color:#cfdae6}
+  .chip.live{border-color:#10b98166;color:#6ee7b7}
+  .chip.net{border-color:#f59e0b55;color:#fcd34d}
+  .foot{position:absolute;left:64px;right:64px;bottom:40px;display:flex;justify-content:space-between;font-size:15px;color:#7f93a8}
+  code{font-family:"JetBrains Mono",Consolas,monospace;color:#cfe8ff;background:#0f1a26;padding:2px 8px;border-radius:6px}
+</style></head><body>
+<div class="card">
+  <div class="brand"><div class="mark"></div>AEGIS PROTOCOL · <code>@aegis-protocol/sdk</code></div>
+  <h1>Post-quantum, hash-only accounts<br>for any wallet, <span>in a few lines of code</span>.</h1>
+  <p class="sub">One mnemonic → a quantum-safe account on every chain. Your users keep their existing wallet to pay fees; the SDK signs each action with a one-time hash-based (WOTS+) leaf and never reuses it.</p>
+  <div class="flow">
+    <div class="box"><b>1 · Derive</b><small>mnemonic → address<br>before anything is on-chain</small></div>
+    <div class="arrow"></div>
+    <div class="box"><b>2 · Protect</b><small>move ETH, SOL, ERC-20,<br>SPL / Token-2022, memecoins</small></div>
+    <div class="arrow"></div>
+    <div class="box"><b>3 · Spend</b><small>one WOTS+ leaf per tx,<br>verified on-chain</small></div>
+    <div class="arrow"></div>
+    <div class="box"><b>4 · Recover</b><small>rotate to a new key epoch<br>from the same mnemonic</small></div>
+  </div>
+  <div class="chains">
+    <span class="chip live">Solana · mainnet-beta live</span>
+    <span class="chip">Ethereum</span><span class="chip">Base</span><span class="chip">Arbitrum</span><span class="chip">Optimism</span>
+    <span class="chip">BSC</span><span class="chip">Polygon</span><span class="chip">+ 8 EVM chains</span>
+    <span class="chip net">Bitcoin · signet</span>
+  </div>
+  <div class="foot"><span>Node · browser · TypeScript · same code as aegisprotocol.si</span><span>github.com/imadegoodstuff/aegis-protocol · x.com/aegisprotocolon</span></div>
+</div>
+</body></html>
