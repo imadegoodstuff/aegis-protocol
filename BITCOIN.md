@@ -16,12 +16,17 @@ P2PKH/P2WPKH). *Short exposure*: the key becomes visible when the spend is
 broadcast and stays attackable until the spend is buried.
 
 Long exposure is solved today by key hygiene, and the wallet does that
-(§6). Short exposure cannot be solved by any script under current consensus:
+(§6). Short exposure has no *practical* solution under current consensus:
 §2 lists what a script can observe about its spending transaction, and §3
 shows that every observable is either controlled by the spender, depends on
-discrete-log hardness, or leaks only through the DER length of ECDSA
-signatures, which is the basis of the known no-fork constructions and the
-reason they do not reach the security level of the rest of this project.
+discrete-log hardness, or is a yes/no answer about the sighash that must be
+*searched for* with proof of work rather than read. That bound is what the
+no-fork constructions (Binohash, QSB; §3.1) work inside: they are hash-only
+and transaction-binding, and they cost a 10 KB legacy output, GPU grinding
+per spend and a miner who accepts non-standard transactions, for 2^118 of
+second-preimage resistance against Shor and about 2^60–70 against Grover.
+§3.1 gives the numbers and the one lever that reaches the security level of
+the rest of this project (several such inputs in one transaction).
 
 Once Bitcoin has (i) an output type without a key path and (ii) an opcode
 that lets a script see its own sighash, a hash-only account is possible, and
@@ -60,7 +65,10 @@ ways a script's result depends on the transaction that spends it:
 |---|---|---|
 | `OP_CHECKSIG` / `OP_CHECKSIGVERIFY` / `OP_CHECKSIGADD` | whether a witness-supplied signature is valid for a public key over the sighash of this transaction | the spender chooses the signature; for a key whose private key is known (to the spender or to a CRQC) a valid signature exists for every sighash |
 | `OP_CHECKLOCKTIMEVERIFY`, `OP_CHECKSEQUENCEVERIFY` | lower bounds on `nLockTime` / `nSequence` | the spender sets both fields |
-| `OP_SIZE` applied to an ECDSA signature (SegWit v0 and legacy only) | the DER length of `(r, s)`, which depends on the sighash once the nonce is fixed | the spender chooses the nonce; fixing it can only be enforced through the same length check |
+| `OP_SIZE` applied to an ECDSA signature (SegWit v0 and legacy only) | the DER length of `(r, s)`, which depends on the sighash once the nonce is fixed | the spender chooses the nonce; fixing it can only be enforced through the same length check, and a CRQC can compute the nonce of the shortest possible `r` |
+| `OP_CHECKSIG` with a *hard-coded* ECDSA signature and a witness-supplied public key | passes iff the key equals the key recovered from `(r, s)` and the sighash: the key is a pseudo-random function of the transaction that the spender cannot choose (two candidates, by the parity of `R`) | none beyond the parity bit; but the script can only hash the key, compare it for equality, or feed it to another `OP_CHECKSIG` |
+| `OP_CHECKSIG` with a *hash output* in the signature position | passes iff the 20- or 32-byte hash parses as a DER signature (probability ≈ 2^−46 for a random string); the key is recoverable for any such string | the spender chooses what is hashed, so the check is a proof of work on the hashed value, not a reading of it |
+| `OP_CHECKMULTISIG` in legacy scripts (`FindAndDelete`) | the sighash depends on which signatures the witness passed, because they are deleted from the script before hashing: one transaction yields `C(n, t)` different sighashes | the spender picks the subset; this is a way to *iterate* candidates inside the script, which is what makes the proof of work above affordable |
 | `OP_SIZE` applied to a Schnorr signature (Tapscript) | 64 or 65 bytes | entirely the spender's choice (sighash-type byte) |
 | the Taproot annex, the output amount, the other inputs and outputs | nothing: no opcode reads them | — |
 
@@ -99,28 +107,88 @@ precise reason pre-signed "vault" transactions must live off-chain, where a
 recovered key defeats them (the key is learned from the output or from the
 first spend, and the vault UTXO is still unspent at that moment).
 
-**L3 (reduction of no-fork schemes).** Combine §2 with L1 and L2: the only
-transaction-dependent, spender-uncontrollable quantity a script can obtain
-without relying on discrete logs is the DER length of an ECDSA signature
-whose nonce has been forced by a length bound. Therefore every hash-only,
-transaction-binding construction expressible today extracts bits of the
-sighash through that channel and signs them with hash chains. This is
-exactly the family in the literature: Heilman et al., "Signing a Bitcoin
-transaction with Lamport signatures" (bitcoin-dev, 2024); Linus, *Binohash*;
-and the 2025–26 "Quantum-Safe Bitcoin transactions without soft forks"
-paper, which replaces the length puzzle with a hash-to-valid-DER puzzle after
-the first variant was shown to fail against an adversary that can compute
-the nonce for `r = 1`. These schemes need hundreds to a thousand `CHECKSIG`
-evaluations per spend, rest on puzzle assumptions outside the standard
-hash-function model, and deliver tens of bits of binding per signature.
-Aegis does not adopt them: the rest of the protocol is argued at 2^128 /
-2^256 under plain (second-)preimage resistance, and a Bitcoin leg that falls
-short of that would be labelled in a way the wallet refuses to label anything.
+**L3 (the sensing bound).** Combine §2 with L1 and L2. Without relying on
+discrete logs, a script learns about its transaction only through
+`OP_CHECKSIG` returning true or false, and the only transaction-dependent
+quantities that the spender cannot choose are (i) the key recovered from a
+hard-coded signature and (ii) whether a hash of something transaction-bound
+parses as a signature. Neither can be *read*: the recovered key is 33 bytes
+that legacy script cannot split, and the parse test is a 2^−46 event. So the
+digits that a hash-based signature would sign cannot be extracted from the
+sighash; they can only be found by searching candidates until the parse test
+succeeds, and the success itself (which candidate) is what gets signed.
+Every hash-only, transaction-binding construction expressible today
+therefore has the shape *proof-of-work sensing + one-time hash signature on
+the search result*, and its binding strength is the number of search bits
+the opcode and size limits allow. That is the family in the literature:
+Heilman, Sabouri, Narula (bitcoin-dev, 2024: bits through DER length; broken
+by a CRQC that computes the nonce of the shortest `r`); Linus, *Binohash*
+(2026: `FindAndDelete` as the in-script iterator, length puzzle; same CRQC
+weakness); Levy, *QSB* (2026: the hash-to-DER parse test as the puzzle, so
+that only hash preimage resistance remains). §3.1 gives what QSB delivers
+and what it costs. An earlier revision of this section said the only channel
+was the DER length; the parse oracle is a second channel and it is the one
+that survives a CRQC.
 
-Consequence: *today*, protection against short exposure on Bitcoin is
-operational, not cryptographic. The owner can shorten the window (adequate
-fee, broadcast directly to miners rather than to the public mempool), not
-close it. The wallet says so (§6).
+Consequence: *today*, protection against short exposure on Bitcoin is either
+operational (adequate fee, direct-to-miner submission; the owner shortens
+the window, not closes it) or bought with the construction of §3.1, which no
+standard node relays. The wallet uses neither (§6) and says why.
+
+### 3.1 What the no-fork frontier gives, with numbers
+
+QSB (Levy, 2026, building on Binohash) as published: a *bare* legacy
+scriptPubKey of about 9,500–9,650 bytes and 197 of the 201 permitted
+non-push opcodes (P2SH's 520-byte redeem script cannot hold it; SegWit and
+Tapscript lack `FindAndDelete` and the `SIGHASH_SINGLE` bug it relies on).
+Spending: a pinning puzzle (2^46 RIPEMD-160 evaluations of transaction
+variants) and two digest rounds, each a search over `C(150, 8..9)` subsets of
+dummy signatures until the key recovered from the resulting sighash hashes to
+a valid DER string; the winning subsets (≈ 84 bits) are signed by revealing
+HORS preimages committed in the script. Published figures: second preimage
+2^118 against an adversary with Shor but not Grover, about 2^59–69 with
+Grover; collision 2^78–88; honest cost 2^47.7 candidates, estimated
+$75–200 of GPU time per spend; the transaction is consensus-valid but
+non-standard and must be handed to a miner directly (Slipstream-type
+services; three pools have committed to mining BitVM's non-standard
+transactions). The HORS key is one-time, which matches the UTXO model: one
+output, one key, no state beyond the UTXO set. Funding such an output costs
+about 9.6 KB of *non-witness* bytes, roughly 38 kWU, about 1 % of a block,
+paid by whoever creates it.
+
+What is and is not proven there. The binding rests on RIPEMD-160 (or
+SHA-256) preimage resistance and on counting: an attacker who wants another
+transaction accepted under the revealed HORS preimages must find one whose
+pinned sighash and both digest rounds land on the same subsets, at 2^46 per
+attempt. The assumptions are the standard ones; the *level* is what falls
+short: 2^59–69 under Grover is below every NIST category, whereas the rest
+of this project is argued at 2^96 (C-20) and 2^128.
+
+**Composition closes the level gap, at linear cost.** Each input of a
+transaction runs its own script over the same `SIGHASH_ALL` sighash (the
+sighash commits to all inputs and outputs), and the pinning puzzle is a
+property of the transaction, shared by all inputs. A spend from `k` QSB
+outputs at once therefore requires an attacker's substitute transaction to
+pass the pinning puzzle and *all* `2k` digest rounds with the same subsets:
+second-preimage cost ≈ 2^(46 + 72k) classically and ≈ 2^(23 + 36k) under
+Grover, against an honest cost that grows linearly (`k` times the grinding,
+`k` outputs funded). Two inputs give ≈ 2^95 under Grover, the C-20 level of
+`CCHS.spec.md` §5.5; three give ≈ 2^131, above AES-128's 2^128 quantum
+yardstick. The owner chooses `k` per spend; nothing in the outputs
+changes. This observation is not in the two papers as read on 2026-10-09; it
+has not been implemented or measured here, and the cost that makes it
+unattractive is the same one that makes a single QSB spend unattractive:
+hundreds of dollars of GPU work and tens of kilobytes of non-witness block
+space per transaction, plus a miner relationship. It is recorded because it
+is the only route under current consensus that reaches this project's
+security level, and so that the statement "nothing without a fork" is made
+precisely: *nothing standard, cheap, or below 2^47 of work per spend*.
+
+Aegis does not ship it. The wallet cannot run a 2^47 search, cannot relay a
+non-standard transaction, and will not label a Bitcoin leg post-quantum on a
+construction whose spend depends on a private mempool. The design that this
+project does contribute, §5, needs the two consensus changes of §4 and then
+costs about 2,500 vB per spend with no grinding.
 
 ---
 
@@ -337,6 +405,8 @@ BIP-118 (`SIGHASH_ANYPREVOUT`), BIP-119 (`OP_CHECKTEMPLATEVERIFY`), BIP-347
 (`OP_CAT`), BIP-348 (`OP_CHECKSIGFROMSTACK`), BIP-360 (P2MR). Heilman,
 Sabouri, Narula, "Signing a Bitcoin transaction with Lamport signatures (no
 changes needed)", bitcoin-dev, 2024. Linus, *BitVM* (2023) for the
-Winternitz leaf pattern. Poelstra, "CAT and Schnorr tricks" (2021) for the
+Winternitz leaf pattern. Linus, *Binohash: Transaction Introspection Without
+Softforks* (2026). Levy, *Quantum-Safe Bitcoin Transactions Without
+Softforks* (QSB, 2026). Poelstra, "CAT and Schnorr tricks" (2021) for the
 `P = G` binding. The CCHS verifier and client rules referenced throughout
 are `CCHS.spec.md` §3–§8.
