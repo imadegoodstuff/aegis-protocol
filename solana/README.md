@@ -1,6 +1,9 @@
 # Aegis — Solana adapter (CCHS-C-20)
 
-**Status**: implemented, built and exercised in CI, deployable from CI. The
+**Status**: implemented, built and exercised in CI, **deployed on
+mainnet-beta** (slot 454 874 054; program data 280 880 bytes, SHA-256
+`4ecc8d1c6b10f3ef2f6f21568456ac2a4c513162e0b649ceb2c57ba7891b43c5`,
+identical to the artifact CI built from commit `75663d9`). The
 verification core (`../cchs-core`, module `compact`) is CI-tested against the
 shared vectors in `evm/test/fixtures/cchs-c-20.json`; the Anchor program adds
 only the Solana digest, PDA layout and CPI dispatch. The `solana` job of
@@ -14,9 +17,15 @@ Program id: `AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr` on every cluster
 runs `solana program deploy` with the program and deployer keypairs held as
 repository secrets (`SOLANA_PROGRAM_KEYPAIR`, `SOLANA_DEPLOYER_KEYPAIR`); on
 devnet it funds the deployer from the faucet, on mainnet-beta the deployer
-must already hold the rent (about twice the ELF size in lamports). Mainnet-beta
-is not deployed. The wallet's Solana panel reads `getAccountInfo(program)` on
-the selected cluster and refuses to act where the program is absent.
+must already hold the rent. Note for the next deployment: the CLI wants the
+payer to hold the program-data rent (1.43 SOL for this ELF) *while* the buffer
+it just funded holds the same amount, so the payer needs about 2.9 SOL during
+the run and gets 1.43 back; the workflow's `buffer_seed` input resumes a run
+that stopped between the two. The upgrade authority is the deployer key;
+moving it to a multisig or setting the program immutable is an open step.
+Devnet is not deployed (its faucet was rate-limited). The wallet's Solana
+panel reads `getAccountInfo(program)` on the selected cluster and refuses to
+act where the program is absent.
 
 Client: `../wallet/src/aegis/solana.ts` (keys, PDAs, legacy/v0 messages,
 JSON-RPC, Wallet Standard connector, no Solana library) and

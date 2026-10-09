@@ -1,5 +1,5 @@
 // Solana: the CCHS-C-20 account of solana/programs/aegis_account, usable from
-// the browser against the cluster where the program is deployed (devnet).
+// the browser against the cluster where the program is deployed (mainnet-beta).
 //
 // 1. The mnemonic derives the Solana chain key; the epoch-0 public key is
 //    computed on the worker pool and fixes the account PDA and its vault.
@@ -11,7 +11,7 @@
 //    authority over the vault. The first leaf of a subtree publishes the
 //    subtree root with `cache_subtree` first.
 //
-// Everything below says which cluster it is on; the program exists on devnet.
+// Everything below says which cluster it is on; the program exists on mainnet-beta.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isValidMnemonic } from "../aegis/derive";
@@ -53,8 +53,8 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
   const valid = isValidMnemonic(mnemonic);
   const poolRef = useRef<CchsPool | null>(null);
   const signers = useRef(new Map<string, Signer>());
-  const [cluster, setCluster] = useState<Cluster>("devnet");
-  const [rpcUrl, setRpcUrl] = useState(DEFAULT_RPC.devnet);
+  const [cluster, setCluster] = useState<Cluster>("mainnet-beta");
+  const [rpcUrl, setRpcUrl] = useState(DEFAULT_RPC["mainnet-beta"]);
   const [id, setId] = useState<SolanaIdentity | null>(null);
   const [deriveErr, setDeriveErr] = useState<string | null>(null);
   const [view, setView] = useState<ChainView | null>(null);
@@ -163,8 +163,8 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
           cached subtree root and then signs the inner instruction as the vault, so the connected wallet only pays fees.
           Tokens are moved with <code>TransferChecked</code>; a memecoin is an SPL mint like any other.{" "}
           The program has one id on every cluster (<span className="mono">{shortKey(toBase58(SOLANA_PROGRAM_ID))}</span>) and is deployed by the
-          repository's <code>solana-deploy</code> workflow, devnet first; it is not on mainnet-beta. The panel reads whether the program
-          exists on the selected cluster before letting you do anything.
+          repository's <code>solana-deploy</code> workflow; <strong>it is live on mainnet-beta</strong> (slot 454 874 054, the ELF is byte-identical to
+          the CI build). The panel reads whether the program exists on the selected cluster before letting you do anything.
         </p>
       </div>
 
@@ -174,8 +174,8 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
         <label className="chip" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
           cluster
           <select value={cluster} onChange={(e) => pickCluster(e.target.value as Cluster)}>
-            <option value="devnet">devnet</option>
-            <option value="mainnet-beta">mainnet-beta (program not deployed)</option>
+            <option value="mainnet-beta">mainnet-beta</option>
+            <option value="devnet">devnet (program not deployed)</option>
           </select>
         </label>
         <button className="btn btn-sm" disabled={!id} onClick={() => setRefresh((n) => n + 1)}>Refresh</button>
@@ -211,7 +211,7 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
           </div>
 
           {view && !view.programDeployed && (
-            <div className="swap-note warn">The Aegis program is not deployed on {cluster} at this RPC. Nothing can be created or spent here; switch to devnet.</div>
+            <div className="swap-note warn">The Aegis program is not deployed on {cluster} at this RPC. Nothing can be created or spent here; switch to mainnet-beta.</div>
           )}
 
           <div className="spend-grid" style={{ marginTop: 12 }}>
@@ -328,7 +328,7 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
             <div className="protect-status" style={{ display: "grid", gap: 6 }}>
               <span>Authorisation: WOTS+ over SHA-256 (C-20: 26 chains, w = 256), one leaf per <code>execute</code>, verified by the program against the subtree root registered with <code>cache_subtree</code>; the index rule makes a leaf unusable after it is spent or skipped. The connected wallet signs nothing that authorises the vault.</span>
               <span>Assets: SOL in the vault and any SPL or Token-2022 token in the vault's associated token accounts; NFTs are token accounts too and move the same way (amount 1). Programs other than System and Token can be called by passing other inner instructions; this panel only builds transfers.</span>
-              <span>Network: devnet first, where SOL has no value; the warning above appears when the program does not exist on the selected cluster. Its upgrade authority is the deployer key of the workflow; the program id is the same on every cluster. Mainnet-beta: not deployed. State is on chain; the only thing this device keeps is which leaves it already signed.</span>
+              <span>Network: mainnet-beta, real SOL. The program is upgradeable and its upgrade authority is the deployer key of the workflow (handing it to a multisig or burning it is an open step). The program id is the same on every cluster; devnet has no deployment yet (its faucet was dry), so the warning above appears there. State is on chain; the only thing this device keeps is which leaves it already signed.</span>
             </div>
           </details>
         </>

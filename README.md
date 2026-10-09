@@ -52,7 +52,7 @@ The CCHS verifier needs one 256-bit hash, byte concatenation, and 32-byte storag
 |---|---|---|
 | EVM (Ethereum, BSC, Polygon, Arbitrum, Optimism, Base, Avalanche, Linea, Scroll, Mantle, Blast, Mode, …) | `keccak256` (K-20) or precompile `0x02` (S-20) | contracts + factory complete, interop-tested |
 | TRON | same opcodes (TVM, cancun) | same sources, TVM build byte-identical to the EVM artifact (`tron/`); CREATE2 prefix `0x41` predictor; not yet published on Nile or mainnet |
-| Solana | `sha256` syscall | `CCHS-C-20` Anchor program: `cache_subtree` + single-packet `execute` (`solana/`); wallet path for SOL and any SPL / Token-2022 token (`wallet/src/aegis/solanaAccount.ts`, Solana panel); program id `AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr`, deployed by the `solana-deploy` workflow (devnet first), not on mainnet-beta |
+| Solana | `sha256` syscall | `CCHS-C-20` Anchor program: `cache_subtree` + single-packet `execute` (`solana/`); wallet path for SOL and any SPL / Token-2022 token (`wallet/src/aegis/solanaAccount.ts`, Solana panel); program id `AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr`, **live on mainnet-beta** (deployed from CI, slot 454 874 054, ELF identical to the CI artifact; upgrade authority = deployer key) |
 | Cosmos (CosmWasm) | `sha2_256` | verifier contract on `cchs-core`, fixture-tested, not deployed |
 | Aptos / Sui | `hash::sha2_256` | Move modules: resource account with zeroed auth key (Aptos), `Bag<Balance<T>>` any-coin vault (Sui), immutable publication documented; fixture + end-to-end tests, not published |
 | NEAR | `env::sha256` | verifier contract on `cchs-core`, fixture-tested, not deployed |

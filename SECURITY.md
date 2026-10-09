@@ -74,7 +74,7 @@ What these tools cannot see is the part that matters for a hash-based signature:
 
 - No independent audit of any component.
 - No machine-checked proof of the cryptographic reductions (the Lean proofs stop at the hash); no written reduction with explicit constants for `(n = 24, w = 256, 2^20 leaves)` (C-20). The multi-user term of that analysis is closed by construction (`pkSeed`); the single-tree constants are not written down.
-- No mainnet deployment; gas figures come from a local EVM and Solana compute units from the `solana-program-test` runtime in CI, not from a public cluster.
+- EVM: no mainnet deployment of the factory yet; gas figures come from a local EVM. Solana: the program `AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr` is live on mainnet-beta (2026-10-09) without an external audit, its upgrade authority is a single deployer key held as a CI secret, and no transaction has been exercised against it on a public cluster yet (compute units come from the `solana-program-test` runtime in CI; the client's transaction formats were simulated on devnet).
 - The wallet is a reference implementation: browser `localStorage` for the index record and the device lane, no hardware-key support; lane assignment between devices is a user action that the protocol cannot check.
 - The signer runs in a browser or a user's own process, with the mnemonic and every derived key in page memory for the session (nothing secret is ever written to `localStorage`); malware with access to that memory holds the account, and a hardware-isolated signer is not implemented. The timing of WOTS+ signing reveals only the digits of the public digest; what the JavaScript runtime leaks about the secret itself is the compromised-device case, which is out of scope (§1).
 
