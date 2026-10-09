@@ -1,10 +1,13 @@
 # Aegis — Solana adapter (CCHS-C-20)
 
-**Status**: implemented, not yet built or run on-chain. The verification core
-(`../cchs-core`, module `compact`) is CI-tested against the shared vectors in
-`evm/test/fixtures/cchs-c-20.json`; the Anchor program adds only the Solana
-digest, PDA layout and CPI dispatch. Anchor builds are not part of
-`build.yml` yet (toolchain install is slow); see "Before deployment".
+**Status**: implemented, built and exercised in CI, not yet deployed. The
+verification core (`../cchs-core`, module `compact`) is CI-tested against the
+shared vectors in `evm/test/fixtures/cchs-c-20.json`; the Anchor program adds
+only the Solana digest, PDA layout and CPI dispatch. The `solana` job of
+`build.yml` builds the SBF program and replays the fixture life cycle through
+it in the BanksClient runtime, reporting compute units per instruction
+(`programs/aegis_account/tests/compute_units.rs`); see "Before deployment"
+for what is still open.
 
 Spec: `../CCHS.spec.md`. Client reference: `../wallet/src/aegis/cchsCompact.ts`.
 
@@ -161,30 +164,60 @@ earlier implicit-index layout; every row below includes it.
 
 Whole transaction, one fee-payer signature, legacy message
 (`65 + 3 + 1 + 32·keys + 32 + 1 + Σ(1 + 1 + accounts + 2 + data)`), computed
-from the layouts above (not yet measured against a built program):
+from the layouts above. Rows marked *measured* are the serialized sizes of
+the transactions `tests/compute_units.rs` sends (each carries one
+instruction and no compute-budget instruction):
 
 | Transaction | Keys | Bytes of 1 232 |
 |---|---|---|
 | `execute`, SOL transfer vault → recipient (12-byte inner ix), no compute-budget ix | payer, program, account, cache, system, vault, recipient = 7 | **1 231** |
-| same, recipient = payer (6 keys), no compute-budget ix | 6 | 1 198 |
-| same, 6 keys, plus `SetComputeUnitLimit` (adds the ComputeBudget key and an 8-byte ix) | 7 | 1 238 — **does not fit** |
+| same, recipient = payer (6 keys), no compute-budget ix | 6 | 1 199 (measured) |
+| same, 6 keys, plus `SetComputeUnitLimit` (adds the ComputeBudget key and an 8-byte ix) | 7 | 1 239 — **does not fit** |
 | same, 7 keys, plus `SetComputeUnitLimit` | 8 | 1 271 — **does not fit** |
 | `execute` as a v0 message, payer static, 7 keys through one address lookup table, plus `SetComputeUnitLimit` | 1 + 7 | **1 090** (room for 142 bytes of `ix_data`) |
-| `cache_subtree` | payer, program, account, cache, system = 5 (6 with compute budget) | 1 174 (1 214) |
-| `recover` | payer, program, account = 3 (4 with compute budget) | 1 075 (1 115) |
-| `create` | 4 | 292 |
+| `cache_subtree` | payer, program, account, cache, system = 5 (6 with compute budget) | 1 174 (measured) (1 214) |
+| `recover` | payer, program, account = 3 (4 with compute budget) | 1 075 (measured) (1 115) |
+| `create` | 4 | 292 (measured) |
 
 The bottom-layer instruction itself still fits a legacy packet (1 byte to
 spare in the 7-key case). Because the verification needs more than the
 200 K CU default (next section), a real transaction also carries a
 `SetComputeUnitLimit` instruction, and with `idx` on board even the 6-key
-variant then exceeds the legacy limit by 6 bytes. The client therefore sends
+variant then exceeds the legacy limit by 7 bytes. The client therefore sends
 `execute` as a v0 transaction with an address lookup table holding the
 program, account, cache, vault, system and ComputeBudget keys: 1 090 bytes
 for a 12-byte inner instruction, 142 bytes to spare. The lookup table is
 created once per account alongside `create`.
 
-## Compute units (estimate, not yet measured on-chain)
+## Compute units (measured in CI)
+
+`programs/aegis_account/tests/compute_units.rs` runs the SBF build of the
+program in the BanksClient runtime (`solana-program-test`, the same
+instruction metering as a validator) and replays the fixture life cycle:
+`create`, `cache_subtree(0)`, `execute` at leaves 0, 1, 2 and 5,
+`cache_subtree(1)`, `execute` at leaf 1024, `recover`. Every transaction
+carries one instruction, so the `compute_units_consumed` of the transaction
+is the cost of that instruction. The test prints a markdown table (chain
+steps, compute units, instruction and transaction bytes per instruction), a
+linear fit `CU ≈ a + b · steps` over the `execute` rows with its
+extrapolation to the 6 375-step worst case, and fails if any instruction
+exceeds 1 400 000 CU. The numbers are in the log and the job summary of the
+`Solana (CCHS-C-20 program, SBF)` job of `build.yml`, step "Compute units
+per instruction"; they are not copied here because they move with the
+toolchain that builds the program.
+
+The fixture's `execute` and `recovery` digests bind the placeholder account
+`0xcc…cc`, while the program binds the real `CchsAccount` PDA, so the
+fixture's bottom-layer and recovery chain values cannot be sent as they are.
+The test derives the WOTS+ secret keys from the fixture's `master` seed (the
+HKDF of `cchsCompact.ts`) and re-signs the on-chain digest; roots,
+authentication paths and both top-layer proofs (`cache_subtree` payloads)
+are the fixture bytes, and every re-signed layer is checked against the
+fixture root before it is sent. Chain steps are always a multiple of 255
+(`Σ (255 − d_c) = 255 · (csum_hi + 2)`), so the fixture ops cover 3 315,
+3 570 and 3 825 steps.
+
+### Estimate (kept for comparison)
 
 Each `sol_sha256` call costs `85 + max(10, len / 2)` CU for a single slice:
 113 CU per chain step (56-byte input), 413 CU per leaf (656 bytes), 125 CU
@@ -198,14 +231,15 @@ CU_syscall(m) = 113 · steps(m) + 413 + 10 · 125
 `steps` is 3 315 on average (uniform digest bytes), 6 375 at worst
 (all-zero message, checksum digits 0x17 0xE8). Syscalls alone:
 ≈ 376 K CU average, 722 K worst case. The program's own work per step
-(ADRS update, 56-byte copy, loop) is not measured; at 50–100 CU per step
-the total is **≈ 540–710 K CU average, 1.04–1.36 M worst case**. The
-fixture layers need 2 805–3 570 steps (319–405 K syscall CU).
+(ADRS update, 56-byte copy, loop) is not part of this estimate; at 50–100 CU
+per step the total is **≈ 540–710 K CU average, 1.04–1.36 M worst case**.
+The fixture layers replayed by the CI test need 3 315–3 825 steps
+(376–434 K syscall CU); compare with the measured column.
 
 Plan: request 1.4 M CU (the per-transaction maximum) for `execute` and
 `cache_subtree`. The worst-case message is a hash output, so it is
 astronomically unlikely, but a client can evaluate `verifySteps(m)`
-(`cchsCompact.ts`) before signing and the measured overhead must confirm
+(`cchsCompact.ts`) before signing, and the CI extrapolation must confirm
 that even 6 375 steps stay under 1.4 M. `recover` is one layer of height 8
 with the same chain cost. If the measured overhead is too high, the fallback
 is a `w = 128` variant (28 message chains + 2 checksum chains, 30 × 24 +
@@ -214,15 +248,16 @@ the packet.
 
 ## Before deployment
 
-* Anchor build in CI (`anchor build`, `anchor test`) with the vectors of
-  `cchs-c-20.json` replayed through `create` → `cache_subtree(0, l1, r0 =
-  bottomRoot0)` → `execute` × 3 → `recover`, the `skip` ops (leaf 5, then
-  `cache_subtree(1, l1, bottomRoot1)` and leaf 1024), plus the negative
-  cases (tampered chain value, missing cache, cache conflict, index reuse,
-  replay).
-* Measure CU for `execute` on the fixture ops and on an all-zero message;
-  confirm the stack budget of the fixed-array instruction arguments
-  (~900 bytes) inside the 4 KB BPF frame.
+* The positive life cycle (`create` → `cache_subtree(0)` → `execute` × 3 →
+  skip to leaf 5 → `cache_subtree(1)` → leaf 1024 → `recover`) runs against
+  the SBF build in CI (`tests/compute_units.rs`). Still to add on the
+  BanksClient side: the negative cases (tampered chain value, missing
+  cache, cache conflict, index reuse, replay), currently covered host-side
+  only (`src/lib.rs` tests, `cchs-core/tests/vectors_compact.rs`).
+* CU on an all-zero message cannot be measured directly (the message is a
+  hash output); the CI table extrapolates from the fixture ops. Confirm the
+  stack budget of the fixed-array instruction arguments (~900 bytes) inside
+  the 4 KB BPF frame (the CI run exercises it).
 * Devnet run with a real vault transfer through a v0 transaction and an
   address lookup table; record the exact transaction sizes.
 * `anchor keys sync` to replace the placeholder program id.
@@ -237,8 +272,14 @@ anchor build
 ## Tests
 
 ```bash
-cargo test -p aegis_account            # host-side replay of cchs-c-20.json through the handler logic
+cargo test -p aegis_account --lib      # host-side replay of cchs-c-20.json through the handler logic
 cd ../cchs-core && cargo test --features std
+
+# compute units per instruction on the built program (what CI runs)
+cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
+SBF_OUT_DIR=$PWD/target/deploy cargo test -p aegis_account --test compute_units -- --nocapture
+# same flow with the program compiled natively into the test (no .so, no metering)
+AEGIS_NATIVE_FALLBACK=1 cargo test -p aegis_account --test compute_units -- --nocapture
 ```
 
 `tests/vectors_compact.rs` replays `cchs-c-20.json`: ops[0] bottom root
