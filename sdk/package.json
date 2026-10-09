@@ -20,7 +20,7 @@
   ],
   "scripts": {
     "build": "vite build && tsc -p tsconfig.types.json",
-    "typecheck": "tsc --noEmit -p .",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "smoke": "tsx scripts/smoke.mts",
     "check": "npm run build && npm run typecheck && npm run smoke",
     "prepublishOnly": "npm run check"

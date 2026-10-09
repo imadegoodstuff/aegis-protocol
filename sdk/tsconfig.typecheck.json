@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "paths": {
+      "viem": ["../wallet/node_modules/viem"],
+      "viem/*": ["../wallet/node_modules/viem/_types/*/index.d.ts"]
+    }
+  },
+  "include": ["src", "scripts", "examples", "../wallet/src/aegis"]
+}

@@ -11,13 +11,7 @@
     "resolveJsonModule": true,
     "noEmit": true,
     "isolatedModules": true,
-    "types": ["node"],
-    // Type-check only: the bundled sources import viem from wallet/node_modules;
-    // examples and scripts must see the same declarations, not sdk/node_modules' copy.
-    "paths": {
-      "viem": ["../wallet/node_modules/viem"],
-      "viem/*": ["../wallet/node_modules/viem/_types/*/index.d.ts"]
-    }
+    "types": ["node"]
   },
-  "include": ["src", "scripts", "examples", "../wallet/src/aegis"]
+  "include": ["src", "../wallet/src/aegis"]
 }
