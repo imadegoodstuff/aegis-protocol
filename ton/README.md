@@ -4,8 +4,9 @@
 (`contracts/aegis_account.fc`), compiled with func 0.4.6 and exercised in the
 TON sandbox against the shared fixture: bottom-layer, top-layer and recovery
 vectors reproduce the fixture roots, and a full execute (new subtree, cached
-subtree, replay rejection) + recover flow passes with client-generated
-signatures. Not yet deployed to testnet/mainnet.
+subtree, replay rejection, signer-chosen index: skip, cross-subtree jump,
+index reuse, index binding, redundant top layer) + recover flow passes with
+client-generated signatures. Not yet deployed to testnet/mainnet.
 
 Spec: [`../CCHS.spec.md`](../CCHS.spec.md). Byte-exact with
 `evm/src/AegisCCHS.sol` and `wallet/src/aegis/cchs.ts`; ground truth is
@@ -53,11 +54,19 @@ accepted silently so the account can receive TON.
 ### `op::execute = 0x41455845`
 
 ```
-body:   op:uint32 query_id:uint64 has_l1:uint1
-        ref[0] = l0  value stream   67 wots ‖ 10 auth   (bottom layer, leaf next_idx)
+body:   op:uint32 query_id:uint64 idx:uint64 has_l1:uint1
+        ref[0] = l0  value stream   67 wots ‖ 10 auth   (bottom layer, leaf idx)
         ref[1] = action             { mode:uint8  msg:^Cell }
         ref[2] = l1  value stream   67 wots ‖ 10 auth   (top layer; present iff has_l1)
 ```
+
+`idx` is the leaf the signer chose: it must be `>= next_idx` (exit 207
+otherwise) and `< 2^20`; on success `next_idx` becomes `idx + 1`, so every
+lower leaf is abandoned forever. The index is bound into the digest, so only
+the key holder can skip leaves or jump to a later subtree. The top layer is
+required when the subtree of `idx` is not cached yet (exit 202) and ignored
+when it already is, so a message prepared with a proof still succeeds if the
+subtree was registered in the meantime.
 
 `msg` is a complete outgoing message cell (`MessageRelaxed`), sent with
 `send_raw_message(msg, mode)` after the state update. The send mode is inside
@@ -100,8 +109,9 @@ M_rec  = sha256( "AEGIS_CCHS_RECOVER_V1" ‖ "ton" ‖ my_address.hash(32)
 `my_address.hash` is the 256-bit hash part of the account's standard address.
 `cell_hash(action)` is the representation hash of the `action` cell, which
 commits to both the send mode and the full outgoing message. Get methods
-`get_next_digest(cell_hash(action))` and `get_recovery_digest(new_root,
-new_rec_root)` return the digest the client must sign.
+`get_digest_at(idx, cell_hash(action))` (or `get_next_digest` at
+`idx = next_idx`) and `get_recovery_digest(new_root, new_rec_root)` return the
+digest the client must sign.
 
 Note: the digest binds the account address, not the workchain or network;
 testnet and mainnet deployments with identical StateInit share the address and
@@ -113,8 +123,10 @@ therefore digests while their `nonce`/`next_idx` coincide.
 |---|---|
 | `get_account_state()` | `(root, rec_root, epoch, next_idx, nonce, rec_nonce)` |
 | `get_cached_root(epoch, tree_idx)` | cached bottom root or 0 |
-| `needs_top_layer()` | `-1` if the next execute must carry the top layer, else `0` |
-| `get_next_digest(action_hash)` | digest for the next execute |
+| `needs_top_layer_at(idx)` | `-1` if an execute at leaf `idx` must carry the top layer, else `0` |
+| `needs_top_layer()` | same at `idx = next_idx` |
+| `get_digest_at(idx, action_hash)` | digest for an execute at leaf `idx` with the current nonce |
+| `get_next_digest(action_hash)` | same at `idx = next_idx` |
 | `get_recovery_digest(new_root, new_rec_root)` | digest for the next recover |
 | `compute_layer_root(layer, tree_idx, leaf_idx, height, m, sig_cell)` | pure verifier; used by the tests |
 
@@ -122,13 +134,14 @@ therefore digests while their `nonce`/`next_idx` coincide.
 
 | Code | Meaning |
 |---|---|
-| 200 | index space exhausted (`next_idx ≥ 2^20` or `rec_nonce ≥ 256`) |
+| 200 | index space exhausted (`idx ≥ 2^20` or `rec_nonce ≥ 256`) |
 | 201 | bottom root differs from the cached root for this subtree |
 | 202 | subtree not cached and no top layer supplied |
 | 203 | top layer does not reach `root` |
 | 204 | recovery signature does not reach `rec_root` |
 | 205 | zero root in `recover` |
 | 206 | external message (always refused) |
+| 207 | `idx < next_idx`: leaf already used or abandoned |
 | 0xffff | unknown op |
 
 ## Hashing on TVM

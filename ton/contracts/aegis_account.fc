@@ -43,6 +43,7 @@ const int err::bad_top_root      = 203;
 const int err::bad_recovery      = 204;
 const int err::zero_root         = 205;
 const int err::external_disabled = 206;
+const int err::index_used        = 207;
 
 ;; ----------------------------------------------------------------- hashing
 ;; HASHEXT_SHA256 pops n, then n slices/builders; the deepest item is hashed
@@ -225,19 +226,26 @@ int recovery_digest(int addr_hash, int rec_nonce, int new_root, int new_rec_root
 
 ;; ---------------------------------------------------------------- handlers
 ;; execute body:
-;;   op:uint32 query_id:uint64 has_l1:uint1
+;;   op:uint32 query_id:uint64 idx:uint64 has_l1:uint1
 ;;   ref[0] = l0 stream   (67 wots || 10 auth)
 ;;   ref[1] = action      { mode:uint8  msg:^Cell }
 ;;   ref[2] = l1 stream   (67 wots || 10 auth)   present iff has_l1
+;;
+;; `idx` is the leaf the signer chose. It must be >= next_idx; on success
+;; next_idx becomes idx + 1, so every lower leaf is abandoned forever. The
+;; index is bound into the digest, so only the key holder can skip. The top
+;; layer is required when the subtree of idx is not cached yet; when it is
+;; already cached a supplied top layer is ignored rather than rejected.
 () handle_execute(slice body) impure inline {
   (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
 
   int query_id = body~load_uint(64);
+  int idx      = body~load_uint(64);
   int has_l1   = body~load_uint(1);
   slice l0     = body~load_ref().begin_parse();
   cell action  = body~load_ref();
 
-  int idx = next_idx;
+  throw_unless(err::index_used, idx >= next_idx);
   throw_unless(err::exhausted, idx < CAPACITY);
 
   int m = execute_digest(my_addr_hash(), nonce, idx, action);
@@ -336,13 +344,34 @@ int get_cached_root(int epoch, int tree_idx) method_id {
   return found ? v.preload_uint(256) : 0;
 }
 
+;; Whether an execute at leaf `idx` must carry the top layer (-1) or not (0).
+int needs_top_layer_at(int idx) method_id {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  (slice v, int found) = cache.udict_get?(128, (epoch << 64) | (idx >> H));
+  return found ? 0 : -1;
+}
+
+;; Same at idx = next_idx.
 int needs_top_layer() method_id {
   (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
   (slice v, int found) = cache.udict_get?(128, (epoch << 64) | (next_idx >> H));
   return found ? 0 : -1;
 }
 
-;; Digest the client must sign for the next execute of `action` (pass cell_hash(action)).
+;; Digest the client must sign for an execute of `action` at leaf `idx`
+;; (idx >= next_idx) with the current nonce. Pass cell_hash(action).
+int get_digest_at(int idx, int action_hash) method_id {
+  (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
+  return sha256_b(begin_cell()
+    .store_slice("AEGIS_CCHS_V1")
+    .store_slice("ton")
+    .store_uint(my_addr_hash(), 256)
+    .store_uint(nonce, 64)
+    .store_uint(idx, 64)
+    .store_uint(action_hash, 256));
+}
+
+;; Digest for an execute at idx = next_idx.
 int get_next_digest(int action_hash) method_id {
   (int root, int rec_root, int epoch, int next_idx, int nonce, int rec_nonce, cell cache) = load_data();
   return sha256_b(begin_cell()

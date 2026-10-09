@@ -219,11 +219,17 @@ use starknet::account::Call;
 
 #[starknet::interface]
 pub trait IAegisCCHS<TState> {
-    /// Execute `calls` authorized by a CCHS signature on the next leaf.
-    /// `l1_wots` / `l1_auth` may be empty when the subtree root is already cached.
+    /// Execute `calls` authorized by a CCHS signature on leaf `idx`.
+    ///
+    /// `idx` is chosen by the signer and must be `>= next_idx`; on success
+    /// `next_idx` becomes `idx + 1`, so every lower leaf is abandoned forever.
+    /// `idx` is bound into the digest, so only the key holder can skip.
+    /// `l1_wots` / `l1_auth` are required when the subtree of `idx` is not
+    /// cached yet and are ignored when it already is.
     fn execute(
         ref self: TState,
         calls: Array<Call>,
+        idx: u64,
         l0_wots: Array<u256>,
         l0_auth: Array<u256>,
         l1_wots: Array<u256>,
@@ -235,11 +241,16 @@ pub trait IAegisCCHS<TState> {
         ref self: TState, new_root: u256, new_rec_root: u256, wots: Array<u256>, auth: Array<u256>,
     );
 
-    /// Digest the client must sign for the next `execute` of `calls`.
+    /// Digest the client must sign for an `execute` of `calls` at leaf `idx`
+    /// (`idx >= next_idx`) with the current nonce.
+    fn digest_at(self: @TState, idx: u64, calls: Array<Call>) -> u256;
+    /// Digest for an `execute` at `next_idx`.
     fn next_digest(self: @TState, calls: Array<Call>) -> u256;
     /// Digest the client must sign for the next `recover`.
     fn next_recovery_digest(self: @TState, new_root: u256, new_rec_root: u256) -> u256;
-    /// Whether the next `execute` must include the top-layer proof.
+    /// Whether an `execute` at leaf `idx` must include the top-layer proof.
+    fn needs_top_layer_at(self: @TState, idx: u64) -> bool;
+    /// Whether an `execute` at `next_idx` must include the top-layer proof.
     fn needs_top_layer(self: @TState) -> bool;
 
     fn get_root(self: @TState) -> u256;
@@ -263,22 +274,26 @@ pub mod AegisCCHS {
     use starknet::{SyscallResultTrait, get_contract_address};
     use super::cchs;
 
+    /// Members are crate-visible so the state-machine tests can seed and
+    /// inspect the account state directly; external access goes through the
+    /// `get_*` views.
     #[storage]
     struct Storage {
         /// Top-layer tree root. Rotatable only via `recover`.
-        root: u256,
+        pub(crate) root: u256,
         /// Recovery tree root (single layer, height 8).
-        rec_root: u256,
+        pub(crate) rec_root: u256,
         /// Increments on every recovery; namespaces `cached_root`.
-        epoch: u64,
-        /// Next unused leaf index in [0, 2^20).
-        next_idx: u64,
+        pub(crate) epoch: u64,
+        /// Next unused leaf index in [0, 2^20). Advances to `idx + 1` on
+        /// every accepted `execute`, so skipped leaves are abandoned.
+        pub(crate) next_idx: u64,
         /// Transaction nonce bound into every message digest.
-        nonce: u64,
+        pub(crate) nonce: u64,
         /// Next unused recovery leaf in [0, 256).
-        rec_nonce: u64,
+        pub(crate) rec_nonce: u64,
         /// (epoch, bottom tree index) -> verified bottom subtree root.
-        cached_root: Map<(u64, u64), u256>,
+        pub(crate) cached_root: Map<(u64, u64), u256>,
     }
 
     #[event]
@@ -316,6 +331,7 @@ pub mod AegisCCHS {
     pub mod errors {
         pub const ZERO_ROOT: felt252 = 'CCHS_ZERO_ROOT';
         pub const EXHAUSTED: felt252 = 'CCHS_EXHAUSTED';
+        pub const INDEX_USED: felt252 = 'CCHS_INDEX_USED';
         pub const BAD_SUBTREE_ROOT: felt252 = 'CCHS_BAD_SUBTREE_ROOT';
         pub const MISSING_TOP_LAYER: felt252 = 'CCHS_MISSING_TOP_LAYER';
         pub const BAD_TOP_ROOT: felt252 = 'CCHS_BAD_TOP_ROOT';
@@ -334,13 +350,13 @@ pub mod AegisCCHS {
         fn execute(
             ref self: ContractState,
             calls: Array<Call>,
+            idx: u64,
             l0_wots: Array<u256>,
             l0_auth: Array<u256>,
             l1_wots: Array<u256>,
             l1_auth: Array<u256>,
         ) -> Array<Span<felt252>> {
-            let idx = self.next_idx.read();
-            assert(idx < cchs::CAPACITY, errors::EXHAUSTED);
+            self.check_index(idx);
 
             let m = self.execute_digest(idx, calls.span());
             self
@@ -349,8 +365,7 @@ pub mod AegisCCHS {
                 );
 
             // Effects before interaction.
-            self.next_idx.write(idx + 1);
-            self.nonce.write(self.nonce.read() + 1);
+            self.advance(idx);
 
             let mut results: Array<Span<felt252>> = array![];
             for call in calls.span() {
@@ -389,6 +404,10 @@ pub mod AegisCCHS {
             self.emit(Recovered { new_epoch, new_root, new_rec_root });
         }
 
+        fn digest_at(self: @ContractState, idx: u64, calls: Array<Call>) -> u256 {
+            self.execute_digest(idx, calls.span())
+        }
+
         fn next_digest(self: @ContractState, calls: Array<Call>) -> u256 {
             self.execute_digest(self.next_idx.read(), calls.span())
         }
@@ -397,9 +416,13 @@ pub mod AegisCCHS {
             self.recovery_digest(self.rec_nonce.read(), new_root, new_rec_root)
         }
 
-        fn needs_top_layer(self: @ContractState) -> bool {
-            let tree_idx = self.next_idx.read() / cchs::LEAVES;
+        fn needs_top_layer_at(self: @ContractState, idx: u64) -> bool {
+            let tree_idx = idx / cchs::LEAVES;
             self.cached_root.read((self.epoch.read(), tree_idx)) == 0
+        }
+
+        fn needs_top_layer(self: @ContractState) -> bool {
+            self.needs_top_layer_at(self.next_idx.read())
         }
 
         fn get_root(self: @ContractState) -> u256 {
@@ -426,9 +449,26 @@ pub mod AegisCCHS {
     }
 
     #[generate_trait]
-    impl InternalImpl of InternalTrait {
+    pub impl InternalImpl of InternalTrait {
+        /// Index discipline: `idx` must not be behind `next_idx` (a used or
+        /// abandoned leaf) and must lie inside the 2^20 index space.
+        fn check_index(self: @ContractState, idx: u64) {
+            assert(idx >= self.next_idx.read(), errors::INDEX_USED);
+            assert(idx < cchs::CAPACITY, errors::EXHAUSTED);
+        }
+
+        /// State update after a verified signature at `idx`: every leaf up to
+        /// and including `idx` is consumed, and the nonce moves on.
+        fn advance(ref self: ContractState, idx: u64) {
+            self.next_idx.write(idx + 1);
+            self.nonce.write(self.nonce.read() + 1);
+        }
+
         /// Layer-0 verification, then either cache equality or full top-layer
-        /// verification with cache write. Panics on any mismatch.
+        /// verification with cache write. Panics on any mismatch. When the
+        /// subtree is already cached, a supplied top layer is ignored rather
+        /// than rejected, so a transaction prepared before another
+        /// registration landed still succeeds.
         fn verify_and_cache(
             ref self: ContractState,
             idx: u64,
@@ -615,5 +655,164 @@ mod tests {
             0, 0, 1, cchs::H, v::OP1_DIGEST, tampered.span(), v::op1_l0_auth().span(),
         );
         assert(r0 != v::BOTTOM_ROOT_0, 'tamper accepted');
+    }
+
+    // ------------------------------------------------- signer-chosen index
+    //
+    // State-machine tests run against the contract state in the test runner
+    // (`contract_state_for_testing`) and call the internal steps of `execute`
+    // directly: `check_index`, `verify_and_cache`, `advance`. The fixture
+    // digests are passed as the message, which keeps the vectors byte-exact
+    // with the other adapters even though the Starknet digest format differs.
+    // Subtree 0 is registered by writing `cached_root` directly instead of
+    // verifying `ops[0]`, so each test runs at most three layer verifications.
+
+    use super::{AegisCCHS, IAegisCCHS};
+    use super::AegisCCHS::InternalTrait;
+    use starknet::storage::{
+        StorageMapReadAccess, StorageMapWriteAccess, StoragePointerReadAccess,
+        StoragePointerWriteAccess,
+    };
+
+    /// Account state right after `ops[0]`: subtree 0 cached, next_idx 1, nonce 1.
+    fn state_after_op0() -> AegisCCHS::ContractState {
+        let mut s = AegisCCHS::contract_state_for_testing();
+        s.root.write(v::ROOT);
+        s.rec_root.write(v::REC_ROOT);
+        s.cached_root.write((0, 0), v::BOTTOM_ROOT_0);
+        s.next_idx.write(1);
+        s.nonce.write(1);
+        s
+    }
+
+    fn empty() -> Array<u256> {
+        array![]
+    }
+
+    /// Skip leaves 1..4 inside the cached subtree (idx 5), then jump to the
+    /// first leaf of subtree 1 (idx 1024) with its top layer.
+    #[test]
+    fn skip_within_subtree_then_across_subtrees() {
+        let mut s = state_after_op0();
+
+        s.check_index(5);
+        s
+            .verify_and_cache(
+                5,
+                v::OP5_DIGEST,
+                v::op5_l0_wots().span(),
+                v::op5_l0_auth().span(),
+                empty().span(),
+                empty().span(),
+            );
+        s.advance(5);
+        assert(s.next_idx.read() == 6, 'next_idx after 5');
+        assert(s.nonce.read() == 2, 'nonce after 5');
+
+        assert(s.needs_top_layer_at(1024), 'subtree 1 uncached');
+        s.check_index(1024);
+        s
+            .verify_and_cache(
+                1024,
+                v::OP1024_DIGEST,
+                v::op1024_l0_wots().span(),
+                v::op1024_l0_auth().span(),
+                v::op1024_l1_wots().span(),
+                v::op1024_l1_auth().span(),
+            );
+        s.advance(1024);
+        assert(s.next_idx.read() == 1025, 'next_idx after 1024');
+        assert(s.nonce.read() == 3, 'nonce after 1024');
+        assert(s.cached_root.read((0, 1)) == v::BOTTOM_ROOT_1, 'bottom root 1');
+        assert(!s.needs_top_layer_at(1024), 'subtree 1 cached');
+    }
+
+    /// An index behind `next_idx` is rejected before any hashing.
+    #[test]
+    #[should_panic(expected: ('CCHS_INDEX_USED',))]
+    fn index_reuse_rejected() {
+        let mut s = state_after_op0();
+        s.next_idx.write(6); // after the skip to 5
+        s.check_index(1);
+    }
+
+    /// The skipped-to leaf itself is consumed as well.
+    #[test]
+    #[should_panic(expected: ('CCHS_INDEX_USED',))]
+    fn index_reuse_of_skipped_leaf_rejected() {
+        let mut s = state_after_op0();
+        s.next_idx.write(6);
+        s.check_index(5);
+    }
+
+    /// `idx = next_idx` is always allowed; the index space ends at 2^20.
+    #[test]
+    fn index_at_next_idx_allowed_and_capacity_bounded() {
+        let mut s = state_after_op0();
+        s.next_idx.write(6);
+        s.check_index(6);
+        s.check_index(cchs::CAPACITY - 1);
+    }
+
+    #[test]
+    #[should_panic(expected: ('CCHS_EXHAUSTED',))]
+    fn index_at_capacity_rejected() {
+        let s = state_after_op0();
+        s.check_index(cchs::CAPACITY);
+    }
+
+    /// Jumping into a fresh subtree without its top layer is rejected.
+    #[test]
+    #[should_panic(expected: ('CCHS_MISSING_TOP_LAYER',))]
+    fn jump_to_fresh_subtree_without_top_layer_rejected() {
+        let mut s = state_after_op0();
+        s.check_index(1024);
+        s
+            .verify_and_cache(
+                1024,
+                v::OP1024_DIGEST,
+                v::op1024_l0_wots().span(),
+                v::op1024_l0_auth().span(),
+                empty().span(),
+                empty().span(),
+            );
+    }
+
+    /// A signature for leaf 5 cannot be used at leaf 6: the leaf index enters
+    /// every ADRS, so the recomputed bottom root no longer matches the cache.
+    #[test]
+    #[should_panic(expected: ('CCHS_BAD_SUBTREE_ROOT',))]
+    fn signature_bound_to_index() {
+        let mut s = state_after_op0();
+        s.check_index(6);
+        s
+            .verify_and_cache(
+                6,
+                v::OP5_DIGEST,
+                v::op5_l0_wots().span(),
+                v::op5_l0_auth().span(),
+                empty().span(),
+                empty().span(),
+            );
+    }
+
+    /// A top layer supplied for an already registered subtree is ignored, not
+    /// rejected: `ops[1]` with `ops[0].l1` attached is accepted.
+    #[test]
+    fn redundant_top_layer_ignored() {
+        let mut s = state_after_op0();
+        s.check_index(1);
+        s
+            .verify_and_cache(
+                1,
+                v::OP1_DIGEST,
+                v::op1_l0_wots().span(),
+                v::op1_l0_auth().span(),
+                v::op0_l1_wots().span(),
+                v::op0_l1_auth().span(),
+            );
+        s.advance(1);
+        assert(s.next_idx.read() == 2, 'next_idx after 1');
+        assert(s.cached_root.read((0, 0)) == v::BOTTOM_ROOT_0, 'cache unchanged');
     }
 }

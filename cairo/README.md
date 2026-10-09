@@ -42,7 +42,7 @@ Storage: `root: u256`, `rec_root: u256`, `epoch: u64`, `next_idx: u64`,
 ```
 constructor(root: u256, rec_root: u256)
 
-execute(calls: Array<Call>,
+execute(calls: Array<Call>, idx: u64,                    // signer-chosen leaf, >= next_idx
         l0_wots: Array<u256>, l0_auth: Array<u256>,     // 67 + 10
         l1_wots: Array<u256>, l1_auth: Array<u256>)     // 67 + 10, or both empty
   -> Array<Span<felt252>>
@@ -50,20 +50,27 @@ execute(calls: Array<Call>,
 recover(new_root: u256, new_rec_root: u256,
         wots: Array<u256>, auth: Array<u256>)           // 67 + 8
 
-next_digest(calls) -> u256          next_recovery_digest(new_root, new_rec_root) -> u256
-needs_top_layer() -> bool           get_root / get_rec_root / get_epoch / get_next_idx /
-                                    get_nonce / get_rec_nonce / get_cached_root(epoch, tree_idx)
+digest_at(idx, calls) -> u256       next_digest(calls) -> u256   (= digest_at(next_idx, calls))
+needs_top_layer_at(idx) -> bool     needs_top_layer() -> bool    (= needs_top_layer_at(next_idx))
+next_recovery_digest(new_root, new_rec_root) -> u256
+get_root / get_rec_root / get_epoch / get_next_idx / get_nonce / get_rec_nonce /
+get_cached_root(epoch, tree_idx)
 ```
 
 `execute` flow (identical to the Solidity reference):
 
-1. `idx = next_idx` (must be `< 2^20`), `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
+1. `idx` is chosen by the signer: `idx >= next_idx` (`CCHS_INDEX_USED` otherwise)
+   and `idx < 2^20` (`CCHS_EXHAUSTED`); `tree_idx = idx >> 10`, `leaf_idx = idx & 1023`.
 2. `m = digest(idx, calls)`; `r0 = verify_layer(0, tree_idx, leaf_idx, 10, m, l0)`.
-3. If `cached_root[(epoch, tree_idx)] != 0` it must equal `r0`. Otherwise
-   `l1_wots` must be present, `verify_layer(1, 0, tree_idx, 10, r0, l1)` must equal
-   `root`, and `r0` is cached.
-4. `next_idx += 1`, `nonce += 1`, then `call_contract_syscall` for every call in
-   order; results are returned.
+3. If `cached_root[(epoch, tree_idx)] != 0` it must equal `r0`, and a supplied
+   top layer is ignored. Otherwise `l1_wots` must be present
+   (`CCHS_MISSING_TOP_LAYER`), `verify_layer(1, 0, tree_idx, 10, r0, l1)` must
+   equal `root`, and `r0` is cached.
+4. `next_idx = idx + 1` (every lower leaf is abandoned forever), `nonce += 1`,
+   then `call_contract_syscall` for every call in order; results are returned.
+
+Because `idx` is bound into the digest, only the key holder can skip leaves or
+jump to a later subtree; the index space is monotonic per epoch.
 
 `recover` verifies the recovery tree (layer `0xFF`, tree 0, leaf `rec_nonce`,
 height 8) against `rec_root`, then sets both roots, resets `next_idx` to 0 and
@@ -85,8 +92,9 @@ M_rec      = sha256( "AEGIS_CCHS_RECOVER_V1" ‖ "starknet" ‖ contract_address
 ```
 
 Felts (`to`, `selector`, calldata elements, the contract address) are encoded
-as their numeric value in 32 big-endian bytes. Clients can fetch `next_digest`
-and `next_recovery_digest` from the contract instead of re-deriving them.
+as their numeric value in 32 big-endian bytes. Clients can fetch `digest_at`
+(or `next_digest`) and `next_recovery_digest` from the contract instead of
+re-deriving them.
 
 Note: the digest binds the literal `"starknet"` and the account address, not
 the network chain id. Two networks that produce the same account address for
@@ -113,6 +121,20 @@ Tests (`src/lib.cairo`, module `tests`):
 | `verify_layer_top_fixture` | `ops[0].l1` on `bottomRoot0` at leaf 0 → `root` |
 | `verify_layer_recovery_fixture` | recovery vector, layer `0xFF`, height 8 → `recRoot` |
 | `verify_layer_rejects_tampered_chain` | a modified chain value changes the root |
+| `skip_within_subtree_then_across_subtrees` | `skip.ops[0]` (idx 5, cached path) then `skip.ops[1]` (idx 1024 with top layer): `next_idx` 6 → 1025, `cached_root[(0, 1)] = bottomRoot1` |
+| `index_reuse_rejected`, `index_reuse_of_skipped_leaf_rejected` | `idx < next_idx` panics with `CCHS_INDEX_USED` |
+| `index_at_next_idx_allowed_and_capacity_bounded`, `index_at_capacity_rejected` | `idx = next_idx` and `2^20 - 1` accepted, `2^20` panics with `CCHS_EXHAUSTED` |
+| `jump_to_fresh_subtree_without_top_layer_rejected` | idx 1024 without `l1` panics with `CCHS_MISSING_TOP_LAYER` |
+| `signature_bound_to_index` | the leaf-5 signature at idx 6 panics with `CCHS_BAD_SUBTREE_ROOT` |
+| `redundant_top_layer_ignored` | `ops[1]` with `ops[0].l1` attached is accepted on the cached subtree |
+
+The state-machine tests run on the contract state in the test runner
+(`contract_state_for_testing`) and call the internal steps of `execute`
+(`check_index`, `verify_and_cache`, `advance`) with the fixture digests as the
+message, so the vectors stay byte-exact with the other adapters although the
+Starknet digest format differs. Subtree 0 is registered by writing
+`cached_root` directly rather than verifying `ops[0]`, which keeps every test
+at three layer verifications or fewer.
 
 ## Cost (estimate, not measured on-chain)
 
