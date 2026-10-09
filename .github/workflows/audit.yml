@@ -36,8 +36,12 @@ jobs:
           if-no-files-found: error
 
   mythril:
-    name: Mythril (ConsenSys, symbolic execution over the CCHS contracts)
+    name: Mythril (symbolic execution) · ${{ matrix.contract }}
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        contract: [AegisCCHS, AegisCCHSK, AegisCCHSFactory, UpgradeHelper]
     defaults: { run: { working-directory: evm } }
     steps:
       - uses: actions/checkout@v4
@@ -67,23 +71,19 @@ jobs:
             "outputSelection": { "*": { "*": ["*"], "": ["*"] } }
           }
           EOF
-      - name: Analyze the CCHS account contracts and factory
+      - name: Analyze src/${{ matrix.contract }}.sol
         run: |
-          set -o pipefail
-          : > mythril-report.md
-          for f in src/AegisCCHS.sol src/AegisCCHSK.sol src/AegisCCHSFactory.sol src/UpgradeHelper.sol; do
-            echo "## $f" >> mythril-report.md
-            myth analyze "$f" --solc-json solc.json --execution-timeout 900 --max-depth 64 -o markdown \
-              2> myth.err | tee -a mythril-report.md || true
-            cat myth.err
-            if grep -q "\[ERROR\]" myth.err; then echo "Mythril failed on $f"; exit 1; fi
-            echo >> mythril-report.md
-          done
+          f=src/${{ matrix.contract }}.sol
+          echo "## $f" > mythril-${{ matrix.contract }}.md
+          myth analyze "$f" --solc-json solc.json --execution-timeout 300 --max-depth 64 -o markdown \
+            2> myth.err >> mythril-${{ matrix.contract }}.md || true
+          cat myth.err
+          if grep -q "\[ERROR\]" myth.err; then echo "Mythril failed on $f"; exit 1; fi
+          cat mythril-${{ matrix.contract }}.md
       - name: Summary
-        run: |
-          { echo '## Mythril report'; cat mythril-report.md; } >> "$GITHUB_STEP_SUMMARY"
+        run: cat mythril-${{ matrix.contract }}.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
-          name: mythril-report-${{ github.sha }}
-          path: evm/mythril-report.md
+          name: mythril-${{ matrix.contract }}-${{ github.sha }}
+          path: evm/mythril-${{ matrix.contract }}.md
           if-no-files-found: error
