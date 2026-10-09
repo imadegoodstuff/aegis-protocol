@@ -11,6 +11,10 @@ crate-type = ["cdylib"]
 near-sdk  = "5.5"
 cchs-core = { path = "../cchs-core", default-features = false }
 
+[dev-dependencies]
+# Host-side unit tests (`cargo test`); the wasm build does not use this.
+near-sdk  = { version = "5.5", features = ["unit-testing"] }
+
 [profile.release]
 codegen-units = 1
 opt-level = "z"

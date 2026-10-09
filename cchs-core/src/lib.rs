@@ -212,8 +212,11 @@ pub fn verify_layer<S: Sha256>(
 /// Verification failure reasons. Mirrors the Solidity custom errors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CchsError {
-    /// All 2^20 leaves (or all 256 recovery leaves) have been used.
+    /// All 2^20 leaves (or all 256 recovery leaves) have been used, or the
+    /// requested leaf index is `>= 2^20`.
     Exhausted,
+    /// Requested leaf index is below `next_idx`: already consumed or abandoned.
+    IndexUsed,
     /// Subtree not cached yet and no top-layer proof was supplied.
     MissingTopLayer,
     /// Bottom root differs from the cached subtree root.
@@ -232,6 +235,7 @@ impl CchsError {
     pub fn as_str(&self) -> &'static str {
         match self {
             CchsError::Exhausted => "exhausted",
+            CchsError::IndexUsed => "index used",
             CchsError::MissingTopLayer => "missing top layer",
             CchsError::BadSubtreeRoot => "bad subtree root",
             CchsError::BadTopRoot => "bad top root",
@@ -282,6 +286,8 @@ pub struct CchsState {
     pub root: [u8; 32],
     pub rec_root: [u8; 32],
     pub epoch: u64,
+    /// Lowest leaf index still available: every leaf below it is consumed
+    /// or abandoned. The signer picks any `idx >= next_idx`.
     pub next_idx: u64,
     pub nonce: u64,
     pub rec_nonce: u64,
@@ -296,41 +302,57 @@ impl CchsState {
         Ok(CchsState { root, rec_root, epoch: 0, next_idx: 0, nonce: 0, rec_nonce: 0 })
     }
 
-    /// Bottom tree index of the next signature.
+    /// Bottom tree index of the lowest still-available leaf (`next_idx`).
     pub fn tree_idx(&self) -> u64 {
         self.next_idx >> H
     }
 
-    /// Leaf index within the bottom tree of the next signature.
+    /// Leaf index within the bottom tree of the lowest still-available leaf.
     pub fn leaf_idx(&self) -> u32 {
         (self.next_idx & (LEAVES - 1)) as u32
     }
 
-    /// Whether the next `execute` must carry the top layer, given the host's
-    /// lookup of `cached[(epoch, tree_idx)]`.
+    /// Whether an `execute` must carry the top layer, given the host's
+    /// lookup of `cached[(epoch, idx >> H)]` for the leaf it targets.
     pub fn needs_top_layer(cached: Option<[u8; 32]>) -> bool {
         normalize_cached(cached).is_none()
     }
 
-    /// Verify a signature on the 32-byte `msg` for leaf `next_idx`.
+    /// Index discipline: `idx` must be `>= next_idx` ([`CchsError::IndexUsed`])
+    /// and `< 2^20` ([`CchsError::Exhausted`]).
+    pub fn check_idx(&self, idx: u64) -> Result<(), CchsError> {
+        if idx < self.next_idx {
+            return Err(CchsError::IndexUsed);
+        }
+        if idx >= CAPACITY {
+            return Err(CchsError::Exhausted);
+        }
+        Ok(())
+    }
+
+    /// Verify a signature on the 32-byte `msg` for the signer-chosen leaf
+    /// `idx`.
     ///
-    /// * `cached` — host lookup of `cachedRoot[(epoch, next_idx >> H)]`
-    ///   (`None` or all-zero means "not cached").
-    /// * On success `next_idx` and `nonce` are incremented and the outcome
+    /// * `idx` — must satisfy `next_idx <= idx < 2^20`. Leaves below `idx`
+    ///   are abandoned forever: on success `next_idx` becomes `idx + 1`.
+    ///   The host binds `idx` into `msg`, so only the signer can skip.
+    /// * `cached` — host lookup of `cachedRoot[(epoch, idx >> H)]`
+    ///   (`None` or all-zero means "not cached"). When the cache is empty
+    ///   `l1` is required and verified against `root`; when it is filled a
+    ///   supplied `l1` is ignored and only the bottom root is compared.
+    /// * On success `next_idx = idx + 1`, `nonce += 1`, and the outcome
     ///   tells the host whether to write the cache. On error the state is
     ///   left untouched.
     pub fn execute_verify<S: Sha256>(
         &mut self,
         h: &mut S,
+        idx: u64,
         msg: &[u8; 32],
         l0: LayerSig<'_>,
         l1: Option<LayerSig<'_>>,
         cached: Option<[u8; 32]>,
     ) -> Result<ExecuteOutcome, CchsError> {
-        let idx = self.next_idx;
-        if idx >= CAPACITY {
-            return Err(CchsError::Exhausted);
-        }
+        self.check_idx(idx)?;
         if l0.auth.len() < H {
             return Err(CchsError::BadLength);
         }
@@ -341,6 +363,7 @@ impl CchsState {
 
         let cache_write = match normalize_cached(cached) {
             Some(c) => {
+                // Subtree already registered: a redundant top layer is ignored.
                 if c != r0 {
                     return Err(CchsError::BadSubtreeRoot);
                 }

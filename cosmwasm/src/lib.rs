@@ -8,6 +8,12 @@
 //! `evm/src/AegisCCHS.sol`; this contract only adds the CosmWasm-specific
 //! digest, storage and message dispatch.
 //!
+//! The signer chooses the leaf index: `Execute { idx, .. }` is accepted for
+//! any `idx >= next_idx` (below that: `IndexUsed`) and sets
+//! `next_idx = idx + 1`, abandoning the skipped leaves. The top layer `l1` is
+//! required when the subtree of `idx` is not cached yet and ignored when it
+//! already is.
+//!
 //! Message digest (32 bytes, signed by the client):
 //!   sha256("AEGIS_CCHS_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ nonce u64 BE
 //!          ‖ idx u64 BE ‖ sha256(to_json_binary(msgs)))
@@ -51,7 +57,8 @@ pub struct State {
     pub rec_root: Binary,
     /// Increments on every recovery; namespaces the cache.
     pub epoch: u64,
-    /// Next unused leaf index in [0, 2^20).
+    /// Lowest leaf index still available in [0, 2^20); every leaf below it
+    /// is consumed or abandoned.
     pub next_idx: u64,
     /// Transaction nonce bound into every message digest.
     pub nonce: u64,
@@ -78,9 +85,12 @@ pub struct InstantiateMsg {
 #[cw_serde]
 pub enum ExecuteMsg {
     /// Dispatch `msgs` from the contract, authorized by a CCHS signature on
-    /// the digest of `(contract, nonce, next_idx, msgs)`. `l1` is required on
-    /// the first use of a bottom subtree (see `QueryMsg::NeedsTopLayer`).
+    /// the digest of `(contract, nonce, idx, msgs)`. `idx` is chosen by the
+    /// signer and must be `>= next_idx`; on success `next_idx = idx + 1`.
+    /// `l1` is required on the first use of the bottom subtree of `idx`
+    /// (see `QueryMsg::NeedsTopLayerAt`) and ignored once it is cached.
     Execute {
+        idx: u64,
         l0: LayerSigMsg,
         l1: Option<LayerSigMsg>,
         msgs: Vec<CosmosMsg>,
@@ -99,15 +109,23 @@ pub enum ExecuteMsg {
 pub enum QueryMsg {
     #[returns(State)]
     State {},
-    /// Digest the client must sign for the next `Execute` of `msgs`.
+    /// Digest the client must sign for an `Execute` of `msgs` at leaf
+    /// `next_idx` with the current nonce.
     #[returns(Binary)]
     NextDigest { msgs: Vec<CosmosMsg> },
+    /// Digest the client must sign for an `Execute` of `msgs` at leaf `idx`
+    /// (`idx >= next_idx`) with the current nonce.
+    #[returns(Binary)]
+    DigestAt { idx: u64, msgs: Vec<CosmosMsg> },
     /// Digest the client must sign for the next `Recover`.
     #[returns(Binary)]
     NextRecoveryDigest { new_root: Binary, new_rec_root: Binary },
-    /// Whether the next `Execute` must include the top layer.
+    /// Whether an `Execute` at leaf `next_idx` must include the top layer.
     #[returns(bool)]
     NeedsTopLayer {},
+    /// Whether an `Execute` at leaf `idx` must include the top layer.
+    #[returns(bool)]
+    NeedsTopLayerAt { idx: u64 },
 }
 
 // ----------------------------------------------------------------- errors
@@ -118,6 +136,8 @@ pub enum ContractError {
     Std(#[from] cosmwasm_std::StdError),
     #[error("signature capacity exhausted")]
     Exhausted,
+    #[error("leaf index already used or abandoned")]
+    IndexUsed,
     #[error("subtree not cached and no top-layer proof supplied")]
     MissingTopLayer,
     #[error("bottom root does not match cached subtree root")]
@@ -136,6 +156,7 @@ impl From<CchsError> for ContractError {
     fn from(e: CchsError) -> Self {
         match e {
             CchsError::Exhausted => ContractError::Exhausted,
+            CchsError::IndexUsed => ContractError::IndexUsed,
             CchsError::MissingTopLayer => ContractError::MissingTopLayer,
             CchsError::BadSubtreeRoot => ContractError::BadSubtreeRoot,
             CchsError::BadTopRoot => ContractError::BadTopRoot,
@@ -173,7 +194,7 @@ pub fn execute(
     msg: ExecuteMsg,
 ) -> Result<Response, ContractError> {
     match msg {
-        ExecuteMsg::Execute { l0, l1, msgs } => exec_execute(deps, env, l0, l1, msgs),
+        ExecuteMsg::Execute { idx, l0, l1, msgs } => exec_execute(deps, env, idx, l0, l1, msgs),
         ExecuteMsg::Recover { new_root, new_rec_root, wots, auth } => {
             exec_recover(deps, env, new_root, new_rec_root, wots, auth)
         }
@@ -189,6 +210,11 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
             let d = execute_digest(&env, st.nonce, st.next_idx, &msgs)?;
             to_json_binary(&Binary::from(d.to_vec()))
         }
+        QueryMsg::DigestAt { idx, msgs } => {
+            let st = STATE.load(deps.storage)?;
+            let d = execute_digest(&env, st.nonce, idx, &msgs)?;
+            to_json_binary(&Binary::from(d.to_vec()))
+        }
         QueryMsg::NextRecoveryDigest { new_root, new_rec_root } => {
             let st = STATE.load(deps.storage)?;
             let d = recover_digest(&env, st.rec_nonce, new_root.as_slice(), new_rec_root.as_slice());
@@ -196,11 +222,19 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
         }
         QueryMsg::NeedsTopLayer {} => {
             let st = STATE.load(deps.storage)?;
-            let cached = CACHE.may_load(deps.storage, (st.epoch, st.next_idx >> H))?;
-            let cached = cached.and_then(|b| b32(&b).ok());
-            to_json_binary(&CchsState::needs_top_layer(cached))
+            to_json_binary(&needs_top_layer_at(deps, &st, st.next_idx)?)
+        }
+        QueryMsg::NeedsTopLayerAt { idx } => {
+            let st = STATE.load(deps.storage)?;
+            to_json_binary(&needs_top_layer_at(deps, &st, idx)?)
         }
     }
+}
+
+fn needs_top_layer_at(deps: Deps, st: &State, idx: u64) -> StdResult<bool> {
+    let cached = CACHE.may_load(deps.storage, (st.epoch, idx >> H))?;
+    let cached = cached.and_then(|b| b32(&b).ok());
+    Ok(CchsState::needs_top_layer(cached))
 }
 
 // --------------------------------------------------------------- handlers
@@ -208,13 +242,15 @@ pub fn query(deps: Deps, env: Env, msg: QueryMsg) -> StdResult<Binary> {
 fn exec_execute(
     deps: DepsMut,
     env: Env,
+    idx: u64,
     l0: LayerSigMsg,
     l1: Option<LayerSigMsg>,
     msgs: Vec<CosmosMsg>,
 ) -> Result<Response, ContractError> {
     let stored = STATE.load(deps.storage)?;
     let mut state = from_stored(&stored)?;
-    let idx = state.next_idx;
+    // Index discipline first, before any hashing.
+    state.check_idx(idx)?;
     let tree_idx = idx >> H;
 
     let digest = execute_digest(&env, state.nonce, idx, &msgs)?;
@@ -233,7 +269,7 @@ fn exec_execute(
     };
 
     let mut h = Hasher::default();
-    let outcome = state.execute_verify(&mut h, &digest, l0.sig(), l1_sig, cached)?;
+    let outcome = state.execute_verify(&mut h, idx, &digest, l0.sig(), l1_sig, cached)?;
 
     STATE.save(deps.storage, &to_stored(&state))?;
     let mut resp = Response::new()
@@ -370,4 +406,136 @@ fn from_stored(s: &State) -> Result<CchsState, ContractError> {
         nonce: s.nonce,
         rec_nonce: s.rec_nonce,
     })
+}
+
+// ------------------------------------------------------------------ tests
+
+/// The shared fixture digests bind the EVM chain id and account, so the
+/// signature vectors cannot be replayed through this contract's digest; the
+/// verifier itself is covered by `cchs-core/tests/vectors.rs`. These tests
+/// cover the contract-level index discipline and the index-taking queries.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cosmwasm_std::testing::{message_info, mock_dependencies, mock_env, MockApi, MockQuerier};
+    use cosmwasm_std::{from_json, BankMsg, Coin, MemoryStorage, OwnedDeps, Uint128};
+
+    type TestDeps = OwnedDeps<MemoryStorage, MockApi, MockQuerier>;
+
+    fn zero_layer(height: usize) -> LayerSigMsg {
+        LayerSigMsg {
+            wots: vec![Binary::from(vec![0u8; 32]); LEN],
+            auth: vec![Binary::from(vec![0u8; 32]); height],
+        }
+    }
+
+    fn setup() -> (TestDeps, Env) {
+        let mut deps = mock_dependencies();
+        let env = mock_env();
+        let info = message_info(&deps.api.addr_make("deployer"), &[]);
+        let msg = InstantiateMsg {
+            root: Binary::from(vec![0x11u8; 32]),
+            rec_root: Binary::from(vec![0x22u8; 32]),
+        };
+        instantiate(deps.as_mut(), env.clone(), info, msg).unwrap();
+        (deps, env)
+    }
+
+    fn sample_msgs() -> Vec<CosmosMsg> {
+        vec![CosmosMsg::Bank(BankMsg::Send {
+            to_address: "recipient".into(),
+            amount: vec![Coin { denom: "uatom".into(), amount: Uint128::new(7) }],
+        })]
+    }
+
+    fn set_next_idx(deps: &mut TestDeps, next_idx: u64) {
+        let mut st = STATE.load(&deps.storage).unwrap();
+        st.next_idx = next_idx;
+        STATE.save(&mut deps.storage, &st).unwrap();
+    }
+
+    #[test]
+    fn digest_at_binds_the_index() {
+        let (deps, env) = setup();
+        let msgs = sample_msgs();
+        let next: Binary =
+            from_json(query(deps.as_ref(), env.clone(), QueryMsg::NextDigest { msgs: msgs.clone() }).unwrap()).unwrap();
+        let at0: Binary =
+            from_json(query(deps.as_ref(), env.clone(), QueryMsg::DigestAt { idx: 0, msgs: msgs.clone() }).unwrap()).unwrap();
+        let at5: Binary =
+            from_json(query(deps.as_ref(), env.clone(), QueryMsg::DigestAt { idx: 5, msgs: msgs.clone() }).unwrap()).unwrap();
+        assert_eq!(next, at0, "next_digest is digest_at(next_idx)");
+        assert_ne!(at0, at5, "the leaf index is part of the digest");
+        assert_eq!(at5.len(), 32);
+    }
+
+    #[test]
+    fn needs_top_layer_at_reports_uncached_subtrees() {
+        let (mut deps, env) = setup();
+        let q = |deps: Deps, m: QueryMsg| -> bool { from_json(query(deps, env.clone(), m).unwrap()).unwrap() };
+        assert!(q(deps.as_ref(), QueryMsg::NeedsTopLayer {}));
+        assert!(q(deps.as_ref(), QueryMsg::NeedsTopLayerAt { idx: 5 }));
+        assert!(q(deps.as_ref(), QueryMsg::NeedsTopLayerAt { idx: 1024 }));
+
+        // Register subtree 0 directly in storage.
+        CACHE.save(&mut deps.storage, (0, 0), &Binary::from(vec![0x33u8; 32])).unwrap();
+        assert!(!q(deps.as_ref(), QueryMsg::NeedsTopLayer {}));
+        assert!(!q(deps.as_ref(), QueryMsg::NeedsTopLayerAt { idx: 5 }));
+        assert!(!q(deps.as_ref(), QueryMsg::NeedsTopLayerAt { idx: 1023 }));
+        assert!(q(deps.as_ref(), QueryMsg::NeedsTopLayerAt { idx: 1024 }), "subtree 1 is still uncached");
+    }
+
+    #[test]
+    fn index_below_next_idx_is_rejected_before_hashing() {
+        let (mut deps, env) = setup();
+        set_next_idx(&mut deps, 6);
+        let info = message_info(&deps.api.addr_make("anyone"), &[]);
+
+        // Deliberately malformed layers: the index check must fire first.
+        let bad_layer = LayerSigMsg { wots: vec![], auth: vec![] };
+        for idx in [0u64, 1, 5] {
+            let err = execute(
+                deps.as_mut(),
+                env.clone(),
+                info.clone(),
+                ExecuteMsg::Execute { idx, l0: bad_layer.clone(), l1: None, msgs: sample_msgs() },
+            )
+            .unwrap_err();
+            assert!(matches!(err, ContractError::IndexUsed), "idx {idx}: {err}");
+        }
+        let err = execute(
+            deps.as_mut(),
+            env.clone(),
+            info.clone(),
+            ExecuteMsg::Execute { idx: 1 << 20, l0: bad_layer.clone(), l1: None, msgs: sample_msgs() },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::Exhausted), "{err}");
+
+        // idx == next_idx passes the index check and fails on the layer shape.
+        let err = execute(
+            deps.as_mut(),
+            env.clone(),
+            info,
+            ExecuteMsg::Execute { idx: 6, l0: bad_layer, l1: None, msgs: sample_msgs() },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::BadLength { .. }), "{err}");
+        assert_eq!(STATE.load(&deps.storage).unwrap().next_idx, 6, "state untouched on error");
+    }
+
+    #[test]
+    fn jump_to_uncached_subtree_without_top_layer_is_rejected() {
+        let (mut deps, env) = setup();
+        let info = message_info(&deps.api.addr_make("anyone"), &[]);
+        let err = execute(
+            deps.as_mut(),
+            env,
+            info,
+            ExecuteMsg::Execute { idx: 1024, l0: zero_layer(H), l1: None, msgs: sample_msgs() },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ContractError::MissingTopLayer), "{err}");
+        assert_eq!(STATE.load(&deps.storage).unwrap().next_idx, 0);
+    }
 }

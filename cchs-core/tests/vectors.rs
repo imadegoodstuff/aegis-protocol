@@ -56,6 +56,40 @@ impl Layer {
     }
 }
 
+/// One fixture operation (`ops[i]` or `skip.ops[i]`), parsed.
+struct Op {
+    idx: u64,
+    nonce: u64,
+    digest: [u8; 32],
+    l0: Layer,
+    l1: Option<Layer>,
+}
+
+impl Op {
+    fn from_json(v: &Value) -> Op {
+        Op {
+            idx: v["idx"].as_u64().expect("idx"),
+            nonce: v["nonce"].as_u64().expect("nonce"),
+            digest: b32(&v["digest"]),
+            l0: Layer::from_json(&v["l0"]),
+            l1: if v["l1"].is_null() { None } else { Some(Layer::from_json(&v["l1"])) },
+        }
+    }
+    fn l1_sig(&self) -> Option<LayerSig<'_>> {
+        self.l1.as_ref().map(|l| l.sig())
+    }
+}
+
+/// Fresh state with `ops[0]` applied: subtree 0 registered, `next_idx = 1`.
+fn after_first_op(f: &Value, h: &mut Sha256) -> (CchsState, [u8; 32]) {
+    let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"])).unwrap();
+    let op = Op::from_json(&f["ops"][0]);
+    let out = state.execute_verify(h, op.idx, &op.digest, op.l0.sig(), op.l1_sig(), None).unwrap();
+    assert!(out.cache_write);
+    assert_eq!(out.subtree_root, b32(&f["bottomRoot0"]));
+    (state, out.subtree_root)
+}
+
 #[test]
 fn first_op_verifies_both_layers() {
     let f = fixture();
@@ -90,15 +124,12 @@ fn state_machine_follows_fixture_ops() {
     let ops = f["ops"].as_array().unwrap();
     assert_eq!(ops.len(), 3);
     for (i, op) in ops.iter().enumerate() {
-        assert_eq!(op["idx"].as_u64().unwrap(), state.next_idx);
-        assert_eq!(op["nonce"].as_u64().unwrap(), state.nonce);
-        let digest = b32(&op["digest"]);
-        let l0 = Layer::from_json(&op["l0"]);
-        let l1 = if op["l1"].is_null() { None } else { Some(Layer::from_json(&op["l1"])) };
-        let l1_sig = l1.as_ref().map(|l| l.sig());
+        let op = Op::from_json(op);
+        assert_eq!(op.idx, state.next_idx);
+        assert_eq!(op.nonce, state.nonce);
 
         let out = state
-            .execute_verify(&mut h, &digest, l0.sig(), l1_sig, cache)
+            .execute_verify(&mut h, op.idx, &op.digest, op.l0.sig(), op.l1_sig(), cache)
             .unwrap_or_else(|e| panic!("op {i} failed: {e}"));
 
         assert_eq!(out.idx, i as u64);
@@ -121,10 +152,143 @@ fn missing_top_layer_is_rejected() {
     let op = &f["ops"][0];
     let l0 = Layer::from_json(&op["l0"]);
     let mut h = Sha256::default();
-    let err = state.execute_verify(&mut h, &b32(&op["digest"]), l0.sig(), None, None).unwrap_err();
+    let err = state.execute_verify(&mut h, 0, &b32(&op["digest"]), l0.sig(), None, None).unwrap_err();
     assert_eq!(err, CchsError::MissingTopLayer);
     assert_eq!(state.next_idx, 0, "state untouched on error");
     assert_eq!(state.nonce, 0);
+}
+
+// ------------------------------------------------------ signer-chosen index
+
+#[test]
+fn skip_within_subtree_then_jump_to_fresh_subtree() {
+    let f = fixture();
+    let mut h = Sha256::default();
+    let (mut state, cache0) = after_first_op(&f, &mut h);
+    assert_eq!(state.next_idx, 1);
+
+    // skip.ops[0]: idx 5, nonce 1, cached path (no top layer).
+    let op5 = Op::from_json(&f["skip"]["ops"][0]);
+    assert_eq!(op5.idx, 5);
+    assert_eq!(op5.nonce, state.nonce);
+    assert!(op5.l1.is_none());
+    assert!(!CchsState::needs_top_layer(Some(cache0)));
+    let out = state
+        .execute_verify(&mut h, op5.idx, &op5.digest, op5.l0.sig(), None, Some(cache0))
+        .expect("skip to leaf 5 on the cached path");
+    assert_eq!(out.idx, 5);
+    assert_eq!(out.tree_idx, 0);
+    assert_eq!(out.leaf_idx, 5);
+    assert_eq!(out.subtree_root, cache0);
+    assert!(!out.cache_write);
+    assert_eq!(state.next_idx, 6);
+    assert_eq!(state.nonce, 2);
+
+    // skip.ops[1]: idx 1024, nonce 2, first leaf of subtree 1, carries l1.
+    let op1024 = Op::from_json(&f["skip"]["ops"][1]);
+    assert_eq!(op1024.idx, 1024);
+    assert_eq!(op1024.nonce, state.nonce);
+    assert!(op1024.l1.is_some());
+    assert!(CchsState::needs_top_layer(None));
+    let out = state
+        .execute_verify(&mut h, op1024.idx, &op1024.digest, op1024.l0.sig(), op1024.l1_sig(), None)
+        .expect("cross-subtree jump with top layer");
+    assert_eq!(out.idx, 1024);
+    assert_eq!(out.tree_idx, 1);
+    assert_eq!(out.leaf_idx, 0);
+    assert!(out.cache_write, "first use of subtree 1 fills the cache");
+    assert_eq!(out.subtree_root, b32(&f["bottomRoot1"]));
+    assert_eq!(state.next_idx, 1025);
+    assert_eq!(state.nonce, 3);
+}
+
+#[test]
+fn index_below_next_idx_is_rejected() {
+    let f = fixture();
+    let mut h = Sha256::default();
+    let (mut state, cache0) = after_first_op(&f, &mut h);
+
+    let op5 = Op::from_json(&f["skip"]["ops"][0]);
+    state.execute_verify(&mut h, op5.idx, &op5.digest, op5.l0.sig(), None, Some(cache0)).unwrap();
+    assert_eq!(state.next_idx, 6);
+
+    // ops[1] (idx 1) lies in the abandoned range.
+    let op1 = Op::from_json(&f["ops"][1]);
+    let err = state
+        .execute_verify(&mut h, op1.idx, &op1.digest, op1.l0.sig(), None, Some(cache0))
+        .unwrap_err();
+    assert_eq!(err, CchsError::IndexUsed);
+
+    // Replaying leaf 5 itself is also an index reuse.
+    let err = state
+        .execute_verify(&mut h, op5.idx, &op5.digest, op5.l0.sig(), None, Some(cache0))
+        .unwrap_err();
+    assert_eq!(err, CchsError::IndexUsed);
+    assert_eq!(state.next_idx, 6, "state untouched on error");
+    assert_eq!(state.nonce, 2);
+
+    // Direct check, including the upper bound.
+    assert_eq!(state.check_idx(5), Err(CchsError::IndexUsed));
+    assert_eq!(state.check_idx(6), Ok(()));
+    assert_eq!(state.check_idx(1 << 20), Err(CchsError::Exhausted));
+}
+
+#[test]
+fn jump_to_fresh_subtree_without_top_layer_is_rejected() {
+    let f = fixture();
+    let mut h = Sha256::default();
+    let (mut state, _) = after_first_op(&f, &mut h);
+
+    let op1024 = Op::from_json(&f["skip"]["ops"][1]);
+    let err = state
+        .execute_verify(&mut h, op1024.idx, &op1024.digest, op1024.l0.sig(), None, None)
+        .unwrap_err();
+    assert_eq!(err, CchsError::MissingTopLayer);
+    assert_eq!(state.next_idx, 1);
+    assert_eq!(state.nonce, 1);
+}
+
+#[test]
+fn signature_is_bound_to_its_index() {
+    let f = fixture();
+    let mut h = Sha256::default();
+    let (mut state, cache0) = after_first_op(&f, &mut h);
+
+    // The leaf-5 signature submitted at leaf 6 with the same digest: the
+    // bottom root recomputed at position 6 does not match the cache.
+    let op5 = Op::from_json(&f["skip"]["ops"][0]);
+    let err = state
+        .execute_verify(&mut h, 6, &op5.digest, op5.l0.sig(), None, Some(cache0))
+        .unwrap_err();
+    assert_eq!(err, CchsError::BadSubtreeRoot);
+    assert_eq!(state.next_idx, 1);
+}
+
+#[test]
+fn redundant_top_layer_on_registered_subtree_is_ignored() {
+    let f = fixture();
+    let mut h = Sha256::default();
+    let (mut state, cache0) = after_first_op(&f, &mut h);
+
+    // ops[1] with ops[0]'s top layer attached: the cache is filled, so the
+    // proof is neither verified nor rejected.
+    let op0 = Op::from_json(&f["ops"][0]);
+    let op1 = Op::from_json(&f["ops"][1]);
+    let out = state
+        .execute_verify(&mut h, op1.idx, &op1.digest, op1.l0.sig(), op0.l1_sig(), Some(cache0))
+        .expect("redundant top layer is ignored");
+    assert!(!out.cache_write);
+    assert_eq!(out.subtree_root, cache0);
+    assert_eq!(state.next_idx, 2);
+
+    // Even a garbage top layer is ignored on the cached path.
+    let mut bad = Layer::from_json(&f["ops"][0]["l1"]);
+    bad.wots[0][0] ^= 0xFF;
+    let op2 = Op::from_json(&f["ops"][2]);
+    state
+        .execute_verify(&mut h, op2.idx, &op2.digest, op2.l0.sig(), Some(bad.sig()), Some(cache0))
+        .expect("top layer not inspected when the subtree is cached");
+    assert_eq!(state.next_idx, 3);
 }
 
 #[test]
@@ -143,11 +307,11 @@ fn tampered_chain_value_fails() {
 
     // Against the cache.
     let mut state = CchsState::new(b32(&f["root"]), b32(&f["recRoot"])).unwrap();
-    let err = state.execute_verify(&mut h, &digest, l0.sig(), None, Some(bottom0)).unwrap_err();
+    let err = state.execute_verify(&mut h, 0, &digest, l0.sig(), None, Some(bottom0)).unwrap_err();
     assert_eq!(err, CchsError::BadSubtreeRoot);
 
     // Against the top layer (R_0 is wrong, so the top WOTS+ check fails).
-    let err = state.execute_verify(&mut h, &digest, l0.sig(), Some(l1.sig()), None).unwrap_err();
+    let err = state.execute_verify(&mut h, 0, &digest, l0.sig(), Some(l1.sig()), None).unwrap_err();
     assert_eq!(err, CchsError::BadTopRoot);
     assert_eq!(state.next_idx, 0);
 }
@@ -223,6 +387,6 @@ fn short_auth_path_is_rejected_without_panic() {
     let l0 = Layer::from_json(&op["l0"]);
     let short = LayerSig { wots: &l0.wots, auth: &l0.auth[..H - 1] };
     let mut h = Sha256::default();
-    let err = state.execute_verify(&mut h, &b32(&op["digest"]), short, None, None).unwrap_err();
+    let err = state.execute_verify(&mut h, 0, &b32(&op["digest"]), short, None, None).unwrap_err();
     assert_eq!(err, CchsError::BadLength);
 }

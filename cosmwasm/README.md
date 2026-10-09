@@ -20,6 +20,12 @@ once and cached in `cache[(epoch, tree_idx)]`; the following 1023 signatures
 carry only the bottom layer. SHA-256 is the `sha2` crate compiled into the
 wasm.
 
+The signer chooses the leaf index: `Execute { idx, .. }` must satisfy
+`idx >= next_idx` (otherwise `IndexUsed`) and sets `next_idx = idx + 1`, so
+skipped leaves are abandoned forever (only the signer can skip, because `idx`
+is in the digest). The top layer `l1` is required when the subtree
+`idx >> 10` is not cached yet and ignored when it already is.
+
 ## Storage
 
 ```
@@ -38,6 +44,7 @@ entries.
 
 // execute
 { "execute": {
+    "idx": 5,                                      // signer-chosen leaf, >= next_idx
     "l0":  { "wots": ["<base64 32B>" × 67], "auth": ["<base64 32B>" × 10] },
     "l1":  { "wots": [...67], "auth": [...10] },   // or null when the subtree is cached
     "msgs": [ /* CosmosMsg[] */ ] } }
@@ -48,9 +55,11 @@ entries.
 
 // query
 { "state": {} }
-{ "next_digest": { "msgs": [ ... ] } }                        → base64 32B
+{ "next_digest": { "msgs": [ ... ] } }                        → base64 32B (idx = next_idx)
+{ "digest_at": { "idx": 5, "msgs": [ ... ] } }                → base64 32B
 { "next_recovery_digest": { "new_root": "...", "new_rec_root": "..." } }
-{ "needs_top_layer": {} }                                     → bool
+{ "needs_top_layer": {} }                                     → bool (idx = next_idx)
+{ "needs_top_layer_at": { "idx": 1024 } }                     → bool
 ```
 
 Anyone may submit `Execute`; authorization is the signature. On success the
@@ -59,7 +68,7 @@ contract returns `msgs` as sub-messages executed with the contract as sender.
 ## Digest
 
 ```
-M = sha256("AEGIS_CCHS_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ nonce u64 BE ‖ next_idx u64 BE
+M = sha256("AEGIS_CCHS_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ nonce u64 BE ‖ idx u64 BE
            ‖ sha256(to_json_binary(msgs)))
 
 M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "cosmwasm" ‖ contract_address_utf8 ‖ rec_nonce u64 BE
@@ -68,8 +77,8 @@ M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "cosmwasm" ‖ contract_address_utf8 
 
 `contract_address_utf8` is the bech32 string of `env.contract.address`
 (it includes the chain prefix). `to_json_binary(msgs)` is the contract's own
-canonical JSON of the `Vec<CosmosMsg>` — use the `next_digest` query to obtain
-the exact bytes rather than re-serializing client-side.
+canonical JSON of the `Vec<CosmosMsg>` — use the `next_digest` / `digest_at`
+query to obtain the exact bytes rather than re-serializing client-side.
 
 ## Layer verification (shared with every chain)
 
@@ -96,8 +105,9 @@ RUSTFLAGS='-C link-arg=-s' cargo build --release --target wasm32-unknown-unknown
 
 Produces `target/wasm32-unknown-unknown/release/aegis_cosmwasm.wasm`.
 
-## Core tests
+## Tests
 
 ```bash
-cd ../cchs-core && cargo test --features std
+cargo test                                  # contract-level index discipline and queries
+cd ../cchs-core && cargo test --features std   # fixture vectors, including the skip ops
 ```

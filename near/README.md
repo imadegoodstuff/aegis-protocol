@@ -14,6 +14,12 @@ signature (SHA-256, w = 16, 67 chains) under a two-layer hypertree of height
 once and cached in `cache[(epoch, tree_idx)]`; the following 1023 signatures
 carry only the bottom layer. SHA-256 is the `env::sha256_array` host function.
 
+The signer chooses the leaf index: `execute(idx, ..)` must satisfy
+`idx >= next_idx` (otherwise the call panics with `index used`) and sets
+`next_idx = idx + 1`, so skipped leaves are abandoned forever (only the signer
+can skip, because `idx` is in the digest). The top layer `l1` is required when
+the subtree `idx >> 10` is not cached yet and ignored when it already is.
+
 Deploy one contract per user; the contract account is the user's account.
 
 ## State
@@ -31,11 +37,13 @@ cache: LookupMap<(u64, u64), [u8; 32]>   (epoch, bottom tree index) → verified
 | Method | Args encoding | Arguments |
 |---|---|---|
 | `new` (init) | JSON | `root`, `rec_root`: base64 32 bytes |
-| `execute` | **Borsh** | `l0: LayerSig`, `l1: Option<LayerSig>`, `receiver_id: AccountId`, `method: String`, `args: Vec<u8>`, `deposit: u128`, `gas: u64` |
+| `execute` | **Borsh** | `idx: u64`, `l0: LayerSig`, `l1: Option<LayerSig>`, `receiver_id: AccountId`, `method: String`, `args: Vec<u8>`, `deposit: u128`, `gas: u64` |
 | `recover` | **Borsh** | `new_root: [u8;32]`, `new_rec_root: [u8;32]`, `wots: Vec<[u8;32]>` (67), `auth: Vec<[u8;32]>` (8) |
 | `get_state` | JSON | — |
-| `needs_top_layer` | JSON | — |
-| `next_digest` | JSON | `receiver_id`, `method`, `args` (base64), `deposit` (string u128) |
+| `needs_top_layer` | JSON | — (`idx = next_idx`) |
+| `needs_top_layer_at` | JSON | `idx` (string u64) |
+| `next_digest` | JSON | `receiver_id`, `method`, `args` (base64), `deposit` (string u128) — `idx = next_idx` |
+| `digest_at` | JSON | `idx` (string u64), `receiver_id`, `method`, `args` (base64), `deposit` (string u128) |
 | `next_recovery_digest` | JSON | `new_root`, `new_rec_root` (base64) |
 
 `LayerSig` is the Borsh struct `{ wots: Vec<[u8;32]> /*67*/, auth: Vec<[u8;32]> /*10*/ }`.
@@ -51,7 +59,7 @@ inner = sha256(len(receiver_id) u32 BE ‖ receiver_id
              ‖ len(args) u32 BE ‖ args
              ‖ deposit u128 BE)
 
-M = sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(current_account_id) ‖ nonce u64 BE ‖ next_idx u64 BE ‖ inner)
+M = sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(current_account_id) ‖ nonce u64 BE ‖ idx u64 BE ‖ inner)
 
 M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id) ‖ rec_nonce u64 BE
                ‖ new_root ‖ new_rec_root)
@@ -61,7 +69,7 @@ M_rec = sha256("AEGIS_CCHS_RECOVER_V1" ‖ "near" ‖ sha256(current_account_id)
 variable-length fields of `inner` are length-prefixed so that a relayer cannot
 re-split `(receiver_id, method, args)` into a different call with the same
 digest. `gas` is not part of the digest (like gas on EVM). Use the
-`next_digest` view to obtain the exact bytes to sign.
+`next_digest` / `digest_at` view to obtain the exact bytes to sign.
 
 ## Layer verification (shared with every chain)
 
@@ -93,8 +101,9 @@ near deploy <account>.near target/wasm32-unknown-unknown/release/aegis_near.wasm
     --initArgs '{"root":"<base64>","rec_root":"<base64>"}'
 ```
 
-## Core tests
+## Tests
 
 ```bash
-cd ../cchs-core && cargo test --features std
+cargo test                                  # contract-level index discipline and views
+cd ../cchs-core && cargo test --features std   # fixture vectors, including the skip ops
 ```

@@ -46,17 +46,23 @@ relies on is filled by its own instruction:
    stores `r0` in the cache PDA. Anyone can pay for this transaction; the
    proof authenticates itself, and the same `l1` registers the same subtree
    on every chain running C-20 with the same root (`CCHS.spec.md` §5.3).
-2. `execute(l0_wots, l0_auth, ix_data)` — every signature. The client reads
-   `next_idx` and `nonce` from the `CchsAccount`, builds the digest, signs
+2. `execute(idx, l0_wots, l0_auth, ix_data)` — every signature. The client
+   reads `next_idx` and `nonce` from the `CchsAccount`, picks a leaf
+   `idx >= next_idx` (normally `next_idx` itself), builds the digest, signs
    with `sign(key, idx, m, subtreeCached = true)` and sends only `l0`. The
    program recomputes `r0` from `l0` and requires it to equal the cache PDA
-   for `(epoch, next_idx >> 10)`. No top layer is accepted here, so the
+   for `(epoch, idx >> 10)`. No top layer is accepted here, so the
    instruction always fits one packet.
 
-The client decides which to send by checking whether the cache PDA for the
-current subtree exists and is non-zero (`needs_top_layer` in the core).
-Both can be sent back-to-back; `execute` fails with `MissingTopLayer` until
-the cache transaction has landed.
+The signer chooses the leaf index: `idx` below `next_idx` is rejected with
+`IndexUsed`, and a successful `execute` sets `next_idx = idx + 1`, so the
+skipped leaves are abandoned forever (only the signer can skip, because `idx`
+is in the digest). The client decides whether a `cache_subtree` is needed by
+checking whether the cache PDA for the subtree of `idx` exists and is
+non-zero (`needs_top_layer` in the core). Both can be sent back-to-back;
+`execute` fails with `MissingTopLayer` until the cache transaction has
+landed. Re-sending `cache_subtree` for an already registered subtree is a
+no-op, the split-flow counterpart of a redundant top layer being ignored.
 
 Soundness is unchanged from the one-shot verifier: a cache slot can only be
 written through a valid top-layer signature on exactly the stored value, is
@@ -85,12 +91,13 @@ cache_subtree(tree_idx: u64, l1_wots: [[u8;24];26], l1_auth: [[u8;24];10], r0: [
     rejects: ZeroRoot (r0 = 0), Exhausted (tree_idx >= 1024), BadTopRoot,
              CacheConflict (slot holds a different non-zero root; re-sending the same r0 is a no-op)
 
-execute(l0_wots: [[u8;24];26], l0_auth: [[u8;24];10], ix_data: Vec<u8>)
-    accounts: account (mut), cache (PDA for (epoch, next_idx >> 10), must exist),
+execute(idx: u64, l0_wots: [[u8;24];26], l0_auth: [[u8;24];10], ix_data: Vec<u8>)
+    accounts: account (mut), cache (PDA for (epoch, idx >> 10), must exist),
               target_program, then as remaining_accounts every account of the
               inner instruction (not the target program itself)
-    rejects: MissingTopLayer (cache zero / absent), BadSubtreeRoot, Exhausted, TargetNotExecutable
-    effect:  next_idx += 1, nonce += 1, then CPI target_program(ix_data) signed by
+    rejects: IndexUsed (idx < next_idx), Exhausted (idx >= 2^20),
+             MissingTopLayer (cache zero / absent), BadSubtreeRoot, TargetNotExecutable
+    effect:  next_idx = idx + 1, nonce += 1, then CPI target_program(ix_data) signed by
              the account PDA and the vault PDA wherever they appear
 
 recover(new_root: [u8;24], new_rec_root: [u8;24], wots: [[u8;24];26], auth: [[u8;24];8])
@@ -98,16 +105,17 @@ recover(new_root: [u8;24], new_rec_root: [u8;24], wots: [[u8;24];26], auth: [[u8
     effect:  root/rec_root replaced, next_idx = 0, epoch += 1, rec_nonce += 1
 ```
 
-`execute` takes no index argument: the leaf is `account.next_idx`, so a
-signature can be used exactly once and only in order. No payer or system
-program is needed because `execute` never creates an account.
+`idx` is bound into the digest and checked against `next_idx` before any
+hashing, so a signature can be used exactly once and never at a lower leaf
+than the account has already advanced to. No payer or system program is
+needed because `execute` never creates an account.
 
 ## Digest
 
 The client signs the 24-byte message
 
 ```
-M = sha256("AEGIS_CCHS_V1" ‖ "solana" ‖ account_pubkey(32) ‖ nonce u64 BE ‖ next_idx u64 BE
+M = sha256("AEGIS_CCHS_V1" ‖ "solana" ‖ account_pubkey(32) ‖ nonce u64 BE ‖ idx u64 BE
            ‖ sha256(target_program(32) ‖ ix_data))[0..24)
 ```
 
@@ -145,8 +153,11 @@ no length prefix, `Vec<u8>` carries a 4-byte one):
 |---|---|
 | `create` | 8 + 24 + 24 = **56** |
 | `cache_subtree` | 8 + 8 + 624 + 240 + 24 = **904** |
-| `execute` | 8 + 624 + 240 + 4 + `ix_data.len()` = **876 + len** (888 for a 12-byte SOL transfer) |
+| `execute` | 8 + 8 (`idx`) + 624 + 240 + 4 + `ix_data.len()` = **884 + len** (896 for a 12-byte SOL transfer) |
 | `recover` | 8 + 24 + 24 + 624 + 192 = **872** |
+
+The explicit `idx` argument costs 8 bytes per `execute` compared with the
+earlier implicit-index layout; every row below includes it.
 
 Whole transaction, one fee-payer signature, legacy message
 (`65 + 3 + 1 + 32·keys + 32 + 1 + Σ(1 + 1 + accounts + 2 + data)`), computed
@@ -154,23 +165,24 @@ from the layouts above (not yet measured against a built program):
 
 | Transaction | Keys | Bytes of 1 232 |
 |---|---|---|
-| `execute`, SOL transfer vault → recipient (12-byte inner ix), no compute-budget ix | payer, program, account, cache, system, vault, recipient = 7 | **1 223** |
-| same, recipient = payer (6 keys), no compute-budget ix | 6 | 1 190 |
-| same, 6 keys, plus `SetComputeUnitLimit` (adds the ComputeBudget key and an 8-byte ix) | 7 | 1 230 |
-| same, 7 keys, plus `SetComputeUnitLimit` | 8 | 1 263 — **does not fit** |
-| `execute` as a v0 message, payer static, 7 keys through one address lookup table, plus `SetComputeUnitLimit` | 1 + 7 | **1 082** (room for 162 bytes of `ix_data`) |
+| `execute`, SOL transfer vault → recipient (12-byte inner ix), no compute-budget ix | payer, program, account, cache, system, vault, recipient = 7 | **1 231** |
+| same, recipient = payer (6 keys), no compute-budget ix | 6 | 1 198 |
+| same, 6 keys, plus `SetComputeUnitLimit` (adds the ComputeBudget key and an 8-byte ix) | 7 | 1 238 — **does not fit** |
+| same, 7 keys, plus `SetComputeUnitLimit` | 8 | 1 271 — **does not fit** |
+| `execute` as a v0 message, payer static, 7 keys through one address lookup table, plus `SetComputeUnitLimit` | 1 + 7 | **1 090** (room for 142 bytes of `ix_data`) |
 | `cache_subtree` | payer, program, account, cache, system = 5 (6 with compute budget) | 1 174 (1 214) |
 | `recover` | payer, program, account = 3 (4 with compute budget) | 1 075 (1 115) |
 | `create` | 4 | 292 |
 
-The bottom-layer instruction itself fits a legacy packet. Because the
-verification needs more than the 200 K CU default (next section), a real
-transaction also carries a `SetComputeUnitLimit` instruction, and a vault
-transfer to a third party then needs 8 keys, 31 bytes too many for a legacy
-message. The client therefore sends `execute` as a v0 transaction with an
-address lookup table holding the program, account, cache, vault, system and
-ComputeBudget keys: 1 082 bytes for a 12-byte inner instruction, 150 bytes to
-spare. The lookup table is created once per account alongside `create`.
+The bottom-layer instruction itself still fits a legacy packet (1 byte to
+spare in the 7-key case). Because the verification needs more than the
+200 K CU default (next section), a real transaction also carries a
+`SetComputeUnitLimit` instruction, and with `idx` on board even the 6-key
+variant then exceeds the legacy limit by 6 bytes. The client therefore sends
+`execute` as a v0 transaction with an address lookup table holding the
+program, account, cache, vault, system and ComputeBudget keys: 1 090 bytes
+for a 12-byte inner instruction, 142 bytes to spare. The lookup table is
+created once per account alongside `create`.
 
 ## Compute units (estimate, not yet measured on-chain)
 
@@ -204,8 +216,10 @@ the packet.
 
 * Anchor build in CI (`anchor build`, `anchor test`) with the vectors of
   `cchs-c-20.json` replayed through `create` → `cache_subtree(0, l1, r0 =
-  bottomRoot0)` → `execute` × 3 → `recover`, plus the negative cases
-  (tampered chain value, missing cache, cache conflict, replay).
+  bottomRoot0)` → `execute` × 3 → `recover`, the `skip` ops (leaf 5, then
+  `cache_subtree(1, l1, bottomRoot1)` and leaf 1024), plus the negative
+  cases (tampered chain value, missing cache, cache conflict, index reuse,
+  replay).
 * Measure CU for `execute` on the fixture ops and on an all-zero message;
   confirm the stack budget of the fixed-array instruction arguments
   (~900 bytes) inside the 4 KB BPF frame.
@@ -220,9 +234,10 @@ the packet.
 anchor build
 ```
 
-## Core tests
+## Tests
 
 ```bash
+cargo test -p aegis_account            # host-side replay of cchs-c-20.json through the handler logic
 cd ../cchs-core && cargo test --features std
 ```
 
@@ -230,3 +245,9 @@ cd ../cchs-core && cargo test --features std
 equals `bottomRoot0` and its top layer reaches `root`; ops[1] and ops[2]
 verify against the cached root; tampered chain value, auth path and message
 are rejected; the recovery vector is accepted once and its replay rejected.
+The `skip` ops cover the signer-chosen index: leaf 5 on the cached path,
+leaf 1024 after `cache_subtree(1, l1, bottomRoot1)`, `IndexUsed` for any
+lower leaf afterwards, `MissingTopLayer` for a jump into an unregistered
+subtree, and a leaf-5 signature rejected at leaf 6. The program's own test
+module (`programs/aegis_account/src/lib.rs`) runs the same ops through the
+`cache_subtree` / `execute` ordering with the program's `SolSha256`.

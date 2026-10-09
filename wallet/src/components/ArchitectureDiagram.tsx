@@ -27,7 +27,7 @@ const ADAPTERS: Adapter[] = [
     addrStatus: "mainnet", pq: "source",
     address: "base58(ed25519_pk)",
     hash: "sha256 syscall", storage: "PDA per (epoch, treeIdx)", path: "solana/, cchs-core/",
-    blurb: "cchs-core is a no_std Rust crate implementing the verifier over an injected hash; it replays the shared vectors in CI. Solana uses CCHS-C-20 (n = 24, w = 256): cache_subtree registers a subtree, execute carries one 864 B layer and fits a single 1 201 B legacy packet. Program builds with cargo build-sbf in CI; compute units (~376 K average by hash count) are estimated, not yet measured on a cluster. Not deployed." },
+    blurb: "cchs-core is a no_std Rust crate implementing the verifier over an injected hash; it replays the shared vectors in CI. Solana uses CCHS-C-20 (n = 24, w = 256): cache_subtree registers a subtree, execute carries one 864 B layer plus the signer-chosen index and is sent as one v0 transaction with a lookup table (1 090 B of 1 232). Program builds with cargo build-sbf in CI; compute units (~376 K average by hash count) are estimated, not yet measured on a cluster. Not deployed." },
   { id: "cosmos", name: "Cosmos", family: "CosmWasm", set: "CCHS-S-20",
     addrStatus: "mainnet", pq: "source",
     address: "bech32(prefix, ripemd160(sha256(pk)))",

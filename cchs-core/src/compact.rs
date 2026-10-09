@@ -286,6 +286,8 @@ pub struct CchsState {
     pub root: Hash,
     pub rec_root: Hash,
     pub epoch: u64,
+    /// Lowest leaf index still available: every leaf below it is consumed
+    /// or abandoned. The signer picks any `idx >= next_idx`.
     pub next_idx: u64,
     pub nonce: u64,
     pub rec_nonce: u64,
@@ -300,44 +302,64 @@ impl CchsState {
         Ok(CchsState { root, rec_root, epoch: 0, next_idx: 0, nonce: 0, rec_nonce: 0 })
     }
 
-    /// Bottom tree index of the next signature.
+    /// Bottom tree index of the lowest still-available leaf (`next_idx`).
     pub fn tree_idx(&self) -> u64 {
         tree_idx_of(self.next_idx)
     }
 
-    /// Leaf index within the bottom tree of the next signature.
+    /// Leaf index within the bottom tree of the lowest still-available leaf.
     pub fn leaf_idx(&self) -> u32 {
         leaf_idx_of(self.next_idx)
     }
 
-    /// Whether the next `execute` must carry the top layer, given the host's
-    /// lookup of `cached[(epoch, tree_idx)]`.
+    /// Whether an `execute` must carry the top layer, given the host's
+    /// lookup of `cached[(epoch, idx >> H)]` for the leaf it targets.
     pub fn needs_top_layer(cached: Option<Hash>) -> bool {
         normalize_cached(cached).is_none()
     }
 
-    /// Verify a signature on the 24-byte `msg` for leaf `next_idx`.
+    /// Index discipline: `idx` must be `>= next_idx` ([`CchsError::IndexUsed`])
+    /// and `< 2^20` ([`CchsError::Exhausted`]).
+    pub fn check_idx(&self, idx: u64) -> Result<(), CchsError> {
+        if idx < self.next_idx {
+            return Err(CchsError::IndexUsed);
+        }
+        if idx >= CAPACITY {
+            return Err(CchsError::Exhausted);
+        }
+        Ok(())
+    }
+
+    /// Verify a signature on the 24-byte `msg` for the signer-chosen leaf
+    /// `idx`.
     ///
-    /// * `cached` — host lookup of `cachedRoot[(epoch, next_idx >> H)]`
-    ///   (`None` or all-zero means "not cached").
-    /// * On success `next_idx` and `nonce` are incremented and the outcome
+    /// * `idx` — must satisfy `next_idx <= idx < 2^20`. Leaves below `idx`
+    ///   are abandoned forever: on success `next_idx` becomes `idx + 1`.
+    ///   The host binds `idx` into `msg`, so only the signer can skip.
+    /// * `cached` — host lookup of `cachedRoot[(epoch, idx >> H)]`
+    ///   (`None` or all-zero means "not cached"). When the cache is empty
+    ///   `l1` is required and verified against `root`; when it is filled a
+    ///   supplied `l1` is ignored and only the bottom root is compared.
+    /// * On success `next_idx = idx + 1`, `nonce += 1`, and the outcome
     ///   tells the host whether to write the cache. On error the state is
     ///   left untouched.
     pub fn execute_verify<S: Sha256>(
         &mut self,
         h: &mut S,
+        idx: u64,
         msg: &Hash,
         l0: LayerSig<'_>,
         l1: Option<LayerSig<'_>>,
         cached: Option<Hash>,
     ) -> Result<ExecuteOutcome, CchsError> {
-        let idx = self.next_idx;
+        self.check_idx(idx)?;
         let r0 = bottom_root(h, idx, msg, l0)?;
         let tree_idx = tree_idx_of(idx);
         let leaf_idx = leaf_idx_of(idx);
 
         let cache_write = match normalize_cached(cached) {
             Some(c) => {
+                // Subtree already registered: a redundant top layer is ignored.
                 if c != r0 {
                     return Err(CchsError::BadSubtreeRoot);
                 }
@@ -355,21 +377,23 @@ impl CchsState {
         Ok(ExecuteOutcome { idx, tree_idx, leaf_idx, subtree_root: r0, cache_write })
     }
 
-    /// Verify a signature for leaf `next_idx` whose bottom root is already
-    /// cached (`cached` is the host's non-zero cache entry). This is the
-    /// one-packet path: no top layer is accepted or needed. On success
-    /// `next_idx` and `nonce` are incremented.
+    /// Verify a signature for the signer-chosen leaf `idx` whose bottom root
+    /// is already cached (`cached` is the host's non-zero cache entry). This
+    /// is the one-packet path: no top layer is accepted or needed. On success
+    /// `next_idx = idx + 1` and `nonce += 1`.
     pub fn execute_cached<S: Sha256>(
         &mut self,
         h: &mut S,
+        idx: u64,
         msg: &Hash,
         l0: LayerSig<'_>,
         cached: Hash,
     ) -> Result<ExecuteOutcome, CchsError> {
+        self.check_idx(idx)?;
         if cached == ZERO {
             return Err(CchsError::MissingTopLayer);
         }
-        self.execute_verify(h, msg, l0, None, Some(cached))
+        self.execute_verify(h, idx, msg, l0, None, Some(cached))
     }
 
     /// Verify a recovery signature on `msg` under `rec_root` at leaf

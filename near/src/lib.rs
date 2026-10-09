@@ -8,6 +8,12 @@
 //! `evm/src/AegisCCHS.sol`; this contract only adds the NEAR-specific digest,
 //! storage and promise dispatch.
 //!
+//! The signer chooses the leaf index: `execute(idx, ..)` is accepted for any
+//! `idx >= next_idx` (below that: "index used") and sets
+//! `next_idx = idx + 1`, abandoning the skipped leaves. The top layer `l1` is
+//! required when the subtree of `idx` is not cached yet and ignored when it
+//! already is.
+//!
 //! Message digest (32 bytes, signed by the client):
 //!   sha256("AEGIS_CCHS_V1" ‖ "near" ‖ sha256(current_account_id) ‖ nonce u64 BE
 //!          ‖ idx u64 BE ‖ sha256(len(receiver_id) u32 BE ‖ receiver_id
@@ -89,6 +95,8 @@ pub struct AegisCchs {
     root: [u8; 32],
     rec_root: [u8; 32],
     epoch: u64,
+    /// Lowest leaf index still available; every leaf below it is consumed
+    /// or abandoned.
     next_idx: u64,
     nonce: u64,
     rec_nonce: u64,
@@ -117,10 +125,13 @@ impl AegisCchs {
 
     /// Call `receiver_id.method(args)` with `deposit` yoctoNEAR and `gas`,
     /// authorized by a CCHS signature on the digest of
-    /// `(this account, nonce, next_idx, receiver_id, method, args, deposit)`.
-    /// `l1` is required on the first use of a bottom subtree.
+    /// `(this account, nonce, idx, receiver_id, method, args, deposit)`.
+    /// `idx` is chosen by the signer and must be `>= next_idx`; on success
+    /// `next_idx = idx + 1`. `l1` is required on the first use of the bottom
+    /// subtree of `idx` and ignored once that subtree is cached.
     pub fn execute(
         &mut self,
+        #[serializer(borsh)] idx: u64,
         #[serializer(borsh)] l0: LayerSigArg,
         #[serializer(borsh)] l1: Option<LayerSigArg>,
         #[serializer(borsh)] receiver_id: AccountId,
@@ -130,7 +141,8 @@ impl AegisCchs {
         #[serializer(borsh)] gas: u64,
     ) -> Promise {
         let mut state = self.state();
-        let idx = state.next_idx;
+        // Index discipline first, before any hashing.
+        state.check_idx(idx).unwrap_or_else(|e| env::panic_str(e.as_str()));
         let tree_idx = idx >> H;
 
         let mut h = NearSha256::default();
@@ -153,7 +165,7 @@ impl AegisCchs {
         let cached = self.cache.get(&key).copied();
 
         let outcome = state
-            .execute_verify(&mut h, &digest, l0_sig, l1_sig, cached)
+            .execute_verify(&mut h, idx, &digest, l0_sig, l1_sig, cached)
             .unwrap_or_else(|e| env::panic_str(e.as_str()));
 
         self.store(&state);
@@ -208,13 +220,18 @@ impl AegisCchs {
         }
     }
 
-    /// Whether the next `execute` must include the top layer.
+    /// Whether an `execute` at leaf `next_idx` must include the top layer.
     pub fn needs_top_layer(&self) -> bool {
-        let key = (self.epoch, self.next_idx >> H);
+        self.needs_top_layer_at(U64(self.next_idx))
+    }
+
+    /// Whether an `execute` at leaf `idx` must include the top layer.
+    pub fn needs_top_layer_at(&self, idx: U64) -> bool {
+        let key = (self.epoch, idx.0 >> H);
         CchsState::needs_top_layer(self.cache.get(&key).copied())
     }
 
-    /// Digest the client must sign for the next `execute`.
+    /// Digest the client must sign for an `execute` at leaf `next_idx`.
     pub fn next_digest(
         &self,
         receiver_id: AccountId,
@@ -222,8 +239,21 @@ impl AegisCchs {
         args: Base64VecU8,
         deposit: U128,
     ) -> Base64VecU8 {
+        self.digest_at(U64(self.next_idx), receiver_id, method, args, deposit)
+    }
+
+    /// Digest the client must sign for an `execute` at leaf `idx`
+    /// (`idx >= next_idx`) with the current nonce.
+    pub fn digest_at(
+        &self,
+        idx: U64,
+        receiver_id: AccountId,
+        method: String,
+        args: Base64VecU8,
+        deposit: U128,
+    ) -> Base64VecU8 {
         let mut h = NearSha256::default();
-        let d = execute_digest(&mut h, self.nonce, self.next_idx, &receiver_id, &method, &args.0, deposit.0);
+        let d = execute_digest(&mut h, self.nonce, idx.0, &receiver_id, &method, &args.0, deposit.0);
         Base64VecU8(d.to_vec())
     }
 
@@ -336,5 +366,86 @@ fn wots_arr(v: &[[u8; 32]]) -> [[u8; 32]; LEN] {
 fn check_auth(auth: &[[u8; 32]], height: usize) {
     if auth.len() != height {
         env::panic_str(&format!("auth: expected {height} siblings, got {}", auth.len()));
+    }
+}
+
+// ------------------------------------------------------------------ tests
+
+/// The shared fixture digests bind the EVM chain id and account, so the
+/// signature vectors cannot be replayed through this contract's digest; the
+/// verifier itself is covered by `cchs-core/tests/vectors.rs`. These tests
+/// cover the contract-level index discipline and the index-taking views.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use near_sdk::test_utils::VMContextBuilder;
+    use near_sdk::testing_env;
+
+    fn setup() -> AegisCchs {
+        let ctx = VMContextBuilder::new()
+            .current_account_id("alice.near".parse().unwrap())
+            .predecessor_account_id("relayer.near".parse().unwrap())
+            .build();
+        testing_env!(ctx);
+        AegisCchs::new(Base64VecU8(vec![0x11u8; 32]), Base64VecU8(vec![0x22u8; 32]))
+    }
+
+    fn zero_layer(height: usize) -> LayerSigArg {
+        LayerSigArg { wots: vec![[0u8; 32]; LEN], auth: vec![[0u8; 32]; height] }
+    }
+
+    fn receiver() -> AccountId {
+        "bob.near".parse().unwrap()
+    }
+
+    #[test]
+    fn digest_at_binds_the_index() {
+        let c = setup();
+        let next = c.next_digest(receiver(), "ping".into(), Base64VecU8(vec![1, 2, 3]), U128(5));
+        let at0 = c.digest_at(U64(0), receiver(), "ping".into(), Base64VecU8(vec![1, 2, 3]), U128(5));
+        let at5 = c.digest_at(U64(5), receiver(), "ping".into(), Base64VecU8(vec![1, 2, 3]), U128(5));
+        assert_eq!(next.0, at0.0, "next_digest is digest_at(next_idx)");
+        assert_ne!(at0.0, at5.0, "the leaf index is part of the digest");
+        assert_eq!(at5.0.len(), 32);
+    }
+
+    #[test]
+    fn needs_top_layer_at_reports_uncached_subtrees() {
+        let mut c = setup();
+        assert!(c.needs_top_layer());
+        assert!(c.needs_top_layer_at(U64(5)));
+        assert!(c.needs_top_layer_at(U64(1024)));
+
+        // Register subtree 0 directly in storage.
+        c.cache.insert((0, 0), [0x33u8; 32]);
+        assert!(!c.needs_top_layer());
+        assert!(!c.needs_top_layer_at(U64(5)));
+        assert!(!c.needs_top_layer_at(U64(1023)));
+        assert!(c.needs_top_layer_at(U64(1024)), "subtree 1 is still uncached");
+    }
+
+    #[test]
+    #[should_panic(expected = "index used")]
+    fn index_below_next_idx_is_rejected_before_hashing() {
+        let mut c = setup();
+        c.next_idx = 6;
+        // Deliberately malformed layer: the index check must fire first.
+        let bad = LayerSigArg { wots: vec![], auth: vec![] };
+        let _ = c.execute(5, bad, None, receiver(), "ping".into(), vec![], 0, 5_000_000_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "exhausted")]
+    fn index_at_capacity_is_rejected() {
+        let mut c = setup();
+        let bad = LayerSigArg { wots: vec![], auth: vec![] };
+        let _ = c.execute(1 << 20, bad, None, receiver(), "ping".into(), vec![], 0, 5_000_000_000_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "missing top layer")]
+    fn jump_to_uncached_subtree_without_top_layer_is_rejected() {
+        let mut c = setup();
+        let _ = c.execute(1024, zero_layer(H), None, receiver(), "ping".into(), vec![], 0, 5_000_000_000_000);
     }
 }
