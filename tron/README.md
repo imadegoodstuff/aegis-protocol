@@ -164,7 +164,7 @@ transaction (TRX is forwarded by the factory). Call `deploy` once per
 4. Signing from the wallet: the CCHS client is unchanged; pass TRON's chain id
 (`TRON_CHAIN_IDS` in `tronAccount.ts`) and the TRON account address into the
 digest, then call `execute(...)` through TronLink or TronWeb with a
-`fee_limit` sized from the EVM gas numbers (cached K-20 signature ~177 K gas
+`fee_limit` sized from the EVM gas numbers (cached K-20 signature ~169 K gas
 on the EVM; TVM energy costs match except cheaper `SLOAD`/`CALL`).
 
 ## Open items and risks

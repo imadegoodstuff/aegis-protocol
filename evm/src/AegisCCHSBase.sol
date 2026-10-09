@@ -53,6 +53,7 @@ abstract contract AegisCCHSBase {
 
     // --------------------------------------------------------------- errors
     error Exhausted();
+    error IndexUsed();
     error BadSubtreeRoot();
     error MissingTopLayer();
     error BadTopRoot();
@@ -119,28 +120,78 @@ abstract contract AegisCCHSBase {
     // ============================================================= execute
 
     /// @notice Execute `target.call{value}(data)` authorized by a CCHS signature.
-    /// @param l0     Bottom-layer WOTS+ signature + auth path for leaf `nextIdx`.
-    /// @param hasL1  True if the top-layer proof is included (first use of a subtree).
-    /// @param l1     Top-layer WOTS+ signature on the bottom subtree root + auth path.
+    /// @param idx    Leaf index the signer chose. Must be `>= nextIdx`; indices
+    ///               below `idx` are abandoned forever (`nextIdx` becomes
+    ///               `idx + 1`). Skipping is how a signer leaves behind a leaf
+    ///               whose signature was broadcast but never landed, or an
+    ///               entire subtree whose keys it no longer trusts. Only the
+    ///               signer can skip, because `idx` is bound into the digest.
+    /// @param l0     Bottom-layer WOTS+ signature + auth path for leaf `idx`.
+    /// @dev   Cached path: the subtree of `idx` must already be registered.
+    ///        Carrying only one layer keeps calldata at 2.5 KB; use
+    ///        `executeFirst` for the first operation in a subtree.
     function execute(
         address target,
         uint256 value,
         bytes calldata data,
+        uint64 idx,
+        LayerSig calldata l0
+    ) external returns (bytes memory result) {
+        bytes32 m = _begin(idx, target, value, data);
+        bytes32 r0 = _layerRoot(0, idx >> H, uint32(idx & (LEAVES - 1)), m, l0);
+        bytes32 cached = cachedRoot[_cacheKey(idx >> H)];
+        if (cached == bytes32(0)) revert MissingTopLayer();
+        if (cached != r0) revert BadSubtreeRoot();
+        return _finish(idx, target, value, data);
+    }
+
+    /// @notice `execute` with the top-layer proof for the subtree of `idx`.
+    ///         Registers the subtree root (once) and runs the call. If the
+    ///         subtree is already registered the proof is ignored, so a
+    ///         transaction prepared before another registration landed still
+    ///         succeeds.
+    /// @param l1     Top-layer WOTS+ signature on the bottom subtree root + auth path.
+    function executeFirst(
+        address target,
+        uint256 value,
+        bytes calldata data,
+        uint64 idx,
         LayerSig calldata l0,
-        bool hasL1,
         LayerSig calldata l1
     ) external returns (bytes memory result) {
-        uint64 idx = nextIdx;
+        bytes32 m = _begin(idx, target, value, data);
+        uint64 treeIdx = idx >> H;
+        bytes32 r0 = _layerRoot(0, treeIdx, uint32(idx & (LEAVES - 1)), m, l0);
+        uint256 key = _cacheKey(treeIdx);
+        bytes32 cached = cachedRoot[key];
+        if (cached != bytes32(0)) {
+            if (cached != r0) revert BadSubtreeRoot();
+        } else {
+            // Top layer: tree 0, leaf = treeIdx, message = r0.
+            if (_layerRoot(1, 0, uint32(treeIdx), r0, l1) != root) revert BadTopRoot();
+            cachedRoot[key] = r0;
+            emit SubtreeCached(epoch, treeIdx, r0);
+        }
+        return _finish(idx, target, value, data);
+    }
+
+    /// @dev Index discipline shared by both entry points, then the digest.
+    function _begin(uint64 idx, address target, uint256 value, bytes calldata data)
+        internal view returns (bytes32)
+    {
+        if (idx < nextIdx) revert IndexUsed();
         if (idx >= (1 << (2 * H))) revert Exhausted();
+        return _digest(idx, target, value, data);
+    }
 
-        bytes32 m = _digest(idx, target, value, data);
-        _verifyAndCache(idx, m, l0, hasL1, l1);
-
+    /// @dev State update (effects) then the call (interaction).
+    function _finish(uint64 idx, address target, uint256 value, bytes calldata data)
+        internal returns (bytes memory result)
+    {
         unchecked {
             nextIdx = idx + 1;
             nonce  += 1;
         }
-
         bool ok;
         (ok, result) = target.call{value: value}(data);
         if (!ok) revert CallFailed();
@@ -211,29 +262,9 @@ abstract contract AegisCCHSBase {
         );
     }
 
-    /// @dev Layer-0 verification, then either cache equality or full top-layer
-    ///      verification with cache write. Reverts on any mismatch.
-    function _verifyAndCache(
-        uint64 idx,
-        bytes32 m,
-        LayerSig calldata l0,
-        bool hasL1,
-        LayerSig calldata l1
-    ) internal {
-        uint64 treeIdx = idx >> H;
-        bytes32 r0 = _layerRoot(0, treeIdx, uint32(idx & (LEAVES - 1)), m, l0);
-
-        uint256 key = (uint256(epoch) << 64) | treeIdx;
-        bytes32 cached = cachedRoot[key];
-        if (cached != bytes32(0)) {
-            if (cached != r0) revert BadSubtreeRoot();
-            return;
-        }
-        if (!hasL1) revert MissingTopLayer();
-        // Top layer: tree 0, leaf = treeIdx, message = r0.
-        if (_layerRoot(1, 0, uint32(treeIdx), r0, l1) != root) revert BadTopRoot();
-        cachedRoot[key] = r0;
-        emit SubtreeCached(epoch, treeIdx, r0);
+    /// @dev `cachedRoot` key: (epoch << 64) | bottomTreeIdx.
+    function _cacheKey(uint64 treeIdx) internal view returns (uint256) {
+        return (uint256(epoch) << 64) | treeIdx;
     }
 
     /// @dev Recompute the root of tree (`layer`, `treeIdx`) from a WOTS+
@@ -291,15 +322,28 @@ abstract contract AegisCCHSBase {
 
     // ============================================================== views
 
-    /// @notice Digest the client must sign for the next `execute`.
+    /// @notice Digest the client must sign for an `execute` at leaf `idx`
+    ///         (`idx >= nextIdx`) with the current nonce.
+    function digestAt(uint64 idx, address target, uint256 value, bytes calldata data)
+        external view returns (bytes32)
+    {
+        return _digest(idx, target, value, data);
+    }
+
+    /// @notice Digest for an `execute` at `nextIdx`.
     function nextDigest(address target, uint256 value, bytes calldata data)
         external view returns (bytes32)
     {
         return _digest(nextIdx, target, value, data);
     }
 
-    /// @notice Whether the next `execute` must include the top-layer proof.
+    /// @notice Whether an `execute` at leaf `idx` must include the top-layer proof.
+    function needsTopLayerAt(uint64 idx) public view returns (bool) {
+        return cachedRoot[_cacheKey(idx >> H)] == bytes32(0);
+    }
+
+    /// @notice Whether an `execute` at `nextIdx` must include the top-layer proof.
     function needsTopLayer() external view returns (bool) {
-        return cachedRoot[(uint256(epoch) << 64) | (nextIdx >> H)] == bytes32(0);
+        return needsTopLayerAt(nextIdx);
     }
 }

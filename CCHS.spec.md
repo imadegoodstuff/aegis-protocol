@@ -120,10 +120,11 @@ All secret material is derived lazily from `master`. Client stores 32 bytes.
 
 ## 4. Signing
 
-Inputs: `master`, chain-read `nextIdx` and `nonce`, transaction `(target, value, data)`.
+Inputs: `master`, chain-read `nextIdx` and `nonce`, the device's own record of the highest index it has signed (`signedMax`, §4.3), transaction `(target, value, data)`.
 
 ```
-idx     = nextIdx
+idx     = max(nextIdx, signedMax + 1)   # signer-chosen, monotonic (§4.3)
+record signedMax = idx                  # write-ahead, before any hashing
 t_0     = idx >> h              # bottom tree index
 j_0     = idx & (2^h - 1)       # leaf within bottom tree
 j_1     = t_0                   # top-layer leaf that signs bottom tree t_0
@@ -170,32 +171,51 @@ WOTS_sign(layer, t, j, msg):
 
 Pure-JS SHA-256 runs at roughly 4–5 µs per call; a WASM or native implementation is 20–100× faster, so the seconds above become tens to hundreds of milliseconds. In the wallet these run in a Web Worker (`deriveWorker.ts`) and the bottom/top trees are kept in worker memory as a pure optimization — losing them costs a rebuild, not funds. The one-time cost is comparable to the SPHINCS+ keygen the wallet already performs.
 
+### 4.3 Index discipline and concurrency
+
+A WOTS+ key signs one message. Two signatures under the same leaf on different messages let an adversary forge any message whose digits are, chain by chain, no smaller than the minimum of the two (checksum chains included); a handful of such pairs exposes the key completely. The verifier enforces one *landed* signature per leaf (`idx ≥ nextIdx`), but it cannot see a signature that was produced and never landed. Index discipline is therefore a client obligation, and the protocol is shaped so that obeying it is cheap:
+
+1. **The signer chooses `idx`.** Any `idx ≥ nextIdx` is accepted; `nextIdx` becomes `idx + 1` and every lower leaf is abandoned forever. `idx` is bound into `M`, so only the key holder can skip and nobody can force a skip on them. There is no separate `skipSubtree` operation: a signer that no longer trusts the keys of its current subtree signs its next operation at the first leaf of the following subtree (with that subtree's top layer), and the distrusted subtree is behind `nextIdx`.
+2. **Write-ahead record.** The device stores the highest index it has signed per `(chainId, account)` *before* producing the signature. Next index = `max(nextIdx, signedMax + 1)`. A transaction that is dropped, replaced, under-priced, or reverted for an unrelated reason leaves its leaf unused on chain, and the client never signs that leaf again: it is abandoned and the next operation uses a higher one. Re-signing the same leaf for a changed call (new target, amount, or gas) is exactly the two-messages case and is never done.
+3. **Pending operations.** `nonce` is also bound into `M`, so two operations prepared from the same chain state cannot both land. A client with one operation in flight waits for it to settle or be dropped before signing the next; a dropped operation does not advance `nonce`, so the next signature reuses the nonce but, by rule 2, a fresh leaf.
+4. **Several devices.** Devices sharing a master each keep their own `signedMax`; they are safe only if they never sign the same leaf. The reference wallet is single-signer. A multi-device deployment partitions the index space (device *d* uses subtrees ≡ *d* mod *n*, which rule 1 permits) or routes signing through one device. A device that has lost its record must wait for in-flight transactions to settle before signing and takes `nextIdx` as its lower bound; anything it signed that never landed could then be re-signed, which is why the record is written to persistent storage before the first hash.
+5. **Capacity.** Abandoned leaves cost capacity, not security: 2^20 leaves at one operation per minute last about two years even if every other leaf is abandoned. Recovery (§8) opens a fresh index space under a new root.
+
+Rule 1 also settles two races: a transaction prepared with a top layer still succeeds if someone else registered the subtree in the meantime (`executeFirst` ignores a redundant proof), and a cached-path transaction prepared before a recovery fails cleanly (new epoch, empty cache) rather than being replayable.
+
 ---
 
 ## 5. Verification (on-chain)
 
-```
-verify(target, value, data, sig_0, auth_0, [sig_1, auth_1]):
-    idx = nextIdx
-    t_0 = idx >> h ; j_0 = idx & (2^h-1)
+Two entry points share the verification; they differ only in whether the top layer is present, so a cached-path transaction carries one layer of calldata.
 
+```
+execute(target, value, data, idx, sig_0, auth_0):          # cached subtree
+    require idx ≥ nextIdx                                   # IndexUsed
+    t_0 = idx >> h ; j_0 = idx & (2^h-1)
     M    = H("AEGIS_CCHS_V1" ‖ chainId ‖ this ‖ nonce ‖ idx ‖ target ‖ value ‖ keccak256(data))
     pk_0 = WOTS_pk_from_sig(0, t_0, j_0, M, sig_0)
     R_0  = MerkleRootFromPath(T_leaf(…, pk_0), j_0, auth_0)
+    require cachedRoot[epoch, t_0] ≠ 0                      # MissingTopLayer
+    require cachedRoot[epoch, t_0] == R_0                   # BadSubtreeRoot
+    finish(idx)
 
-    cached = cachedRoot[t_0]
-    if cached != 0:
-        require R_0 == cached
+executeFirst(target, value, data, idx, sig_0, auth_0, sig_1, auth_1):
+    … as above through R_0 …
+    if cachedRoot[epoch, t_0] ≠ 0:
+        require cachedRoot[epoch, t_0] == R_0               # redundant proof: ignored
     else:
-        require sig_1 present
         pk_1 = WOTS_pk_from_sig(1, 0, t_0, R_0, sig_1)
         R_1  = MerkleRootFromPath(T_leaf(…, pk_1), t_0, auth_1)
-        require R_1 == root
-        cachedRoot[t_0] = R_0
+        require R_1 == root                                 # BadTopRoot
+        cachedRoot[epoch, t_0] = R_0
 
-    nextIdx += 1 ; nonce += 1
-    call target
+finish(idx):
+    nextIdx = idx + 1 ; nonce += 1                          # effects
+    call target                                             # interaction
 ```
+
+`digestAt(idx, …)` and `needsTopLayerAt(idx)` are the views the client checks before signing; `nextDigest` / `needsTopLayer` are the same at `idx = nextIdx`.
 
 ### 5.1 WOTS_pk_from_sig
 
@@ -212,15 +232,17 @@ WOTS_pk_from_sig(layer, t, j, msg, sig):
 
 ### 5.2 Gas (EVM) — measured
 
-Measured on `evm/src/AegisCCHS.sol` (S-20, SHA-256 precompile from assembly) and `evm/src/AegisCCHSK.sol` (K-20, keccak256 opcode) with the deployed build settings (solc 0.8.37, optimizer 1 000 000 runs, viaIR, Cancun, no metadata — `deploy/deploy-cchs.mjs --build`), the TypeScript client producing the signatures. Execution gas excludes the 21 K intrinsic and calldata (2 464 B ≈ 40 K cached, 4 928 B ≈ 80 K first-in-subtree, at 16 gas/byte; EIP-7623 raises this for calldata-dominated transactions).
+Measured on `evm/src/AegisCCHS.sol` (S-20, SHA-256 precompile from assembly) and `evm/src/AegisCCHSK.sol` (K-20, keccak256 opcode) with the deployed build settings (solc 0.8.37, optimizer 1 000 000 runs, viaIR, Cancun, no metadata — `deploy/deploy-cchs.mjs --build`), the TypeScript client producing the signatures and the whole transaction ABI-encoded. *Total* = 21 000 intrinsic + calldata (measured bytes; 16 gas per non-zero byte, 4 per zero byte; hash output is essentially all non-zero) + execution.
 
-| Case | S-20 execution | S-20 total | K-20 execution | K-20 total |
-|---|---|---|---|---|
-| Cached subtree | ~209 K | **~270 K** | ~116 K | **~177 K** |
-| New subtree (first of 1024) | ~452 K | ~553 K | ~249 K | ~350 K |
-| Recovery | ~201 K | ~260 K | ~107 K | ~166 K |
-| Account deploy via factory | ~1 328 K | — | ~1 306 K | — |
-| Runtime code | 6 184 B | | 6 072 B | |
+| Case | Calldata | S-20 execution | S-20 total | K-20 execution | K-20 total |
+|---|---|---|---|---|---|
+| Cached subtree (`execute`) | 2 628 B ≈ 40.2 K | ~209 K | **~270 K** | ~108 K | **~169 K** |
+| New subtree (`executeFirst`, first of 1024) | 5 092 B ≈ 79.5 K | ~457 K | ~557 K | ~252 K | ~353 K |
+| Recovery | 2 436 B ≈ 39 K | ~201 K | ~261 K | ~117 K | ~177 K |
+| Account deploy via factory | — | ~1 457 K | — | ~1 435 K | — |
+| Runtime code | | 6 756 B | | 6 644 B | |
+
+Calldata is about a quarter of the cached-path total and is irreducible for a hash-based signature (2 464 B of chain values and path). EIP-7623 (Pectra) prices calldata at a floor of 10 gas per token when execution is small; execution exceeds the floor on every path here, so the floor never binds. Against ECDSA (65 B, ≈ 24 K for a plain transfer) a cached K-20 operation costs about 7× in gas and 40× in bytes. The design optimizes the amortized cost of a hash-based signature; it does not remove that gap, and for high-frequency or very small payments an ECDSA daily path with CCHS as the recovery root (§8, hybrid) is the right configuration.
 
 The account also implements the ERC-721 and ERC-1155 receiver callbacks and ERC-165, so any asset can be sent to it with a safe transfer; those four pure functions account for ~0.9 KB of the runtime. (Without them: 5 296 B / 5 184 B, S-20 cached ~232 K, K-20 cached ~118 K. With optimizer 200 runs and no viaIR the code is 3 831 B / 3 666 B and K-20 cached execution is ~128 K; the deployed build trades code size for ~10 K gas per signature.)
 
@@ -296,12 +318,20 @@ Sketch. Writing requires a WOTS+ signature under top key `(1, 0, t_0)` on the wr
 
 Sketch. `cachedRoot[t_0] = R_0` was written only after `R_1 == root` was checked with a valid `sig_1` on `R_0`. The cached branch then requires `MerkleRootFromPath(leaf_0, j_0, auth_0) == R_0`, which is exactly the condition the full path would have imposed on layer 0. The layer-1 condition is a pure function of `(R_0, sig_1, auth_1, root)` — already checked, and unchanged.
 
+**C5 — One landed signature per leaf, and signer-controlled skipping.** For every `(epoch, idx)` at most one `execute`/`executeFirst` succeeds, and `nextIdx` only moves to a value the key holder signed.
+
+Sketch. Both entry points require `idx ≥ nextIdx` and set `nextIdx = idx + 1` before the external call, so a second acceptance at the same `idx` is impossible and a lower `idx` is rejected without hashing. `idx` is an input to `M`, so a signature at `idx` is not valid at `idx' ≠ idx` (C1); A cannot therefore move `nextIdx` anywhere the owner did not sign. Recovery resets `nextIdx` under a new `epoch`, and the cache key includes `epoch`, so pre-recovery signatures are not accepted afterwards (their `(layer, t_0, j_0)` keys live under the old `root`; C3). What C5 does not cover is a signature the owner produced that never landed: the chain cannot see it, and §4.3 places that obligation on the client.
+
+**State machine.** The account's authorization state is `(root, recRoot, epoch, nextIdx, nonce, recNonce, cachedRoot)`. `model/cchs-state.mjs` explores every reachable state of an abstracted model (`h = 1`, two subtrees, one recovery, up to six owner signatures; the hash is replaced by "the recomputed root is right exactly when the inputs are the ones signed") under an adversary that may submit any signature it has seen at any index, target or entry point, in any order, and may forge freely with the bottom keys of any subtree that is entirely behind `nextIdx`. C3, C4, C5 and non-forgeability are checked on every one of ~10⁷ submissions, and four deliberately broken verifiers (no index check, cache key without epoch, index not in the digest, top layer not bound to `R_0`) are each caught. It runs in CI. It is a bounded model check of the transition logic, not a proof about the hash function.
+
 ### 6.3 Not covered
 
 - Side channels on client key derivation.
 - Chain-level failures (reorg past finality, consensus bugs).
 - Loss of `master`. See §8 recovery.
-- Formal machine-checked proof. The sketches above reduce to Hülsing 2013 + standard Merkle arguments; a Lean/EasyCrypt formalization is future work.
+- Signatures produced by the client that never landed (§4.3); the chain cannot observe them.
+- Formal machine-checked proof. The sketches above reduce to Hülsing 2013 + standard Merkle arguments; a Lean/EasyCrypt formalization is future work, and the model check above is bounded.
+- External audit. None has been performed.
 
 ---
 
@@ -365,7 +395,7 @@ Hybrid deployments (`AegisAccountV3`) may keep ECDSA as the daily path and use C
 | Name | Hash | d | h | Capacity | Sig (amortized) | Use |
 |---|---|---|---|---|---|---|
 | `CCHS-S-20` | SHA-256 | 2 | 10 | 2^20 | 2.5 KB | canonical; every non-EVM port; EVM when cross-chain byte identity is wanted |
-| `CCHS-K-20` | keccak256 | 2 | 10 | 2^20 | 2.5 KB | EVM default; ~177 K total gas cached |
+| `CCHS-K-20` | keccak256 | 2 | 10 | 2^20 | 2.5 KB | EVM default; ~169 K total gas cached |
 | `CCHS-C-20` | SHA-256/24, w = 256 | 2 | 10 | 2^20 | 864 B | packet-limited chains (Solana); cache fill is its own transaction (§5.5) |
 | `CCHS-S-30` | SHA-256 | 3 | 10 | 2^30 | 2.5 KB | institutional; not yet implemented |
 
@@ -375,22 +405,22 @@ Key derivation (HKDF-SHA256 from the 32-byte master) is identical for S-20 and K
 
 ## 10. Reference implementations
 
-- `evm/src/AegisCCHSBase.sol` — hash-agnostic account logic (execute, recover, cache, digests).
-- `evm/src/AegisCCHS.sol` — `CCHS-S-20`, SHA-256 precompile from assembly. 6 184 B runtime (deployed build).
-- `evm/src/AegisCCHSK.sol` — `CCHS-K-20`, keccak256 opcode. 6 072 B runtime (deployed build).
-- `evm/src/AegisCCHSFactory.sol` — CREATE2 factory for both sets. `deploy` is payable and forwards ETH; `deployAndMove` also pulls approved ERC-20s, so creating and funding an account is one transaction. The factory itself is published through the deterministic-deployment proxy (`deploy/deploy-cchs.mjs`, or the wallet's first Protect on a chain where it is missing; the sender does not matter), giving it the address `0x7d8eAF44A413bb72bB409fbCb5E51aFe4b2Ef22a` on every EVM chain where it has been deployed; the wallet artifact (`wallet/src/aegis/cchsArtifacts.json`) carries the exact init code so account addresses can be predicted offline.
-- `evm/test/AegisCCHS.t.sol` — Foundry suites for S-20 and K-20 (front-run by target and by value, replay, tampered chain value, tampered auth path, wrong top layer, cache poisoning, recovery, recovery replay, old key after rotation) plus factory tests (prediction, idempotence, chain independence, ETH forwarding, ERC-20 pull, missing approval). Driven by client-generated vectors.
-- `evm/test/fixtures/cchs-s-20.json`, `cchs-k-20.json` — test vectors (master `0x07…07`, chainId 1, account `0x…cc45`): roots, bottom root 0, three operations (first-in-subtree with top layer, two cached), one recovery. The S-20 file is the ground truth for every non-EVM port in §7.
+- `evm/src/AegisCCHSBase.sol` — hash-agnostic account logic (`execute`, `executeFirst`, `recover`, cache, digests, signer-chosen monotonic index).
+- `evm/src/AegisCCHS.sol` — `CCHS-S-20`, SHA-256 precompile from assembly. 6 756 B runtime (deployed build).
+- `evm/src/AegisCCHSK.sol` — `CCHS-K-20`, keccak256 opcode. 6 644 B runtime (deployed build).
+- `evm/src/AegisCCHSFactory.sol` — CREATE2 factory for both sets. `deploy` is payable and forwards ETH; `deployAndMove` also pulls approved ERC-20s, so creating and funding an account is one transaction. The factory itself is published through the deterministic-deployment proxy (`deploy/deploy-cchs.mjs`, or the wallet's first Protect on a chain where it is missing; the sender does not matter), giving it the address `0xAa6175251D4097f2927126202F04cca4151d0611` on every EVM chain where it has been deployed; the wallet artifact (`wallet/src/aegis/cchsArtifacts.json`) carries the exact init code so account addresses can be predicted offline.
+- `evm/test/AegisCCHS.t.sol` — Foundry suites for S-20 and K-20 (front-run by target and by value, replay, tampered chain value, tampered auth path, wrong top layer, cache poisoning, recovery, recovery replay, old key after rotation, skip within and across subtrees, redundant top layer on a registered subtree, jump to a fresh subtree without top layer, signature bound to its index, backward index after a skip) plus factory tests (prediction, idempotence, chain independence, ETH forwarding, ERC-20 pull, missing approval). Driven by client-generated vectors.
+- `evm/test/fixtures/cchs-s-20.json`, `cchs-k-20.json` — test vectors (master `0x07…07`, chainId 1, account `0x…cc45`): roots, bottom roots 0 and 1, three sequential operations (first-in-subtree with top layer, two cached), a `skip` sequence (index 5 cached, then index 1024 with top layer), one recovery. The S-20 file is the ground truth for every non-EVM port in §7.
 - `wallet/src/aegis/cchs.ts` — TypeScript client, S-20 and K-20 (`cchsS`, `cchsK`, `forVariant`): keygen, sign, local verify, digest construction, ABI helpers, range-based leaf generation for parallel keygen.
 - `wallet/src/aegis/cchsCompact.ts` — `CCHS-C-20` client (`cchsC`): keygen, sign, `topLayer` for the split cache fill, `bottomRootOf` / `verifyTopLayer` mirroring the two on-chain operations, recovery, digests with chain tags. `evm/test/fixtures/cchs-c-20.json` is its vector file (master `0x07…07`, tag `solana`).
 
-**Interop verified** (2026-10-08): for both sets, signatures produced by `cchs.ts` were executed against the compiled contracts in an EVM (`@ethereumjs/vm`, Cancun), with accounts created through the factory (predicted address = deployed address, idempotent). First-in-subtree, cached, front-run to a different target, tampered chain value, recovery rotation, and post-rotation rejection of the old key all behaved as specified. Client digests matched `nextDigest()` byte-for-byte.
+**Interop verified** (2026-10-08): for both sets, signatures produced by `cchs.ts` were executed against the compiled contracts in an EVM (`@ethereumjs/vm`, Cancun), with accounts created through the factory (predicted address = deployed address, idempotent). First-in-subtree, cached, front-run to a different target, tampered chain value, recovery rotation, post-rotation rejection of the old key, skipping leaves within a subtree, jumping to a fresh subtree with the top layer and continuing on its cached path, and rejection of index reuse, backward index and cross-subtree jump without top layer all behaved as specified. Client digests matched `digestAt()` byte-for-byte; the gas and calldata figures in §5.2 come from this run.
 
 ---
 
 ## 11. Open problems
 
-1. **Out-of-order leaf use.** Sequential `nextIdx` forbids skipping a subtree whose bottom keys may have leaked. A `skipSubtree` operation authorized by a layer-1 signature is straightforward but not in v1.
+1. **Concurrent signers.** The signer-chosen index (§4.3) lets several devices partition the index space, but the reference wallet is single-signer and there is no protocol-level coordination between devices sharing a master.
 2. **Cache eviction.** `cachedRoot` grows by one slot per 1024 signatures. Negligible, but a recovery epoch counter is used so old entries are logically cleared without gas-costly deletion.
 3. **Formal verification.** Reduce §6 sketches to a machine-checked proof.
 4. **Bitcoin.** Nothing binds a hash-based witness to a transaction under current consensus (§7.1); the open problem is the opcode, not the scheme. Once it exists, option (a) forgoes caching and (b) recovers it through UTXO lineage.

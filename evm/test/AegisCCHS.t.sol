@@ -63,7 +63,15 @@ abstract contract CCHSVectorTest is Test {
 
     function _exec(uint256 i) internal {
         (AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) = _op(i);
-        a.execute(target, value, "", l0, hasL1, l1);
+        if (hasL1) a.executeFirst(target, value, "", uint64(i), l0, l1); else a.execute(target, value, "", uint64(i), l0);
+    }
+
+    function _skipOp(uint256 i) internal view returns (uint64 idx, AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) {
+        string memory p = string.concat(".skip.ops[", vm.toString(i), "]");
+        idx = uint64(vm.parseJsonUint(json, string.concat(p, ".idx")));
+        l0 = _layer(string.concat(p, ".l0"));
+        hasL1 = vm.keyExistsJson(json, string.concat(p, ".l1.wots"));
+        if (hasL1) l1 = _layer(string.concat(p, ".l1"));
     }
 
     // ---------------------------------------------------------- vectors
@@ -89,7 +97,7 @@ abstract contract CCHSVectorTest is Test {
         (AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) = _op(1);
         assertFalse(hasL1);
         uint256 g = gasleft();
-        a.execute(target, value, "", l0, hasL1, l1);
+        a.execute(target, value, "", 1, l0);
         emit log_named_uint("cached-path execution gas", g - gasleft());
         _exec(2);
         assertEq(target.balance, 3 * value);
@@ -99,7 +107,7 @@ abstract contract CCHSVectorTest is Test {
     function test_firstSigGas() public {
         (AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) = _op(0);
         uint256 g = gasleft();
-        a.execute(target, value, "", l0, hasL1, l1);
+        a.executeFirst(target, value, "", 0, l0, l1);
         emit log_named_uint("first-in-subtree execution gas", g - gasleft());
     }
 
@@ -108,7 +116,7 @@ abstract contract CCHSVectorTest is Test {
     function test_revert_missingTopLayerOnFreshSubtree() public {
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
         vm.expectRevert(AegisCCHSBase.MissingTopLayer.selector);
-        a.execute(target, value, "", l0, false, empty);
+        a.execute(target, value, "", 1, l0);
     }
 
     /// Mempool front-run: a valid signature replayed with a different target.
@@ -116,22 +124,86 @@ abstract contract CCHSVectorTest is Test {
         _exec(0);
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
         vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
-        a.execute(address(0xDEAD), value, "", l0, false, empty);
+        a.execute(address(0xDEAD), value, "", 1, l0);
     }
 
     function test_revert_frontRunDifferentValue() public {
         _exec(0);
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
         vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
-        a.execute(target, value + 1, "", l0, false, empty);
+        a.execute(target, value + 1, "", 1, l0);
     }
 
+    /// Replay at the same index: rejected by the monotonic index check before
+    /// any hashing. Replay at a later index: the digest differs, so the root
+    /// does not match the cache.
     function test_revert_replay() public {
         _exec(0);
         _exec(1);
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
+        vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
+        a.execute(target, value, "", 1, l0);
         vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
-        a.execute(target, value, "", l0, false, empty);
+        a.execute(target, value, "", 2, l0);
+    }
+
+    // ------------------------------------------------- signer-chosen index
+
+    /// Skip leaves 1..4 inside the cached subtree, then jump to subtree 1.
+    function test_skipWithinSubtreeAndAcrossSubtrees() public {
+        _exec(0);
+        (uint64 i5, AegisCCHSBase.LayerSig memory l0, bool hasL1, AegisCCHSBase.LayerSig memory l1) = _skipOp(0);
+        assertEq(i5, 5);
+        assertFalse(hasL1);
+        assertEq(a.digestAt(i5, target, value, ""), vm.parseJsonBytes32(json, ".skip.ops[0].digest"));
+        a.execute(target, value, "", i5, l0);
+        assertEq(a.nextIdx(), 6);
+        assertEq(a.nonce(), 2);
+
+        (uint64 i1024, AegisCCHSBase.LayerSig memory m0, bool h1, AegisCCHSBase.LayerSig memory m1) = _skipOp(1);
+        assertEq(i1024, 1024);
+        assertTrue(h1);
+        assertTrue(a.needsTopLayerAt(i1024));
+        a.executeFirst(target, value, "", i1024, m0, m1);
+        assertEq(a.nextIdx(), 1025);
+        assertEq(a.cachedRoot(1), vm.parseJsonBytes32(json, ".bottomRoot1"));
+        assertEq(target.balance, 3 * value);
+    }
+
+    /// A transaction prepared with the top layer still succeeds if the subtree
+    /// was registered in the meantime: the proof is ignored, not rejected.
+    function test_executeFirstOnRegisteredSubtreeIgnoresProof() public {
+        _exec(0);
+        (AegisCCHSBase.LayerSig memory l0, , ) = _op(1);
+        (, , AegisCCHSBase.LayerSig memory l1) = _op(0);
+        a.executeFirst(target, value, "", 1, l0, l1);
+        assertEq(a.nextIdx(), 2);
+    }
+
+    /// Jumping into a fresh subtree without its top layer is rejected.
+    function test_revert_jumpToFreshSubtreeWithoutTopLayer() public {
+        _exec(0);
+        (uint64 i1024, AegisCCHSBase.LayerSig memory m0, , AegisCCHSBase.LayerSig memory empty) = _skipOp(1);
+        vm.expectRevert(AegisCCHSBase.MissingTopLayer.selector);
+        a.execute(target, value, "", i1024, m0);
+    }
+
+    /// A signature for leaf 5 cannot be used at leaf 6: the index is in the digest.
+    function test_revert_signatureBoundToIndex() public {
+        _exec(0);
+        (, AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _skipOp(0);
+        vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
+        a.execute(target, value, "", 6, l0);
+    }
+
+    /// Abandoned leaves stay abandoned: after the jump to 1024, leaf 5 is below nextIdx.
+    function test_revert_backwardIndexAfterSkip() public {
+        _exec(0);
+        (uint64 i1024, AegisCCHSBase.LayerSig memory m0, , AegisCCHSBase.LayerSig memory m1) = _skipOp(1);
+        a.executeFirst(target, value, "", i1024, m0, m1);
+        (uint64 i5, AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _skipOp(0);
+        vm.expectRevert(AegisCCHSBase.IndexUsed.selector);
+        a.execute(target, value, "", i5, l0);
     }
 
     /// Cache poisoning: genuine top-layer signature paired with a tampered
@@ -140,7 +212,7 @@ abstract contract CCHSVectorTest is Test {
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
         l0.auth[0] = bytes32(uint256(l0.auth[0]) ^ 1);
         vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
-        a.execute(target, value, "", l0, true, l1);
+        a.executeFirst(target, value, "", 0, l0, l1);
         assertEq(a.cachedRoot(0), bytes32(0));
     }
 
@@ -149,14 +221,14 @@ abstract contract CCHSVectorTest is Test {
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory empty) = _op(1);
         l0.wots[7] = bytes32(uint256(l0.wots[7]) ^ 1);
         vm.expectRevert(AegisCCHSBase.BadSubtreeRoot.selector);
-        a.execute(target, value, "", l0, false, empty);
+        a.execute(target, value, "", 1, l0);
     }
 
     function test_revert_wrongTopLayerSig() public {
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
         l1.wots[0] = bytes32(uint256(l1.wots[0]) ^ 1);
         vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
-        a.execute(target, value, "", l0, true, l1);
+        a.executeFirst(target, value, "", 0, l0, l1);
     }
 
     // --------------------------------------------------------- recovery
@@ -187,7 +259,7 @@ abstract contract CCHSVectorTest is Test {
         a.recover(newRoot, newRec, w, p);
         (AegisCCHSBase.LayerSig memory l0, , AegisCCHSBase.LayerSig memory l1) = _op(0);
         vm.expectRevert(AegisCCHSBase.BadTopRoot.selector);
-        a.execute(target, value, "", l0, true, l1);
+        a.executeFirst(target, value, "", 0, l0, l1);
     }
 
     function test_revert_recoverWrongRoots() public {

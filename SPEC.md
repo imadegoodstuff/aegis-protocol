@@ -64,16 +64,22 @@ Specified in `CCHS.spec.md`. Summary of the on-chain interface:
 constructor(bytes32 root, bytes32 recRoot)
 
 function execute(address target, uint256 value, bytes data,
-                 LayerSig l0, bool hasL1, LayerSig l1) returns (bytes)
+                 uint64 idx, LayerSig l0) returns (bytes)                 // subtree cached
+function executeFirst(address target, uint256 value, bytes data,
+                 uint64 idx, LayerSig l0, LayerSig l1) returns (bytes)   // registers the subtree
 function recover(bytes32 newRoot, bytes32 newRecRoot,
                  bytes32[67] wots, bytes32[8] auth)
 
-function nextDigest(address target, uint256 value, bytes data) view returns (bytes32)
+function digestAt(uint64 idx, address target, uint256 value, bytes data) view returns (bytes32)
+function needsTopLayerAt(uint64 idx) view returns (bool)
+function nextDigest(address target, uint256 value, bytes data) view returns (bytes32)  // idx = nextIdx
 function needsTopLayer() view returns (bool)
 
 bytes32 root; bytes32 recRoot; uint64 epoch; uint64 nextIdx; uint64 nonce; uint64 recNonce;
 mapping(uint256 => bytes32) cachedRoot;   // key = (epoch << 64) | bottomTreeIdx
 ```
+
+`idx` is chosen by the signer: any `idx ≥ nextIdx` is accepted and `nextIdx` becomes `idx + 1` (`IndexUsed` otherwise). `executeFirst` on an already registered subtree ignores the redundant top layer.
 
 Two contracts share this interface via `AegisCCHSBase`: `AegisCCHS` (`CCHS-S-20`, SHA-256) and `AegisCCHSK` (`CCHS-K-20`, keccak256, EVM default). Both: w = 16, 67 chains, two layers of height 10, 2^20 signatures, 256 recoveries.
 

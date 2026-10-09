@@ -42,6 +42,34 @@ export function predictAccount(root: Hex, recRoot: Hex, variant: Variant): Addre
   return getContractAddress({ opcode: 'CREATE2', from: FACTORY_ADDRESS, salt, bytecode: initCode });
 }
 
+// ------------------------------------------------------------ index discipline
+//
+// A WOTS+ leaf signs exactly one message. The chain enforces monotonic use
+// (`idx >= nextIdx`), but it cannot see a signature that was produced and
+// never landed. So the client keeps a write-ahead record of the highest index
+// it has signed per (chain, account), and never signs the same index twice:
+// the next signature uses max(nextIdx on chain, highest signed + 1). A leaf
+// whose transaction was dropped is simply abandoned. If this record is lost
+// (new device), wait for any in-flight transaction to settle before signing.
+
+const idxKey = (chainId: number, account: Address) => `aegis/cchs/signed/${chainId}/${account.toLowerCase()}`;
+
+/** Highest leaf index this device has ever signed for the account, or -1. */
+export function highestSignedIndex(chainId: number, account: Address): number {
+  const v = globalThis.localStorage?.getItem(idxKey(chainId, account));
+  return v === null || v === undefined ? -1 : Number(v);
+}
+
+/** Index to sign next: never below the chain's `nextIdx`, never one this device used. */
+export function nextSigningIndex(chainId: number, account: Address, onchainNext: bigint): number {
+  return Math.max(Number(onchainNext), highestSignedIndex(chainId, account) + 1);
+}
+
+/** Record `idx` as used. Call before producing the signature, not after. */
+export function markIndexSigned(chainId: number, account: Address, idx: number): void {
+  if (idx > highestSignedIndex(chainId, account)) globalThis.localStorage?.setItem(idxKey(chainId, account), String(idx));
+}
+
 export interface CchsIdentity {
   master: CchsKey;
   k: { root: Hex; recRoot: Hex; address: Address };

@@ -19,6 +19,20 @@ jobs:
       - run: forge build --sizes
       - run: forge test -vv
 
+  model:
+    name: CCHS state machine (bounded model check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: node model/cchs-state.mjs
+      - name: known bugs must be caught
+        run: |
+          for m in no-index-check cache-without-epoch idx-not-in-digest top-layer-not-bound; do
+            if node model/cchs-state.mjs --mutant=$m; then echo "mutant $m not caught"; exit 1; fi
+          done
+
   core:
     name: Core (Rust)
     runs-on: ubuntu-latest

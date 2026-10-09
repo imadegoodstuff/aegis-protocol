@@ -19,7 +19,7 @@ Hash-based hypertree signatures (XMSS^MT, SPHINCS+) carry the full authenticatio
 | SPHINCS+-128s | ~10^6 hashes | 7.8 KB | stateless | SHA-256 |
 | **CCHS (d=2, h=10)** | **~10^6 hashes** | **2.5 KB** | **stateless (chain-held)** | SHA-256 |
 
-Single transaction, no commit-reveal, no finality wait. Two parameter sets share one account contract: `CCHS-K-20` (keccak256, EVM default) and `CCHS-S-20` (SHA-256, canonical for every other chain). Measured in an EVM: K-20 ~116 K execution gas on the cached path and ~249 K for the first signature in a subtree; S-20 ~209 K / ~452 K. Runtime code 6.1 KB, no external verifier contract. The account holds any asset (ETH, ERC-20, ERC-721, ERC-1155) and spends any of them through one `execute` call. Accounts are created and funded in one transaction through a CREATE2 factory that lives at the same address on every EVM chain, so one key gives the same account address everywhere, and the address is known before anything is deployed. Signatures produced by the TypeScript client were executed against the compiled contracts; front-running, replay, tampering, cache poisoning, and post-recovery use of the old key are all rejected.
+Single transaction, no commit-reveal, no finality wait. Two parameter sets share one account contract: `CCHS-K-20` (keccak256, EVM default) and `CCHS-S-20` (SHA-256, canonical for every other chain). Measured in an EVM, whole transaction (intrinsic + calldata + execution): K-20 ~169 K gas on the cached path (2 628 B calldata) and ~353 K for the first signature in a subtree; S-20 ~270 K / ~557 K. That is about 7× an ECDSA transfer; the cached path is the amortized floor for a hash-based signature, not a way around it. Runtime code 6.6 KB, no external verifier contract. The account holds any asset (ETH, ERC-20, ERC-721, ERC-1155) and spends any of them through one `execute` call (`executeFirst` when the subtree is new). The signer chooses the leaf index (monotonic, bound into the digest), so a dropped transaction never leads to a second signature under the same one-time key. Accounts are created and funded in one transaction through a CREATE2 factory that lives at the same address on every EVM chain, so one key gives the same account address everywhere, and the address is known before anything is deployed. Signatures produced by the TypeScript client were executed against the compiled contracts; front-running, replay, tampering, cache poisoning, and post-recovery use of the old key are all rejected.
 
 Full specification: [`CCHS.spec.md`](CCHS.spec.md).
 
@@ -72,6 +72,7 @@ aegis/
 ├── evm/                  Solidity: AegisCCHS, AegisAccountV2, factories, SPHINCS+ C13 verifier, tests
 ├── wallet/               Vite + React client: CCHS client, 23-chain derivation, Web Worker crypto
 ├── deploy/               Node deployment (solc-js + viem), no Foundry required
+├── model/                bounded model check of the CCHS state machine (runs in CI)
 ├── core/                 Rust core (seed → keys)
 ├── solana/ cosmwasm/ aptos/ sui/ near/ ton/ cairo/ tron/ bitcoin/
 │                         chain adapters
@@ -96,14 +97,17 @@ node deploy-cchs.mjs --status
 AEGIS_DEPLOYER_KEY=0x… node deploy-cchs.mjs sepolia base arbitrum
 ```
 
-The factory is published through the deterministic-deployment proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so it has the address `0x7d8eAF44A413bb72bB409fbCb5E51aFe4b2Ef22a` on every chain where it has been published. Anyone can publish it; the result does not depend on who sends the transaction, and there is no project deployer key. `--status` reports where it is live. The wallet's **Protect** panel predicts the user's account address offline from `wallet/src/aegis/cchsArtifacts.json`, shows live per-chain state, publishes the factory itself as one extra transaction on a chain where it is still missing (the user pays about 2.9 M gas once per chain), and creates + funds the account in one transaction.
+The factory is published through the deterministic-deployment proxy (`0x4e59b44847b379578588920cA78FbF26c0B4956C`) with a fixed salt, so it has the address `0xAa6175251D4097f2927126202F04cca4151d0611` on every chain where it has been published. Anyone can publish it; the result does not depend on who sends the transaction, and there is no project deployer key. `--status` reports where it is live. The wallet's **Protect** panel predicts the user's account address offline from `wallet/src/aegis/cchsArtifacts.json`, shows live per-chain state, publishes the factory itself as one extra transaction on a chain where it is still missing (the user pays about 2.9 M gas once per chain), and creates + funds the account in one transaction.
 
 ## Honest limits
 
 - The underlying primitives (WOTS+, Merkle trees, hypertrees) date from 1979–2015 and are extensively studied. The CCHS contribution is the verifier-side caching architecture and the trade-off point it reaches; it is not a new primitive.
 - Keygen is ~2.3 M hashes (top tree, recovery tree, first subtree). Single-threaded JS: ~3 s. The wallet splits leaves across a Web Worker pool with WASM hash cores (`wallet/src/aegis/cchsPool.ts`): ~0.7 s on a 6-core laptop, byte-identical output. Getting under 100 ms requires running the WOTS+ chain loop inside WASM rather than calling a WASM hash per step; that is the planned use of the Rust `cchs-core` crate compiled to wasm32.
 - Chain consensus security is outside the protocol's scope.
-- Not yet externally audited.
+- No external audit and no machine-checked proof. The security argument is a reduction sketch (CCHS.spec.md §6) plus a bounded model check of the account state machine (`model/cchs-state.mjs`, ~10^7 adversarial submissions, four seeded bugs caught) plus Foundry and cross-language fixture tests. That is evidence, not proof.
+- Signatures are 2.5 KB and ~169 K gas end to end on the cached path; this is the amortized floor for a hash-based signature on an EVM, about 7x an ECDSA transfer. Small or frequent payments belong on the hybrid account (ECDSA daily, CCHS recovery).
+- One-time keys depend on the client never signing two messages under one leaf. The verifier enforces one landed signature per index; the client enforces the rest with a write-ahead record of the highest signed index (CCHS.spec.md §4.3). Multi-device signing requires partitioning the index space and is not coordinated by the protocol.
+- Chain status: EVM contracts are built, tested against client-produced signatures and deployable by anyone; the factory has no mainnet deployment yet. Non-EVM adapters are at the stages listed in ADAPTERS.md; none is live on a mainnet.
 
 ## License
 

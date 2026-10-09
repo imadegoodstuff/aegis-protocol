@@ -21,8 +21,8 @@ import {
 } from "../aegis/wallet";
 import { isValidMnemonic } from "../aegis/derive";
 import { CchsPool } from "../aegis/cchsPool";
-import { deriveCchsIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, type CchsIdentity } from "../aegis/cchsAccount";
-import { cchsK, H, toAbiLayerSig, EMPTY_LAYER_SIG, signatureBytes } from "../aegis/cchs";
+import { deriveCchsIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, type CchsIdentity } from "../aegis/cchsAccount";
+import { cchsK, H, toAbiLayerSig, signatureBytes } from "../aegis/cchs";
 import CopyBtn from "./CopyBtn";
 
 type TokenState = { symbol: string; decimals: number; eoa: bigint; account: bigint; allowance: bigint };
@@ -254,28 +254,32 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [spendTo as Address, parseUnits(spendAmt || "0", ts.decimals)] });
       }
 
-      // 2. Read account state and the contract's own digest.
-      const [nextIdx, nonce, needsTop, onchainDigest] = await Promise.all([
+      // 2. Choose the leaf: never below the chain's nextIdx, never one this device signed before.
+      const [nextIdx, nonce] = await Promise.all([
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nextIdx" }) as Promise<bigint>,
         pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nonce" }) as Promise<bigint>,
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "needsTopLayer" }) as Promise<boolean>,
-        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "nextDigest", args: [target, value, data] }) as Promise<Hex>,
+      ]);
+      const idx = nextSigningIndex(chain.id, account, nextIdx);
+      const [needsTop, onchainDigest] = await Promise.all([
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "needsTopLayerAt", args: [BigInt(idx)] }) as Promise<boolean>,
+        pub.readContract({ address: account, abi: ACCOUNT_ABI, functionName: "digestAt", args: [BigInt(idx), target, value, data] }) as Promise<Hex>,
       ]);
 
       // 3. Compute the digest locally and refuse to sign if the contract disagrees.
       const m = cchsK.executeDigest({
-        chainId: BigInt(chain.id), account: hexToBytes(account), nonce, idx: nextIdx,
+        chainId: BigInt(chain.id), account: hexToBytes(account), nonce, idx: BigInt(idx),
         target: hexToBytes(target), value, dataHash: hexToBytes(keccak256(data)),
       });
       const local = ("0x" + Array.from(m, (b) => b.toString(16).padStart(2, "0")).join("")) as Hex;
       if (local.toLowerCase() !== onchainDigest.toLowerCase()) throw new Error("local digest does not match the contract; refusing to sign");
 
-      // 4. Sign. The bottom tree for this index comes from the worker pool if it is not cached yet.
+      // 4. Sign. The index is recorded as used before the signature exists, so a
+      //    crash between the two can only waste a leaf, never reuse one.
       setSpend({ phase: "signing" });
-      const idx = Number(nextIdx);
       const treeIdx = BigInt(idx >> H);
       const ck = `0/${treeIdx}`;
       if (!id.trees.K.has(ck)) id.trees.K.set(ck, await poolRef.current!.tree(id.master, "K", 0, treeIdx, H));
+      markIndexSigned(chain.id, account, idx);
       const sig = cchsK.sign(id.master, idx, m, !needsTop, id.trees.K);
       // Local verification before anything leaves the device.
       cchsK.verify({ root: hexToBytes(id.k.root), recRoot: hexToBytes(id.k.recRoot) }, idx, m, sig, needsTop ? undefined : id.trees.K.get(ck)!.root);
@@ -284,11 +288,17 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       setSpend({ phase: "confirm", bytes: signatureBytes(sig), layers: sig.l1 ? 2 : 1 });
       const w = await connect(chain);
       const wc = makeWalletClient(chain, w.account);
-      const tx = await wc.writeContract({
-        address: account, abi: ACCOUNT_ABI, functionName: "execute",
-        args: [target, value, data, toAbiLayerSig(sig.l0), !!sig.l1, sig.l1 ? toAbiLayerSig(sig.l1) : EMPTY_LAYER_SIG],
-        chain, account: w.account,
-      });
+      const tx = sig.l1
+        ? await wc.writeContract({
+            address: account, abi: ACCOUNT_ABI, functionName: "executeFirst",
+            args: [target, value, data, BigInt(idx), toAbiLayerSig(sig.l0), toAbiLayerSig(sig.l1)],
+            chain, account: w.account,
+          })
+        : await wc.writeContract({
+            address: account, abi: ACCOUNT_ABI, functionName: "execute",
+            args: [target, value, data, BigInt(idx), toAbiLayerSig(sig.l0)],
+            chain, account: w.account,
+          });
       setSpend({ phase: "pending", tx, bytes: signatureBytes(sig), layers: sig.l1 ? 2 : 1 });
       await pub.waitForTransactionReceipt({ hash: tx });
       setSpend({ phase: "done", tx, bytes: signatureBytes(sig), layers: sig.l1 ? 2 : 1 });
@@ -409,7 +419,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
           <div className="spend">
             <div className="section-eyebrow">Spend · hash-signed execute</div>
             {protectedChains.length === 0 ? (
-              <p className="swap-note">Once an account exists on a chain, this form moves any asset out of it with a CCHS signature: the digest is computed here, cross-checked with the contract's <code>nextDigest</code>, signed, locally verified, then relayed.</p>
+              <p className="swap-note">Once an account exists on a chain, this form moves any asset out of it with a CCHS signature: the digest is computed here, cross-checked with the contract's <code>digestAt</code>, signed, locally verified, then relayed. The leaf index is chosen here (never below the chain's <code>nextIdx</code>, never one this device signed before) and recorded before signing, so a dropped transaction abandons a leaf instead of reusing one.</p>
             ) : (
               <>
                 <div className="spend-grid">

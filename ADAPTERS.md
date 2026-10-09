@@ -58,13 +58,16 @@ Every adapter exposes the following semantics (names vary by language):
 
 ```
 constructor(root, recRoot)
-execute(target, value, data, l0, hasL1, l1)
+execute(target, value, data, idx, l0)              # subtree already cached
+executeFirst(target, value, data, idx, l0, l1)     # registers the subtree; l1 ignored if already cached
 recover(newRoot, newRecRoot, wots, auth)
-nextDigest(target, value, data) → bytes32
-needsTopLayer() → bool
+digestAt(idx, target, value, data) → bytes32
+needsTopLayerAt(idx) → bool
 ```
 
 State: `root`, `recRoot`, `epoch`, `nextIdx`, `nonce`, `recNonce`, `cachedRoot[(epoch, treeIdx)]`.
+
+Index rule, identical on every chain: `idx ≥ nextIdx` is required, `nextIdx` becomes `idx + 1`, lower leaves are abandoned forever. `idx` is part of the digest, so only the key holder can skip. A jump into a subtree that is not cached needs the top layer (`executeFirst`); the same index can never be accepted twice (CCHS.spec.md §4.3, §6 C5). Adapters that still take `idx = nextIdx` implicitly are listed with their status below.
 
 Solana (CCHS-C-20) splits `execute` in two because of the packet limit: `cache_subtree(treeIdx, l1, r0)` fills `cachedRoot` and `execute(l0, ixData)` only ever carries the bottom layer. The state and the acceptance condition are the same; see `solana/README.md`.
 
