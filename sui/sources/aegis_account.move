@@ -670,6 +670,16 @@ module aegis::aegis_account {
     #[test_only]
     const TEST_REC_ROOT: vector<u8> = x"e4a62032a86107a4a4fb6bc5da99e18964a44c3f4a1d52d434751d37d6b597fd";
 
+    #[test_only]
+    const TEST_LEAF_L0_T0_0: vector<u8> = x"4ca392961a2a5bdc1bcbbb2afad8987a03fa6c3e0308524586bf69525c57daa3";
+    #[test_only]
+    const TEST_LEAF_L0_T0_1: vector<u8> = x"27715fda3382c6825d166f4e5b2da44389633f81c682f0233e49a070a527897e";
+
+    #[test]
+    fun test_precomputed_leaves() {
+        assert!(test_leaf(0, 0, 0) == TEST_LEAF_L0_T0_0, 0);
+        assert!(test_leaf(0, 0, 1) == TEST_LEAF_L0_T0_1, 1);
+    }
     #[test]
     fun test_precomputed_root_l0() { assert!(test_root(0, 0, 0, H, false) == TEST_ROOT_L0, 0); }
     #[test]
@@ -733,7 +743,11 @@ module aegis::aegis_account {
         while (k < height) {
             let node_idx = (leaf_idx >> (k as u8)) ^ 1;
             let sib = if (k == 0 && real_sibling) {
-                test_leaf(layer, tree_idx, node_idx)
+                // Leaves 0 and 1 of bottom tree 0 are precomputed (verified by
+                // test_precomputed_leaves); anything else is built here.
+                if (layer == 0 && tree_idx == 0 && node_idx == 0) TEST_LEAF_L0_T0_0
+                else if (layer == 0 && tree_idx == 0 && node_idx == 1) TEST_LEAF_L0_T0_1
+                else test_leaf(layer, tree_idx, node_idx)
             } else {
                 let mut buf = b"AEGIS_TEST_NODE";
                 vector::push_back(&mut buf, layer);
