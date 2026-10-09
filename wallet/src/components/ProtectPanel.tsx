@@ -24,8 +24,29 @@ import { CchsPool } from "../aegis/cchsPool";
 import { cchsMaster, deriveChainIdentity, type ChainIdentity, ACCOUNT_ABI, FACTORY_ABI, FACTORY_ADDRESS, DETERMINISTIC_PROXY, FACTORY_PUBLISH_DATA, nextSigningIndex, markIndexSigned, recordMissing, epochKey, deviceLane, setDeviceLane, laneFirst, LANES, highestRecoverySigned, markRecoverySigned, type CchsIdentity } from "../aegis/cchsAccount";
 import { cchsK, H, toAbiLayerSig, signatureBytes, toHex, type CchsKey, type Tree } from "../aegis/cchs";
 import CopyBtn from "./CopyBtn";
+import { RWA_TOKENS, rwaOnChain, rwaByAddress, gateText, type RwaToken } from "../data/rwa";
 
-type TokenState = { symbol: string; decimals: number; eoa: bigint; account: bigint; allowance: bigint };
+type TokenState = {
+  symbol: string; decimals: number; eoa: bigint; account: bigint; allowance: bigint;
+  rwa?: RwaToken;
+  /** Result of simulating `transfer(aegisAccount, …)` from the connected wallet: would the token accept the account as a holder? */
+  accepts?: "yes" | "no" | "unknown"; acceptsMsg?: string;
+};
+
+/** Reason string of a simulated call, trimmed to what the user needs. */
+function revertReason(e: unknown): string {
+  const err = e as { shortMessage?: string; details?: string; message?: string };
+  const s = err.details || err.shortMessage || err.message || "reverted";
+  return s.replace(/\s+/g, " ").slice(0, 160);
+}
+
+/** True when a failed `eth_call` failed in transport or at the node, not in the contract: nothing can be concluded about the token. */
+function isTransportError(e: unknown): boolean {
+  const names = new Set(["HttpRequestError", "TimeoutError", "InternalRpcError", "LimitExceededRpcError", "ResourceUnavailableRpcError", "RpcRequestError"]);
+  const walk = (e as { walk?: (fn: (err: unknown) => boolean) => unknown }).walk;
+  if (typeof walk === "function") return !!walk.call(e, (err) => names.has((err as { name?: string }).name ?? ""));
+  return names.has((e as { name?: string }).name ?? "");
+}
 
 type ChainState = {
   factory: "unknown" | "absent" | "present";
@@ -88,7 +109,15 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
   const [lane, setLane] = useState(() => deviceLane());
   const [spend, setSpend] = useState<SpendState>({ phase: "idle" });
 
-  const tokens = useMemo(() => parseTokens(tokenText), [tokenText]);
+  const [withRwa, setWithRwa] = useState(true);
+  const listed = useMemo(() => parseTokens(tokenText), [tokenText]);
+  /** Tokens to read and move on one chain: the ones listed by address plus, when enabled, the known RWA tokens issued there. */
+  const tokensFor = (chainId: number): Address[] => {
+    if (!withRwa) return listed;
+    const out = [...listed];
+    for (const { address } of rwaOnChain(chainId)) if (!out.some((a) => a.toLowerCase() === address.toLowerCase())) out.push(address);
+    return out;
+  };
 
   useEffect(() => {
     poolRef.current = new CchsPool();
@@ -132,6 +161,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
     for (const chain of PROTECT_CHAINS) {
       const addr = id.evm.get(chain.id)?.address;
       if (!addr) continue;
+      const tokens = tokensFor(chain.id);
       const sig = `${chain.id}:${addr}:${refresh}:${eoa ?? ''}:${tokens.join(',')}`;
       if (fetched.current.has(sig)) continue;
       fetched.current.add(sig);
@@ -154,7 +184,21 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                 eoa ? pub.readContract({ address: t, abi: erc20Abi, functionName: "balanceOf", args: [eoa] }) : Promise.resolve(0n),
                 eoa ? pub.readContract({ address: t, abi: erc20Abi, functionName: "allowance", args: [eoa, FACTORY_ADDRESS] }) : Promise.resolve(0n),
               ]);
-              toks[t] = { symbol, decimals, account: accountBal, eoa: eoaBal, allowance };
+              const ts: TokenState = { symbol, decimals, account: accountBal, eoa: eoaBal, allowance, rwa: rwaByAddress(chain.id, t) };
+              // Gated tokens refuse recipients their issuer has not registered. Ask the
+              // token itself, from the connected wallet's point of view, before anything
+              // is approved or moved: a reverting `transfer(account, …)` means the Aegis
+              // address is not (yet) an acceptable holder.
+              if (ts.rwa && ts.rwa.gate !== "open" && eoa) {
+                try {
+                  await pub.call({ account: eoa, to: t, data: encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [addr, eoaBal > 0n ? 1n : 0n] }) });
+                  ts.accepts = "yes";
+                } catch (e) {
+                  if (isTransportError(e)) { ts.accepts = "unknown"; ts.acceptsMsg = `rpc: ${revertReason(e)}`; }
+                  else { ts.accepts = "no"; ts.acceptsMsg = revertReason(e); }
+                }
+              } else if (ts.rwa && ts.rwa.gate !== "open") ts.accepts = "unknown";
+              toks[t] = ts;
             } catch { /* not an ERC-20 on this chain */ }
           }));
           if (cancelled) { fetched.current.delete(sig); return; }
@@ -173,7 +217,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       })();
     }
     return () => { cancelled = true; };
-  }, [id, tokens, wallet, refresh]);
+  }, [id, listed, withRwa, wallet, refresh]); // tokensFor is a pure function of `listed` and `withRwa`
 
   const walletPresent = typeof window !== "undefined" && !!detectInjected();
 
@@ -206,7 +250,14 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
       const wc = makeWalletClient(chain, w.account);
       const pub = makePublicClient(chain);
       const value = amount && Number(amount) > 0 ? parseEther(amount) : 0n;
-      const movable = tokens.filter((t) => (st?.tokens[t]?.eoa ?? 0n) > 0n);
+      const movable = tokensFor(chain.id).filter((t) => (st?.tokens[t]?.eoa ?? 0n) > 0n);
+      // A gated RWA token whose issuer has not registered the account would make
+      // deployAndMove revert as a whole; leave it in the wallet and say why.
+      const refused = movable.filter((t) => st?.tokens[t]?.accepts === "no");
+      if (refused.length) {
+        const r = st!.tokens[refused[0]];
+        throw new Error(`${r.symbol} will not accept the Aegis address as a holder (${r.acceptsMsg ?? "transfer reverts"}). Register ${ci.address} with ${r.rwa?.issuer ?? "the issuer"} first${r.rwa?.register ? `: ${r.rwa.register}` : ""}.`);
+      }
       let tx: Hex;
 
       if (st?.account === "deployed") {
@@ -367,6 +418,18 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
         if (!ts) throw new Error("token not loaded on this chain");
         target = spendAsset as Address;
         data = encodeFunctionData({ abi: erc20Abi, functionName: "transfer", args: [spendTo as Address, parseUnits(spendAmt || "0", ts.decimals)] });
+        // Simulate the inner call from the account before a leaf is spent on it.
+        // Gated RWA tokens refuse recipients their issuer has not registered; the
+        // signature would be consumed by a reverting execute, so stop here instead.
+        try {
+          await pub.call({ account, to: target, data });
+        } catch (e) {
+          if (isTransportError(e)) throw new Error(`could not simulate the transfer (${revertReason(e)}); try again before a leaf is used`);
+          const why = revertReason(e);
+          throw new Error(ts.rwa
+            ? `${ts.symbol} refuses this transfer (${why}). ${ts.rwa.gate === "open" ? "" : `${ts.rwa.issuer} must have registered the recipient ${spendTo}; ${gateText(ts.rwa.gate)}.`} No leaf was used.`
+            : `${ts.symbol} transfer would revert (${why}). No leaf was used.`);
+        }
       }
 
       // 2. Choose the leaf in this device's lane: never below the lane's nextIdx,
@@ -457,7 +520,8 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
           (a WOTS+ leaf signs one message, so no tree is ever shared between chains). Each tree's roots fix an account
           address on that chain through a CREATE2 factory that lives at the same address everywhere, so every address
           below is yours before anything is deployed. <strong>Protect</strong> creates the account and moves the native
-          coin and any ERC-20s you list into it in one transaction; NFTs can be sent to it with a normal safe transfer.{" "}
+          coin and any ERC-20s you list into it in one transaction — tokenised treasuries and gold included, with the
+          issuer's allowlist checked first; NFTs can be sent to it with a normal safe transfer.{" "}
           <strong>Spend</strong> moves anything back out with a hash-based signature; the browser wallet only relays and pays gas.
         </p>
       </div>
@@ -496,9 +560,21 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
               <span>ERC-20 tokens to move in (addresses, one per line)</span>
               <textarea rows={2} spellCheck={false} placeholder="0x… (USDC, WETH, any ERC-20 on that chain)" value={tokenText} onChange={(e) => setTokenText(e.target.value)} />
               <span className="hint">
-                {tokens.length === 0 ? "the whole balance of each token in your browser wallet is moved; approvals are requested as needed"
-                  : !wallet ? `${tokens.length} token${tokens.length > 1 ? "s" : ""} · connect a wallet (click any Protect) to read balances`
-                  : `${tokens.length} token${tokens.length > 1 ? "s" : ""} listed`}
+                {listed.length === 0 ? "the whole balance of each token in your browser wallet is moved; approvals are requested as needed"
+                  : !wallet ? `${listed.length} token${listed.length > 1 ? "s" : ""} · connect a wallet (click any Protect) to read balances`
+                  : `${listed.length} token${listed.length > 1 ? "s" : ""} listed`}
+              </span>
+            </label>
+            <label className="swap-amount protect-rwa">
+              <span>Tokenised real-world assets</span>
+              <span className="protect-rwa-toggle">
+                <input type="checkbox" checked={withRwa} onChange={(e) => setWithRwa(e.target.checked)} />
+                <span>include the known issuers' tokens on each chain: {RWA_TOKENS.map((t) => t.symbol).join(", ")}</span>
+              </span>
+              <span className="hint">
+                An Aegis account holds them like any ERC-20. Most are gated: the issuer's contract refuses holders it has not
+                registered, so each row below asks the token whether it accepts your Aegis address before anything is moved,
+                and Spend simulates the transfer before a leaf is used.
               </span>
             </label>
           </div>
@@ -519,6 +595,11 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
               else if (st.factory === "absent") status = st.proxy === "present" ? "factory not published here yet · your first Protect publishes it (one extra transaction)" : "no deterministic-deployment proxy on this chain";
               else status = st.balance && st.balance > 0n ? `address holds ${formatEther(st.balance)} ${sym}, account not deployed` : "ready";
               if (movable.length && st && !st.error) status += ` · wallet has ${movable.join(", ")}`;
+              // Gated RWA tokens on this chain: what the token said when asked whether the account may hold it.
+              const gated = st ? Object.values(st.tokens).filter((t) => t.rwa && t.rwa.gate !== "open") : [];
+              const rwaLine = gated.length
+                ? gated.map((t) => `${t.symbol}: ${t.accepts === "yes" ? "accepts this account" : t.accepts === "no" ? `refuses this account (${t.acceptsMsg ?? "transfer reverts"}) · register it at ${t.rwa!.register ?? t.rwa!.issuer}` : t.acceptsMsg ? `could not ask the token (${t.acceptsMsg})` : "connect a wallet to ask the token"}`).join(" · ")
+                : null;
               const busy = act.phase === "pending" || act.phase === "switching" || act.phase === "confirm";
               const canProtect = walletPresent && ci && st && !st.error && (st.factory === "present" || st.proxy === "present") && !busy;
               const label = act.phase === "switching" ? "switching…" : act.phase === "confirm" ? "confirm in wallet…" : act.phase === "pending" ? "pending…"
@@ -529,6 +610,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                     <span className="protect-name">{chain.name}</span>
                     {ci && <span className="protect-tx mono">{ci.address} <CopyBtn value={ci.address} /></span>}
                     <span className="protect-status">{status}</span>
+                    {rwaLine && <span className="protect-status protect-rwa-status" title={gated.map((t) => `${t.symbol} · ${t.rwa!.issuer} · ${gateText(t.rwa!.gate)}`).join("\n")}>RWA · {rwaLine}</span>}
                     {busy && act.step && <span className="protect-status">{act.step}</span>}
                     {act.phase === "error" && <span className="protect-err">{act.msg}</span>}
                     {act.tx && <span className="protect-tx mono">{shortAddr(act.tx)}</span>}
@@ -562,7 +644,7 @@ export default function ProtectPanel({ mnemonic }: { mnemonic: string }) {
                   <label><span>Asset</span>
                     <select value={spendAsset} onChange={(e) => setSpendAsset(e.target.value)} disabled={spendChain === ""}>
                       <option value="native">{spendChain === "" ? "native" : PROTECT_CHAINS.find((c) => c.id === spendChain)!.nativeCurrency.symbol}</option>
-                      {spendTokens.map(([a, t]) => <option key={a} value={a}>{t.symbol} · {formatUnits(t.account, t.decimals)}</option>)}
+                      {spendTokens.map(([a, t]) => <option key={a} value={a}>{t.symbol}{t.rwa ? ` (${t.rwa.issuer})` : ""} · {formatUnits(t.account, t.decimals)}</option>)}
                     </select>
                   </label>
                   <label><span>Recipient</span><input spellCheck={false} placeholder="0x…" value={spendTo} onChange={(e) => setSpendTo(e.target.value)} /></label>

@@ -27,6 +27,13 @@ import {
   type AccountState, type Flow, type Signer, type SolanaIdentity, type SpendStep,
 } from "../aegis/solanaAccount";
 import CopyBtn from "./CopyBtn";
+import { rwaBySolanaMint, gateText } from "../data/rwa";
+
+/** A mint's display name: the issuer's symbol for known tokenised real-world assets, the shortened key otherwise. */
+function mintLabel(mint: string): string {
+  const r = rwaBySolanaMint(mint);
+  return r ? `${r.symbol} (${r.issuer})` : shortKey(mint);
+}
 
 interface ChainView {
   programDeployed: boolean;
@@ -203,7 +210,7 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
                 <span className="protect-name">Vault (send SOL and tokens here, or use the wallet below)</span>
                 <span className="protect-tx mono">{vaultB58} <CopyBtn value={vaultB58} /></span>
                 <span className="protect-status">
-                  {view ? <>{sol(view.vault.lamports)} SOL{view.vault.tokens.map((t) => <span key={toBase58(t.address)}> · {formatAmount(t.amount, t.decimals)} <span className="mono">{shortKey(toBase58(t.mint))}</span></span>)}</> : viewErr ? <span className="protect-err">{viewErr}</span> : "reading…"}
+                  {view ? <>{sol(view.vault.lamports)} SOL{view.vault.tokens.map((t) => <span key={toBase58(t.address)}> · {formatAmount(t.amount, t.decimals)} <span className="mono">{mintLabel(toBase58(t.mint))}</span></span>)}</> : viewErr ? <span className="protect-err">{viewErr}</span> : "reading…"}
                   {" · "}<a href={EXPLORER(cluster, "address", vaultB58)} target="_blank" rel="noreferrer">explorer</a>
                 </span>
               </div>
@@ -260,11 +267,13 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
                     <div className="protect-rows">
                       {view.walletTokens.map((t) => {
                         const mint = toBase58(t.mint);
+                        const rwa = rwaBySolanaMint(mint);
                         return (
                           <div className="protect-row" key={toBase58(t.address)}>
                             <div className="protect-chain">
-                              <span className="protect-name">Token <span className="mono">{shortKey(mint)}</span>{t.tokenProgram === TOKEN_2022_PROGRAM ? " · Token-2022" : ""}</span>
+                              <span className="protect-name">{rwa ? <>{rwa.symbol} · {rwa.name}</> : <>Token <span className="mono">{shortKey(mint)}</span></>}{t.tokenProgram === TOKEN_2022_PROGRAM ? " · Token-2022" : ""}</span>
                               <span className="protect-status">wallet holds {formatAmount(t.amount, t.decimals)} · <a href={EXPLORER(cluster, "address", mint)} target="_blank" rel="noreferrer">mint</a></span>
+                              {rwa && rwa.gate !== "open" && <span className="protect-status protect-rwa-status">RWA · {rwa.issuer} · {gateText(rwa.gate)}; the vault's token account must be registered or the move fails before any leaf is used</span>}
                             </div>
                             <div style={{ display: "flex", gap: 6 }}>
                               <input type="text" placeholder="amount" style={{ width: 120 }} value={tokenAmts[mint] ?? ""} onChange={(e) => setTokenAmts({ ...tokenAmts, [mint]: e.target.value })} />
@@ -296,7 +305,7 @@ export default function SolanaPanel({ mnemonic }: { mnemonic: string }) {
                 <label><span>Asset</span>
                   <select value={spendAsset} onChange={(e) => setSpendAsset(e.target.value)}>
                     <option value="sol">SOL ({sol(view.vault.lamports)})</option>
-                    {view.vault.tokens.map((t) => <option key={toBase58(t.mint)} value={toBase58(t.mint)}>{shortKey(toBase58(t.mint))} ({formatAmount(t.amount, t.decimals)})</option>)}
+                    {view.vault.tokens.map((t) => <option key={toBase58(t.mint)} value={toBase58(t.mint)}>{mintLabel(toBase58(t.mint))} ({formatAmount(t.amount, t.decimals)})</option>)}
                   </select>
                 </label>
                 <label><span>Amount</span><input type="text" placeholder="0.01" value={spendAmt} onChange={(e) => setSpendAmt(e.target.value)} /></label>
