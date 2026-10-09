@@ -1,15 +1,35 @@
 # Aegis — Solana adapter (CCHS-C-20)
 
-**Status**: implemented, built and exercised in CI, not yet deployed. The
+**Status**: implemented, built and exercised in CI, deployable from CI. The
 verification core (`../cchs-core`, module `compact`) is CI-tested against the
 shared vectors in `evm/test/fixtures/cchs-c-20.json`; the Anchor program adds
 only the Solana digest, PDA layout and CPI dispatch. The `solana` job of
-`build.yml` builds the SBF program and replays the fixture life cycle through
-it in the BanksClient runtime, reporting compute units per instruction
-(`cu-test/tests/compute_units.rs`); see "Before deployment"
-for what is still open.
+`build.yml` builds the SBF program, uploads the ELF as an artifact and replays
+the fixture life cycle through it in the BanksClient runtime, reporting
+compute units per instruction (`cu-test/tests/compute_units.rs`).
 
-Spec: `../CCHS.spec.md`. Client reference: `../wallet/src/aegis/cchsCompact.ts`.
+Program id: `AoQ7c3GuxiF7nshFnM872FoxUz7oUDhygdhoRX6jMQKr` on every cluster
+(`declare_id!`, `Anchor.toml`). The manual workflow
+`.github/workflows/solana-deploy.yml` builds the ELF at the chosen commit and
+runs `solana program deploy` with the program and deployer keypairs held as
+repository secrets (`SOLANA_PROGRAM_KEYPAIR`, `SOLANA_DEPLOYER_KEYPAIR`); on
+devnet it funds the deployer from the faucet, on mainnet-beta the deployer
+must already hold the rent (about twice the ELF size in lamports). Mainnet-beta
+is not deployed. The wallet's Solana panel reads `getAccountInfo(program)` on
+the selected cluster and refuses to act where the program is absent.
+
+Client: `../wallet/src/aegis/solana.ts` (keys, PDAs, legacy/v0 messages,
+JSON-RPC, Wallet Standard connector, no Solana library) and
+`../wallet/src/aegis/solanaAccount.ts` (instruction encoding, state decoding,
+index records, the protect / spend / recover flows). `../wallet/scripts/solana-flow.mts`
+runs the whole life cycle against a live cluster with a local payer
+(`SOLANA_PAYER=keypair.json npm run solana-flow`): create + lookup table,
+SOL and SPL deposits (it mints a throwaway token), `cache_subtree`, three
+`execute`s including a token transfer to a recipient without a token
+account, `recover`, and an `execute` under the new epoch, printing every
+transaction's size and signature.
+
+Spec: `../CCHS.spec.md`. Signature client: `../wallet/src/aegis/cchsCompact.ts`.
 
 ## Why a second parameter set
 
@@ -250,7 +270,7 @@ is a `w = 128` variant (28 message chains + 2 checksum chains, 30 × 24 +
 10 × 24 = 960 bytes per layer, about half the chain steps), which still fits
 the packet.
 
-## Before deployment
+## Open items
 
 * The positive life cycle (`create` → `cache_subtree(0)` → `execute` × 3 →
   skip to leaf 5 → `cache_subtree(1)` → leaf 1024 → `recover`) runs against
@@ -262,9 +282,14 @@ the packet.
   hash output); the CI table extrapolates from the fixture ops. Confirm the
   stack budget of the fixed-array instruction arguments (~900 bytes) inside
   the 4 KB BPF frame (the CI run exercises it).
-* Devnet run with a real vault transfer through a v0 transaction and an
-  address lookup table; record the exact transaction sizes.
-* `anchor keys sync` to replace the placeholder program id.
+* A recorded devnet run of `wallet/scripts/solana-flow.mts` (real vault
+  transfers through the v0 transaction and the lookup table) with its
+  signatures pasted here. The client computes `execute` at 1 089 bytes for a
+  12-byte inner instruction and 1 239 as a legacy message, matching the table
+  above; `cache_subtree` with a compute-budget instruction stays legacy.
+* The lookup table is owned by the wallet that created the account (its
+  authority); a second wallet finds it from the account's first transaction
+  (`findTable`) or creates another one.
 
 ## Build
 

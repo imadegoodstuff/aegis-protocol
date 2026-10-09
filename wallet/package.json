@@ -12,6 +12,7 @@
     "index-discipline": "tsx scripts/check-index-discipline.mts",
     "btc": "tsx scripts/check-btc.mts",
     "btc-flow": "tsx scripts/btc-flow.mts",
+    "solana-flow": "tsx scripts/solana-flow.mts",
     "gen-fixtures": "tsx scripts/gen-fixtures.mts"
   },
   "dependencies": {

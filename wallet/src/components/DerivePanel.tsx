@@ -6,6 +6,7 @@ import PqSignDemo from "./PqSignDemo";
 import SwapPanel  from "./SwapPanel";
 import ProtectPanel from "./ProtectPanel";
 import BitcoinPanel from "./BitcoinPanel";
+import SolanaPanel from "./SolanaPanel";
 
 // BIP-39 test vector for 32 zero bytes of entropy: 24 words, 256 bits. A 12-word
 // phrase is accepted by the derivation demo but refused by the CCHS panel (§5.6 P4).
@@ -82,6 +83,7 @@ export default function DerivePanel() {
 
       {result && <ProtectPanel mnemonic={mnemonic} />}
       {result && <BitcoinPanel mnemonic={mnemonic} />}
+      {result && <SolanaPanel mnemonic={mnemonic} />}
       {result && <SwapPanel  mnemonic={mnemonic} />}
       {result && <PqSignDemo mnemonic={mnemonic} />}
 

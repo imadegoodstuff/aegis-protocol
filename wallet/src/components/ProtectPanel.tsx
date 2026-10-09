@@ -41,7 +41,7 @@ type RowAction = { phase: "idle" | "switching" | "confirm" | "pending" | "done" 
 type SpendState = { phase: "idle" | "reading" | "signing" | "confirm" | "pending" | "done" | "error" | "rotate" | "rotating" | "rotated"; msg?: string; tx?: Hex; bytes?: number; layers?: number; epoch?: number; nextIdx?: number; lane?: number };
 
 const NON_EVM = [
-  { name: "Solana", set: "C-20", status: "single-packet program in solana/: cache_subtree once per 1 024 operations, then one 864 B signature per execute (v0 tx with lookup table, 1 090 B); fixture-tested, not deployed" },
+  { name: "Solana", set: "C-20", status: "usable from the Solana panel below: create + lookup table, move SOL and any SPL / Token-2022 token (memecoins included) into the vault, spend with one 864 B signature per execute (v0 tx, 1 089 B); program id AoQ7c3…jMQKr, deployed by the solana-deploy workflow (devnet first; the panel checks the cluster), not on mainnet-beta" },
   { name: "TRON", set: "K-20 / S-20", status: "same contracts built for the TVM in tron/ (byte-identical init code, 0x41 CREATE2 predictor); not published on Nile or mainnet" },
   { name: "Osmosis · Injective · Neutron · Juno · Stargaze", set: "S-20", status: "CosmWasm contract in cosmwasm/, compiled in CI; not uploaded on any chain (Osmosis and Injective also require governance for code upload)" },
   { name: "NEAR", set: "S-20", status: "contract source in near/, compiled in CI; not deployed" },
