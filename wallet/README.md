@@ -38,3 +38,13 @@ npm run preview
 ## Deployment
 
 `Dockerfile` builds a static bundle and serves it on port 8080. `fly.toml` targets a `performance-1x` machine with `auto_stop = off` in `iad` and `sin`.
+
+The public origin is `https://aegisprotocol.si`; `index.html` forwards `aegis-wallet.fly.dev` and `www.aegisprotocol.si` to it, and the canonical, Open Graph, `robots.txt` and `sitemap.xml` URLs point there. Binding the domain is two steps outside the repository:
+
+```sh
+fly certs add aegisprotocol.si -a aegis-wallet
+fly certs add www.aegisprotocol.si -a aegis-wallet
+fly ips list -a aegis-wallet          # the A and AAAA records below
+```
+
+At the registrar: `A @ → <v4 address>`, `AAAA @ → <v6 address>`, `CNAME www → aegis-wallet.fly.dev`, plus the `_acme-challenge` CNAME that `fly certs show aegisprotocol.si` prints if the certificate does not issue on its own. `fly certs check aegisprotocol.si` confirms issuance.
