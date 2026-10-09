@@ -172,7 +172,7 @@ call or recompute it client-side from the layout above.
 
 ```bash
 sui move build
-sui move test
+sui move test --gas-limit 1000000000000   # the end-to-end tests build a real hypertree
 ```
 
 Tests (`#[test]` in the module):

@@ -105,7 +105,8 @@ jobs:
           echo "$(dirname "$SUI_BIN")" >> "$GITHUB_PATH"
       - run: sui --version
       - run: sui move build
-      - run: sui move test
+      # the end-to-end tests build a real hypertree; the default unit-test gas limit is far too small
+      - run: sui move test --gas-limit 1000000000000
 
   cairo:
     name: Starknet (Cairo, Scarb 2.8.5)
@@ -146,7 +147,7 @@ jobs:
       - run: cargo check -p aegis_account --features no-entrypoint
       - name: Install Anza toolchain
         run: |
-          sh -c "$(curl -sSfL https://release.anza.xyz/v2.1.21/install)"
+          sh -c "$(curl -sSfL https://release.anza.xyz/stable/install)"
           echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
       - run: cargo build-sbf --manifest-path programs/aegis_account/Cargo.toml
       - run: ls -l target/deploy/aegis_account.so
